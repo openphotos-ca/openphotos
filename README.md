@@ -1,16 +1,40 @@
 # OpenPhotos 
 
+[**Try The Demo**](https://demo.openphotos.ca)
+
 **Open Source • Self-Hosted • Privacy-First**  
 **Your Photos. Your Keys. Your Album Tree.**
 
 OpenPhotos is a self-hosted photo platform with locked albums (E2EE), nested albums, AI-powered discovery, and resumable uploads.
+
+## Demo
+
+Access the demo here: [https://demo.openphotos.ca](https://demo.openphotos.ca)
+
+For the mobile app, use `https://demo.openphotos.ca` for the Server Endpoint URL.
+
+### Login Credentials
+
+| Email | Password |
+| --- | --- |
+| `demo@openphotos.ca` | `demo` |
 
 ## What's Included
 
 - Rust server binaries: `openphotos` + TUS sidecar `rustus`
 - Static web app: `web-photos`
 
-## Build Non-EE Server (No Installer)
+## Download Models (Before Build)
+
+GitHub source uploads do not include large model binaries. Download runtime models first:
+
+```bash
+./download_models.sh
+```
+
+This populates required runtime files under `models/` (CLIP + face models).
+
+## Build Server (No Installer)
 
 ### macOS (native build)
 
@@ -59,3 +83,57 @@ Build output:
 
 - `web-photos/out`
 
+## Start Servers (macOS, Linux, Windows)
+
+Run these from the repository root after models are downloaded.
+
+### macOS
+
+```bash
+./start.sh
+```
+
+### Linux
+
+```bash
+./start.sh
+```
+
+### Windows (PowerShell)
+
+1. Build binaries:
+
+```powershell
+cargo build --release --locked --no-default-features
+cargo build --release --locked --manifest-path rustus/Cargo.toml --bin rustus
+```
+
+2. Start Rustus (Terminal 1):
+
+```powershell
+$env:RUSTUS_SERVER_HOST="127.0.0.1"
+$env:RUSTUS_SERVER_PORT="1081"
+$env:RUSTUS_URL="/files"
+$env:RUSTUS_DATA_DIR="$PWD\data\uploads"
+$env:RUSTUS_INFO_DIR="$PWD\data\uploads"
+$env:RUSTUS_TUS_EXTENSIONS="creation,termination,creation-with-upload,creation-defer-length,concatenation,checksum"
+$env:RUSTUS_MAX_BODY_SIZE="52428800"
+$env:RUSTUS_HOOKS="pre-create,post-finish"
+$env:RUSTUS_HOOKS_FORMAT="v2"
+$env:RUSTUS_HOOKS_HTTP_URLS="http://127.0.0.1:3003/api/upload/hooks"
+$env:RUSTUS_HOOKS_HTTP_PROXY_HEADERS="Authorization,X-Request-ID,Cookie"
+$env:RUSTUS_LOG_LEVEL="INFO"
+New-Item -ItemType Directory -Force -Path "$PWD\data\uploads" | Out-Null
+.\rustus\target\release\rustus.exe
+```
+
+3. Start OpenPhotos (Terminal 2):
+
+```powershell
+.\target\release\openphotos.exe --model-path models --database data --log-level info
+```
+
+Health checks:
+
+- `http://127.0.0.1:3003/ping` (OpenPhotos API)
+- `http://127.0.0.1:1081/health` (Rustus)
