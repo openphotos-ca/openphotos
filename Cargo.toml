@@ -1,0 +1,144 @@
+[package]
+name = "albumbud"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "albumbud"
+path = "src/lib.rs"
+
+[[bin]]
+name = "openphotos"
+path = "src/main.rs"
+
+[[bin]]
+name = "yolo-detector"
+path = "src/yolo_detector_main.rs"
+
+[dependencies]
+# HTTP Server
+axum = { version = "0.7", features = ["multipart", "macros"] }
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors", "trace", "limit", "fs", "timeout"] }
+
+# Machine Learning
+ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+ndarray = "0.16"
+
+# Database
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+# Image processing
+image = { version = "0.24", features = ["jpeg", "png", "gif", "webp", "bmp", "tiff", "avif"] }
+webp = "0.2"
+img_hash = "3.2"
+
+# Face processing
+face-normalizer = { path = "face-normalizer" }
+
+# Utilities
+anyhow = "1.0"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-log = "0.1"
+log = "0.4"
+once_cell = "1.19"
+parking_lot = "0.12"
+base64 = "0.13"
+bs58 = "0.5"
+md5 = "0.7"
+blake3 = "1.5"
+hmac = "0.12"
+rand = "0.8"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+
+# Search
+tantivy = { version = "0.22", default-features = true }
+serde_with = "3.8"
+
+
+# Authentication
+jsonwebtoken = "9.3"
+bcrypt = "0.15"
+argon2 = "0.5"
+oauth2 = "4.4"
+reqwest = { version = "0.12", features = ["json"] }
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+http-body-util = "0.1"
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "http2", "tokio"] }
+
+# EXIF and metadata
+kamadak-exif = "0.5"
+sha2 = "0.10"
+walkdir = "2.5"
+filetime = "0.2"
+
+# Async utilities
+async-trait = "0.1"
+futures = "0.3"
+tokio-stream = { version = "0.1", features = ["sync", "time"] }
+
+# TUS resumable upload protocol
+tus = "2.0.0-rc1.0"
+
+# Face processing (now integrated)
+imageproc = "0.23"
+nalgebra = "0.32"
+
+# Configuration
+dotenvy = "0.15"
+clap = { version = "4.5", features = ["derive", "env"] }
+
+# ---- Target-specific native deps ----
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+duckdb = { version = "1.3", features = ["bundled"] }
+# Vendored OpenSSL simplifies Linux builds (no system libssl required).
+openssl = { version = "0.10", features = ["vendored"] }
+openssl-sys = { version = "0.9", features = ["vendored"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# For Windows builds we link against the official prebuilt libduckdb package.
+# The build script expects DUCKDB_LIB_DIR and DUCKDB_INCLUDE_DIR to be set (see `start.sh --build-windows`).
+duckdb = { version = "1.3" }
+
+
+[dependencies.ffmpeg-next]
+version = "7"
+default-features = false
+features = ["format", "codec", "software-scaling", "resampling", "build"]
+optional = true
+
+[dependencies.libheif-sys]
+version = "1.16.2"
+optional = true
+
+[features]
+default = []
+ffmpeg-inprocess = ["ffmpeg-next"]
+libheif_ffi = ["libheif-sys"]
+gpu = ["ort/cuda", "face-normalizer/gpu"]
+
+# Optional: enable Jieba CJK tokenizer support with `--features jieba`
+jieba = ["dep:tantivy-jieba"]
+
+# Enterprise feature flag: multi-tenant, org login, team management, etc.
+ee = []
+
+[dependencies.tantivy-jieba]
+version = "0.13"
+optional = true
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

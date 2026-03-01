@@ -1,0 +1,257 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 100%;
+    --foreground: 222.2 84% 4.9%;
+    --card: 0 0% 100%;
+    --card-foreground: 222.2 84% 4.9%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222.2 84% 4.9%;
+    /* Backdrop/overlay surface (light) */
+    --overlay: 0 0% 100%;
+    --primary: 221.2 83.2% 53.3%;
+    --primary-foreground: 210 40% 98%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222.2 84% 4.9%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215.4 16.3% 46.9%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222.2 84% 4.9%;
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 214.3 31.8% 91.4%;
+    --input: 214.3 31.8% 91.4%;
+    --ring: 221.2 83.2% 53.3%;
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222.2 84% 4.9%;
+    --foreground: 210 40% 98%;
+    /* Slightly lift card/popover surfaces above the app background */
+    --card: 222.2 84% 8%;
+    --card-foreground: 210 40% 98%;
+    --popover: 222.2 84% 7.5%;
+    --popover-foreground: 210 40% 98%;
+    /* Backdrop/overlay surface (dark) — a touch darker than background */
+    --overlay: 222.2 84% 3.5%;
+    --primary: 217.2 91.2% 59.8%;
+    --primary-foreground: 222.2 84% 4.9%;
+    --secondary: 217.2 32.6% 17.5%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217.2 32.6% 17.5%;
+    --muted-foreground: 215 20.2% 65.1%;
+    --accent: 217.2 32.6% 17.5%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 62.8% 30.6%;
+    --destructive-foreground: 210 40% 98%;
+    --border: 217.2 32.6% 17.5%;
+    --input: 217.2 32.6% 17.5%;
+    --ring: 224.3 76.3% 94.1%;
+  }
+
+  /* Accent overrides */
+  [data-accent="blue"] {
+    /* default already blue; no overrides needed */
+  }
+  .dark[data-accent="blue"] {
+    /* default dark already blue; no overrides needed */
+  }
+
+  [data-accent="indigo"] {
+    --primary: 243.4 75.4% 58.6%;
+    --ring: 243.4 75.4% 58.6%;
+  }
+  .dark[data-accent="indigo"] {
+    --primary: 243.4 75.4% 62%;
+    --ring: 243.4 75.4% 62%;
+  }
+
+  [data-accent="purple"] {
+    --primary: 270 91% 60%;
+    --ring: 270 91% 60%;
+  }
+  .dark[data-accent="purple"] {
+    --primary: 270 91% 65%;
+    --ring: 270 91% 65%;
+  }
+
+  [data-accent="emerald"] {
+    --primary: 160.1 84.1% 39.4%;
+    --ring: 160.1 84.1% 39.4%;
+  }
+  .dark[data-accent="emerald"] {
+    --primary: 160.1 84.1% 42%;
+    --ring: 160.1 84.1% 42%;
+  }
+}
+
+/* ---- Uppy UI tweaks ---- */
+/* Keep "+" icon and "Add more" on the same line in the Dashboard header */
+.uppy-DashboardContent-bar .uppy-DashboardContent-addMore {
+  display: inline-flex !important;
+  align-items: center;
+  white-space: nowrap;
+  gap: 4px;
+}
+.uppy-DashboardContent-bar .uppy-DashboardContent-addMore svg {
+  margin: 0 4px 0 0 !important;
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  /* Ensure form controls honor theme tokens in both light/dark */
+  input, select, textarea {
+    @apply bg-background text-foreground;
+  }
+  input::placeholder, textarea::placeholder {
+    @apply text-muted-foreground;
+  }
+  /* Make plain buttons inherit readable text color by default */
+  button { @apply text-foreground; }
+}
+
+/* Photo grid custom styles */
+.photo-grid {
+  display: grid;
+  gap: 0.5rem;
+  padding: 1rem;
+}
+
+.photo-card {
+  position: relative;
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: transform 0.2s ease-in-out;
+}
+
+.photo-card:hover {
+  transform: scale(1.02);
+}
+
+.photo-card img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.photo-card-selected {
+  @apply ring-4 ring-primary;
+}
+
+.live-photo-indicator {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  background: rgba(0, 0, 0, 0.7);
+  color: white;
+  border-radius: 50%;
+  width: 1.5rem;
+  height: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+}
+
+/* Fullscreen viewer */
+.fullscreen-viewer {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  /* Respect theme tokens with slight translucency */
+  background: hsl(var(--background) / 0.95);
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.fullscreen-image {
+  max-width: 90vw;
+  max-height: 100vh;
+  object-fit: contain;
+  display: block;
+}
+
+/* Custom scrollbar */
+.custom-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: hsl(var(--muted-foreground)) hsl(var(--muted));
+}
+
+.custom-scrollbar::-webkit-scrollbar {
+  width: 8px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: hsl(var(--muted));
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted-foreground));
+  border-radius: 4px;
+}
+
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--foreground));
+}
+
+/* Subtle chip appear animation */
+@keyframes chip-pop-keyframes {
+  0% {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.chip-pop {
+  animation: chip-pop-keyframes 160ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chip-pop {
+    animation: none;
+  }
+}
+
+/* Hide scrollbars utility (for horizontal chip rows) */
+.no-scrollbar {
+  -ms-overflow-style: none; /* IE and Edge */
+  scrollbar-width: none; /* Firefox */
+}
+.no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* Tree connectors for album picker */
+.tree, .tree ul {
+  position: relative;
+  margin: 0;
+  padding-left: 1rem; /* base indent */
+}
+.tree > li { list-style: none; }
+.tree > li::before { content: none; }
+.tree ul {
+  margin-left: 0.25rem;
+}
+.tree ul:before { content: none; }
+.tree li { position: relative; list-style: none; padding: 0; }
+.tree .tree-row { position: relative; padding-left: 1.2rem; }
+.tree .tree-row:before { content: none; }
+.tree > li > .tree-row:before { content: none; }
+.tree li:last-child::after { content: none; }

@@ -1,0 +1,59 @@
+[package]
+name = "face-normalizer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# ONNX Runtime for model inference
+# Align ONNX Runtime with server crate to avoid duplicate/ABI-mismatched ORT in one process
+ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
+
+# Image processing
+image = { version = "0.24", features = ["jpeg", "png"] }
+imageproc = "0.23"
+
+# Numerical computations
+ndarray = { version = "0.16", features = ["serde"] }
+nalgebra = "0.32"
+
+# For YOLO detection
+tracing = "0.1"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# File system operations
+glob = "0.3"
+walkdir = "2.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# Download models
+reqwest = { version = "0.11", features = ["blocking"] }
+tokio = { version = "1.0", features = ["full"] }
+
+# EXIF data reading
+kamadak-exif = "0.5"
+
+[lib]
+name = "face_normalizer"
+path = "src/lib.rs"
+
+[[bin]]
+name = "face-normalizer"
+path = "src/main.rs"
+
+[[bin]]
+name = "face-clustering"
+path = "src/face_clustering_main.rs"
+
+[features]
+default = []
+gpu = ["ort/cuda"]
