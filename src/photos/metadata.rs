@@ -188,10 +188,26 @@ pub fn open_image_any(path: &Path) -> Result<DynamicImage> {
 }
 
 /// Get the application-wide ML cache directory (for HEIC/HEIF/AVIF -> JPG proxies).
-/// Default: data/cache/ml
+/// Default: `<DATABASE_PATH>/cache/ml` when `DATABASE_PATH` is set, else `data/cache/ml`.
 pub fn ml_cache_dir() -> std::path::PathBuf {
-    let base = std::path::Path::new("data").join("cache").join("ml");
-    let _ = std::fs::create_dir_all(&base);
+    let base = std::env::var_os("DATABASE_PATH")
+        .and_then(|v| {
+            if v.is_empty() {
+                None
+            } else {
+                Some(std::path::PathBuf::from(v))
+            }
+        })
+        .unwrap_or_else(|| std::path::PathBuf::from("data"))
+        .join("cache")
+        .join("ml");
+    if let Err(e) = std::fs::create_dir_all(&base) {
+        warn!(
+            "[ML_CACHE] Failed to create cache dir {}: {}",
+            base.display(),
+            e
+        );
+    }
     base
 }
 
@@ -259,7 +275,12 @@ pub fn ensure_heic_ml_proxy(path: &Path, max_width: u32) -> Result<std::path::Pa
         rgb.height(),
         image::ColorType::Rgb8,
     )?;
-    std::fs::write(&out_path, &buf)?;
+    std::fs::write(&out_path, &buf).with_context(|| {
+        format!(
+            "Failed to write HEIC/AVIF ML proxy JPG to {}",
+            out_path.display()
+        )
+    })?;
 
     Ok(out_path)
 }
