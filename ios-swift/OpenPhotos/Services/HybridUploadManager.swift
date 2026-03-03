@@ -41,7 +41,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private let exportSemaphore = DispatchSemaphore(value: 3)
     private let exportResultsQueue = DispatchQueue(label: "hybrid.export.results")
     private let exportBatchSize: Int = 8
+    private let maxPendingTusBeforeNextExportBatch: Int = 24
+    private let exportBackpressurePollSeconds: TimeInterval = 0.5
     private let minFreeSpaceBytes: Int64 = 500 * 1024 * 1024 // 500 MB threshold
+    private let uploadTempDirectoryName = "openphotos-upload"
     // Sync activity tracking (prevents overlapping sync runs)
     private let activityQueue = DispatchQueue(label: "hybrid.activity.queue")
     private var activeExportBatches: Int = 0
@@ -115,6 +118,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         keepScreenOn = UserDefaults.standard.bool(forKey: Self.keepScreenOnDefaultsKey)
         IdleTimerManager.shared.setDisabled(keepScreenOn)
         setupBackgroundSession()
+        cleanupOrphanedUploadTempArtifactsOnLaunch()
         pathMonitor.pathUpdateHandler = { [weak self] path in
             self?.isExpensiveNetwork = path.isExpensive
             self?.isNetworkAvailable = (path.status == .satisfied)
@@ -142,6 +146,110 @@ final class HybridUploadManager: NSObject, ObservableObject {
         }
         // Network policy is applied per-task using allowsExpensiveNetworkAccess & allowsConstrainedNetworkAccess on iOS 13+
         bgSession = URLSession(configuration: config, delegate: self, delegateQueue: nil)
+    }
+
+    private func uploadTempDirectoryURL() -> URL {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(uploadTempDirectoryName, isDirectory: true)
+        if !FileManager.default.fileExists(atPath: dir.path) {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir
+    }
+
+    private func uploadTempFileURL(name: String) -> URL {
+        uploadTempDirectoryURL().appendingPathComponent(name)
+    }
+
+    private func pendingTusCount() -> Int {
+        tusQueue.sync { pendingTus.count }
+    }
+
+    private func continueProcessBatchWhenBacklogAllows(assets: [PHAsset], startIndex: Int) {
+        if isStopForResyncRequested() { return }
+        let pending = pendingTusCount()
+        if pending >= maxPendingTusBeforeNextExportBatch {
+            print("[SYNC-UPLOAD] Backpressure: pendingTus=\(pending) >= \(maxPendingTusBeforeNextExportBatch); waiting to export next batch")
+            DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + exportBackpressurePollSeconds) { [weak self] in
+                self?.continueProcessBatchWhenBacklogAllows(assets: assets, startIndex: startIndex)
+            }
+            return
+        }
+        processBatch(assets: assets, startIndex: startIndex)
+    }
+
+    private func activeBackgroundBodyNames(from tasks: [URLSessionTask]) -> Set<String> {
+        var names: Set<String> = []
+        for task in tasks {
+            guard let desc = task.taskDescription else { continue }
+            let comps = desc.split(separator: "|", omittingEmptySubsequences: false)
+            if comps.count >= 2 {
+                let body = String(comps[1])
+                if !body.isEmpty { names.insert(body) }
+            }
+        }
+        return names
+    }
+
+    private func isLegacyUploadArtifactName(_ name: String) -> Bool {
+        if name.hasSuffix(".multipart") { return true }
+        guard let idx = name.firstIndex(of: "_") else { return false }
+        let prefix = String(name[..<idx])
+        return UUID(uuidString: prefix) != nil
+    }
+
+    private func cleanupUploadTempArtifacts(keepBodyNames: Set<String>) -> (removedCount: Int, removedBytes: Int64) {
+        let fm = FileManager.default
+        var removedCount = 0
+        var removedBytes: Int64 = 0
+
+        func removeIfNeeded(_ url: URL) {
+            let name = url.lastPathComponent
+            if keepBodyNames.contains(name) { return }
+            let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+            do {
+                try fm.removeItem(at: url)
+                removedCount += 1
+                removedBytes += size
+            } catch {
+                // best effort
+            }
+        }
+
+        // New scoped temp directory for upload artifacts.
+        let scopedDir = uploadTempDirectoryURL()
+        if let scopedFiles = try? fm.contentsOfDirectory(at: scopedDir, includingPropertiesForKeys: nil) {
+            for url in scopedFiles {
+                removeIfNeeded(url)
+            }
+        }
+
+        // Legacy cleanup from root tmp used by previous app versions.
+        let legacyTmp = fm.temporaryDirectory
+        if let legacyFiles = try? fm.contentsOfDirectory(at: legacyTmp, includingPropertiesForKeys: nil) {
+            for url in legacyFiles where isLegacyUploadArtifactName(url.lastPathComponent) {
+                removeIfNeeded(url)
+            }
+        }
+
+        return (removedCount, removedBytes)
+    }
+
+    private func cleanupOrphanedUploadTempArtifactsOnLaunch() {
+        guard let bgSession else {
+            let cleaned = cleanupUploadTempArtifacts(keepBodyNames: [])
+            if cleaned.removedCount > 0 {
+                print("[UPLOAD] Startup cleanup removed \(cleaned.removedCount) temp artifact(s), bytes=\(cleaned.removedBytes)")
+            }
+            return
+        }
+        bgSession.getAllTasks { [weak self] tasks in
+            guard let self else { return }
+            let keep = self.activeBackgroundBodyNames(from: tasks)
+            let cleaned = self.cleanupUploadTempArtifacts(keepBodyNames: keep)
+            if cleaned.removedCount > 0 {
+                print("[UPLOAD] Startup cleanup removed \(cleaned.removedCount) orphan temp artifact(s), bytes=\(cleaned.removedBytes)")
+            }
+        }
     }
 
     // Enumerate active background tasks for debug UI
@@ -222,7 +330,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     self.items.append(contentsOf: uploadable)
                 }
                 self.enqueueTus(uploadable)
-                self.processBatch(assets: assets, startIndex: end)
+                self.continueProcessBatchWhenBacklogAllows(assets: assets, startIndex: end)
             }
         }
     }
@@ -612,7 +720,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         // Snapshot favorite flag from the asset (PhotoKit objects are thread-safe)
         let favFlag = asset.isFavorite
 
-        let tmpDir = FileManager.default.temporaryDirectory
+        let tmpDir = uploadTempDirectoryURL()
         var destURL = tmpDir.appendingPathComponent(UUID().uuidString + "_" + filename)
         // Key for tracking iCloud download state and cancellation
         let key = asset.localIdentifier + "|" + filename
@@ -884,7 +992,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 )
 
                 // Encrypt original to .pae3
-                let outOrig = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".pae3")
+                let outOrig = self.uploadTempFileURL(name: UUID().uuidString + ".pae3")
                 var origAssetIdB58: String? = nil
                 var lockedBatchItems: [UploadItem] = []
                 do {
@@ -921,7 +1029,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 if let t = isVideo ? self.generateVideoThumbnail(url: plainURL) : self.generateImageThumbnail(url: plainURL, maxDim: 512) {
                     var tMeta = headerMeta; tMeta["kind"] = .string("thumb")
                     var tTus = tusLockedMeta; tTus["mime_hint"] = "image/jpeg"; tTus["width"] = String(t.width); tTus["height"] = String(t.height); tTus["size_kb"] = String(max(1, Int(round(Double(t.size)/1024.0))))
-                    let outT = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "_t.pae3")
+                    let outT = self.uploadTempFileURL(name: UUID().uuidString + "_t.pae3")
                     do {
                         let infoT = try pae3EncryptFileReturningInfo(umk: umk, userIdKey: Data(userId.utf8), input: t.url, output: outT, headerMetadata: tMeta, chunkSize: 256 * 1024)
                         let assetIdForThumb = origAssetIdB58 ?? infoT.assetIdB58
@@ -1093,7 +1201,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let cgOriented = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
-        let destURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
+        let destURL = uploadTempFileURL(name: UUID().uuidString + ".jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         let encProps: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
         CGImageDestinationAddImage(dest, cgOriented, encProps as CFDictionary)
@@ -1115,7 +1223,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
-        let destURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "_thumb.jpg")
+        let destURL = uploadTempFileURL(name: UUID().uuidString + "_thumb.jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(dest, thumb, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
@@ -1130,7 +1238,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         let dur = CMTimeGetSeconds(asset.duration)
         let time = CMTime(seconds: max(0.1, dur / 2.0), preferredTimescale: 600)
         guard let cg = try? gen.copyCGImage(at: time, actualTime: nil) else { return nil }
-        let destURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + "_thumb.jpg")
+        let destURL = uploadTempFileURL(name: UUID().uuidString + "_thumb.jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
@@ -1478,7 +1586,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         req.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
 
         // Create body temp file
-        let bodyURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".multipart")
+        let bodyURL = uploadTempFileURL(name: UUID().uuidString + ".multipart")
         FileManager.default.createFile(atPath: bodyURL.path, contents: nil, attributes: nil)
 
         guard let handle = try? FileHandle(forWritingTo: bodyURL), let inHandle = try? FileHandle(forReadingFrom: item.tempFileURL) else { return }
@@ -1607,18 +1715,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
             }
         }
 
-        // Remove any lingering multipart body files
-        let tmp = fm.temporaryDirectory
-        if let entries = try? fm.contentsOfDirectory(at: tmp, includingPropertiesForKeys: nil) {
-            for url in entries where url.lastPathComponent.hasSuffix(".multipart") {
-                let size = (try? fm.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
-                do {
-                    try fm.removeItem(at: url)
-                    removedCount += 1
-                    removedBytes += size
-                } catch { }
-            }
-        }
+        let cleaned = cleanupUploadTempArtifacts(keepBodyNames: [])
+        removedCount += cleaned.removedCount
+        removedBytes += cleaned.removedBytes
 
         return (removedCount, removedBytes)
     }
@@ -1732,7 +1831,10 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         let assetIdFromDescRaw = comps.count >= 8 ? String(comps[7]) : nil
         let assetIdFromDesc = (assetIdFromDescRaw?.isEmpty == false) ? assetIdFromDescRaw : nil
         let maxAttempts = 3
-        let bodyURL = FileManager.default.temporaryDirectory.appendingPathComponent(bodyName)
+        let scopedBodyURL = uploadTempFileURL(name: bodyName)
+        let bodyURL = FileManager.default.fileExists(atPath: scopedBodyURL.path)
+            ? scopedBodyURL
+            : FileManager.default.temporaryDirectory.appendingPathComponent(bodyName)
         let statusCode = (task.response as? HTTPURLResponse)?.statusCode
         let statusCodeStr = statusCode.map(String.init) ?? "(none)"
         let errStr = error?.localizedDescription ?? "(none)"
