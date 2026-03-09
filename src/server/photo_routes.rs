@@ -3597,15 +3597,69 @@ pub async fn serve_image(
             return Ok((StatusCode::NOT_FOUND, "not found").into_response());
         }
         if is_locked {
-            // Serve encrypted container bytes (no Range, generic content type)
-            let bytes = tokio::fs::read(&path).await.map_err(|e| {
-                anyhow::anyhow!("Failed to read encrypted container {}: {}", path, e)
+            // Serve encrypted container bytes (no Range, generic content type).
+            // Some rows can hold stale `photos.path`; probe canonical orig and
+            // locked thumbnail paths as fallbacks before returning 500.
+            let db_path = std::path::PathBuf::from(&path);
+            let fallback_orig = state.locked_original_path_for(&user.user_id, &asset_id);
+            let fallback_thumb = state.locked_thumb_path_for(&user.user_id, &asset_id);
+            let mut candidates: Vec<(std::path::PathBuf, &'static str)> = Vec::with_capacity(3);
+            candidates.push((
+                db_path.clone(),
+                if path.ends_with("_t.pae3") {
+                    "db-path-thumb"
+                } else {
+                    "db-path-orig"
+                },
+            ));
+            if fallback_orig != db_path {
+                candidates.push((fallback_orig.clone(), "fallback-orig"));
+            }
+            if fallback_thumb != db_path && fallback_thumb != fallback_orig {
+                candidates.push((fallback_thumb.clone(), "fallback-thumb"));
+            }
+
+            let mut locked_source = "db-path-orig";
+            let mut bytes: Option<Vec<u8>> = None;
+            let mut failure_notes: Vec<String> = Vec::with_capacity(candidates.len());
+            for (candidate, source) in candidates {
+                match tokio::fs::read(&candidate).await {
+                    Ok(b) => {
+                        locked_source = source;
+                        bytes = Some(b);
+                        break;
+                    }
+                    Err(err) => {
+                        failure_notes.push(format!("{}: {} ({})", source, candidate.display(), err));
+                    }
+                }
+            }
+            let bytes = bytes.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Failed to read encrypted container for asset {}. {}",
+                    asset_id,
+                    failure_notes.join(" | ")
+                )
             })?;
+            if locked_source != "db-path-orig" && locked_source != "db-path-thumb" {
+                tracing::warn!(
+                    "[IMAGE] Serving locked asset via fallback source (asset_id={}, source={}, db_path={})",
+                    asset_id,
+                    locked_source,
+                    path
+                );
+            }
             let mut headers_map = HeaderMap::new();
             headers_map.insert(
                 header::CONTENT_TYPE,
                 axum::http::HeaderValue::from_static("application/octet-stream"),
             );
+            if let Ok(hv) = axum::http::HeaderValue::from_str(locked_source) {
+                headers_map.insert(
+                    header::HeaderName::from_static("x-locked-source"),
+                    hv,
+                );
+            }
             return Ok((headers_map, bytes).into_response());
         }
         // Decide on-the-fly AVIF for HEIC if requested or non-Safari

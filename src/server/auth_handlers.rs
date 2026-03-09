@@ -296,7 +296,13 @@ pub async fn refresh(
     headers: HeaderMap,
     maybe_body: Option<Json<RefreshRequest>>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Try cookie/body refresh token first
+    // Prefer the explicit bearer token when present so a stale refresh cookie
+    // cannot silently switch the active account.
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "));
+
     let mut refresh_from_cookie: Option<String> = None;
     if let Some(cookie_hdr) = headers.get(header::COOKIE).and_then(|v| v.to_str().ok()) {
         for part in cookie_hdr.split(';') {
@@ -311,19 +317,13 @@ pub async fn refresh(
         .as_ref()
         .and_then(|Json(b)| b.refresh_token.clone());
 
-    let (access, new_refresh, user) = if let Some(rt) = refresh_body.or(refresh_from_cookie) {
-        // Standard path: rotate using refresh token
-        state.auth_service.refresh_with_token(&rt).await?
-    } else {
-        // Fallback: if a valid access token is provided, rotate from it
-        if let Some(bearer) = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|h| h.to_str().ok())
-            .and_then(|h| h.strip_prefix("Bearer "))
-        {
-            match state.auth_service.rotate_from_access(bearer).await {
-                Ok(tuple) => tuple,
-                Err(_) => {
+    let (access, new_refresh, user) = if let Some(bearer) = bearer {
+        match state.auth_service.rotate_from_access(bearer).await {
+            Ok(tuple) => tuple,
+            Err(_) => {
+                if let Some(rt) = refresh_body.or(refresh_from_cookie) {
+                    state.auth_service.refresh_with_token(&rt).await?
+                } else {
                     return Ok((
                         StatusCode::UNAUTHORIZED,
                         Json(json!({"error":"unauthorized","status":401})),
@@ -331,13 +331,15 @@ pub async fn refresh(
                         .into_response());
                 }
             }
-        } else {
-            return Ok((
-                StatusCode::UNAUTHORIZED,
-                Json(json!({"error":"unauthorized","status":401})),
-            )
-                .into_response());
         }
+    } else if let Some(rt) = refresh_body.or(refresh_from_cookie) {
+        state.auth_service.refresh_with_token(&rt).await?
+    } else {
+        return Ok((
+            StatusCode::UNAUTHORIZED,
+            Json(json!({"error":"unauthorized","status":401})),
+        )
+            .into_response());
     };
 
     // Set cookies (rotate both)
@@ -395,14 +397,28 @@ pub async fn logout(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
-    // Extract token from Authorization header
+    // Best-effort: clear cookies even when the access token is already gone.
     let token = headers
         .get(header::AUTHORIZATION)
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.strip_prefix("Bearer "))
-        .ok_or_else(|| anyhow::anyhow!("Missing authorization token"))?;
+        .map(|s| s.to_string())
+        .or_else(|| {
+            headers
+                .get(header::COOKIE)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|cookie_hdr| {
+                    cookie_hdr.split(';').find_map(|part| {
+                        part.trim()
+                            .strip_prefix("auth-token=")
+                            .map(|val| val.to_string())
+                    })
+                })
+        });
 
-    state.auth_service.logout(token).await?;
+    if let Some(token) = token.as_deref() {
+        let _ = state.auth_service.logout(token).await;
+    }
 
     // Clear auth cookies
     let mut h = HeaderMap::new();
@@ -1841,6 +1857,7 @@ fn index_folder_recursively(
                             &embedding_store,
                             &path,
                             &user_id,
+                            None,
                         )
                         .await
                         {
@@ -1925,6 +1942,7 @@ fn index_folder_recursively(
                             &embedding_store,
                             &path,
                             &user_id,
+                            None,
                         )
                         .await
                         {
@@ -2004,6 +2022,7 @@ fn index_folder_recursively(
                             &embedding_store,
                             &path,
                             &user_id,
+                            None,
                         )
                         .await
                         {
@@ -2491,6 +2510,7 @@ pub(crate) async fn index_single_photo_for_user(
     embedding_store: &Arc<crate::database::embeddings::EmbeddingStore>,
     image_path: &std::path::Path,
     user_id: &str,
+    forced_asset_id: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     use image::GenericImageView;
     tracing::info!("[REINDEX] Begin index file {:?}", image_path);
@@ -2502,9 +2522,6 @@ pub(crate) async fn index_single_photo_for_user(
         .into());
     }
     let t_all = std::time::Instant::now();
-
-    // Calculate asset_id as Base58(first16(HMAC-SHA256(user_id, file_bytes)))
-    let asset_id = crate::photos::asset_id::from_path(image_path, user_id)?;
 
     // File system metadata
     let metadata = std::fs::metadata(image_path)?;
@@ -2595,9 +2612,15 @@ pub(crate) async fn index_single_photo_for_user(
     let bytes = std::fs::read(image_path)?;
     let content_hash = blake3::hash(&bytes).to_hex().to_string();
     let backup_id = crate::photos::backup_id::from_bytes(&bytes, user_id)?;
-    let asset_id: String = match &existing_asset_id {
-        Some(a) => a.clone(),
-        None => crate::photos::asset_id::from_bytes(&bytes, user_id)?,
+    let asset_id: String = if let Some(forced) = forced_asset_id
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        forced.to_string()
+    } else if let Some(existing) = &existing_asset_id {
+        existing.clone()
+    } else {
+        crate::photos::asset_id::from_bytes(&bytes, user_id)?
     };
     let content_changed = existing_hash.as_deref() != Some(&content_hash);
 
@@ -3647,6 +3670,7 @@ pub(crate) async fn index_video_for_user(
     embedding_store: &Arc<crate::database::embeddings::EmbeddingStore>,
     video_path: &std::path::Path,
     user_id: &str,
+    forced_asset_id: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     use image::imageops::FilterType;
     if should_ignore_ingest_path(video_path) {
@@ -3769,9 +3793,15 @@ pub(crate) async fn index_video_for_user(
     let bytes = std::fs::read(video_path)?;
     let content_hash = blake3::hash(&bytes).to_hex().to_string();
     let backup_id = crate::photos::backup_id::from_bytes(&bytes, user_id)?;
-    let asset_id: String = match &existing_asset_id {
-        Some(a) => a.clone(),
-        None => crate::photos::asset_id::from_bytes(&bytes, user_id)?,
+    let asset_id: String = if let Some(forced) = forced_asset_id
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        forced.to_string()
+    } else if let Some(existing) = &existing_asset_id {
+        existing.clone()
+    } else {
+        crate::photos::asset_id::from_bytes(&bytes, user_id)?
     };
     let content_changed = existing_hash.as_deref() != Some(&content_hash);
 

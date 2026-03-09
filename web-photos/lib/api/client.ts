@@ -101,7 +101,7 @@ export class ApiClient {
       if (res.ok) {
         const data = await res.json();
         if (data?.token) {
-          useAuthStore.getState().updateToken(data.token);
+          useAuthStore.getState().updateToken(data.token, data.user ?? undefined);
           this.scheduleProactiveRefresh(data.expires_in);
           return true;
         }
@@ -314,15 +314,19 @@ export class ApiClient {
     }
     this.refreshTimer = setTimeout(async () => {
       try {
+        const token = useAuthStore.getState().token;
         const res = await fetch(`${this.baseUrl}/auth/refresh`, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          // Send empty body; server will use HttpOnly refresh cookie
+          headers: {
+            'Content-Type': 'application/json',
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          // Prefer bearer when available; fall back to refresh cookie.
         });
         if (res.ok) {
           const data = await res.json();
           if (data?.token) {
-            useAuthStore.getState().updateToken(data.token);
+            useAuthStore.getState().updateToken(data.token, data.user ?? undefined);
             const next = typeof data.expires_in === 'number' ? data.expires_in : undefined;
             this.scheduleProactiveRefresh(next);
             return;

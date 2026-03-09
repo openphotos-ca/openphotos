@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { logger } from '@/lib/logger';
+import { resolveApiBaseUrl } from '@/lib/api/base';
 
 export interface User {
   id: number;
@@ -21,7 +22,7 @@ interface AuthState {
   
   // Actions
   login: (token: string, user: User) => void;
-  updateToken: (token: string) => void;
+  updateToken: (token: string, user?: User | null) => void;
   logout: () => void;
   updateUser: (user: Partial<User>) => void;
   setHydrated: () => void;
@@ -63,13 +64,36 @@ export const useAuthStore = create<AuthState>()(
         logger.info('[AUTH STORE] State updated - authenticated');
       },
 
-      updateToken: (token: string) => {
-        logger.info('[AUTH STORE] updateToken called:', { tokenLength: token?.length || 0 });
-        set({ token, isAuthenticated: !!token });
+      updateToken: (token: string, user?: User | null) => {
+        logger.info('[AUTH STORE] updateToken called:', {
+          tokenLength: token?.length || 0,
+          hasUser: !!user,
+          userId: user?.id,
+          userName: user?.name,
+        });
+        set((state) => ({
+          token,
+          user: user === undefined ? state.user : user,
+          isAuthenticated: !!token,
+        }));
       },
 
       logout: () => {
         logger.info('[AUTH STORE] Logout called');
+        const token = get().token;
+        if (typeof window !== 'undefined') {
+          const apiBase = resolveApiBaseUrl(process.env.NEXT_PUBLIC_API_URL || '/api');
+          // Best-effort server logout so HttpOnly refresh cookies are cleared too.
+          void fetch(`${apiBase}/auth/logout`, {
+            method: 'POST',
+            headers: token
+              ? { 'Authorization': `Bearer ${token}` }
+              : undefined,
+            credentials: 'same-origin',
+          }).catch((error) => {
+            logger.warn('[AUTH STORE] Server logout failed', error);
+          });
+        }
         // Clear cookie
         if (typeof document !== 'undefined') {
           const attrs = ['path=/', 'expires=Thu, 01 Jan 1970 00:00:01 GMT'];

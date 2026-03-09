@@ -553,9 +553,21 @@ impl AuthService {
     pub async fn logout(&self, token: &str) -> Result<()> {
         if let Some(pg) = &self.pg_client {
             let token_hash = Self::hash_token(token);
-            let _ = pg
-                .execute("DELETE FROM sessions WHERE token_hash=$1", &[&token_hash])
-                .await;
+            let internal_user_id = pg
+                .query_opt(
+                    "DELETE FROM sessions WHERE token_hash=$1 RETURNING user_id",
+                    &[&token_hash],
+                )
+                .await?
+                .map(|row| row.get::<_, i32>(0));
+            if let Some(user_id) = internal_user_id {
+                let _ = pg
+                    .execute(
+                        "UPDATE refresh_tokens SET revoked_at=NOW() WHERE user_id=$1 AND revoked_at IS NULL",
+                        &[&user_id],
+                    )
+                    .await;
+            }
             return Ok(());
         }
         let token_hash = Self::hash_token(token);
@@ -565,10 +577,22 @@ impl AuthService {
             .expect("users DB required in DuckDB mode")
             .lock();
 
-        conn.execute(
-            "DELETE FROM sessions WHERE token_hash = ?",
-            params![&token_hash],
-        )?;
+        let internal_user_id: Option<i32> = conn
+            .prepare("SELECT user_id FROM sessions WHERE token_hash = ? LIMIT 1")
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row(params![&token_hash], |row| row.get::<_, i32>(0))
+                    .ok()
+            });
+
+        conn.execute("DELETE FROM sessions WHERE token_hash = ?", params![&token_hash])?;
+
+        if let Some(user_id) = internal_user_id {
+            let _ = conn.execute(
+                "UPDATE refresh_tokens SET revoked_at = CURRENT_TIMESTAMP WHERE user_id = ? AND revoked_at IS NULL",
+                params![user_id],
+            );
+        }
 
         Ok(())
     }

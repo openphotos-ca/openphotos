@@ -848,7 +848,91 @@ pub(crate) async fn ingest_finished_upload(
     })
     .await??;
 
-    let asset_id = computed_asset_id;
+    let replace_requested = metadata
+        .as_ref()
+        .and_then(|m| m.get("replace"))
+        .map(|v| v.trim().to_ascii_lowercase())
+        .map(|v| v == "1" || v == "true" || v == "yes")
+        .unwrap_or(false);
+
+    let mut asset_id = computed_asset_id.clone();
+    let mut forced_replace_asset_id: Option<String> = None;
+    if replace_requested {
+        let target_from_meta = meta_get(
+            &metadata,
+            &["asset_id_b58", "replace_asset_id", "replace_asset_id_b58", "asset_id"],
+        );
+        let target_from_filename = metadata
+            .as_ref()
+            .and_then(|m| m.get("filename"))
+            .and_then(|name| std::path::Path::new(name).file_stem())
+            .and_then(|stem| stem.to_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        let candidate = target_from_meta
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .or(target_from_filename);
+        if let Some(target_asset_id) = candidate {
+            let target_exists = if let Some(pg) = &state.pg_client {
+                pg.query_opt(
+                    "SELECT 1 FROM photos WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 LIMIT 1",
+                    &[&org_id, &user_id, &target_asset_id],
+                )
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            } else {
+                if let Ok(db) = state.get_user_data_database(user_id) {
+                    let conn = db.lock();
+                    conn.prepare(
+                        "SELECT 1 FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? LIMIT 1",
+                    )
+                    .ok()
+                    .and_then(|mut s| {
+                        s.query_row(
+                            duckdb::params![org_id, user_id, &target_asset_id],
+                            |row| row.get::<_, i32>(0),
+                        )
+                        .ok()
+                    })
+                    .is_some()
+                } else {
+                    false
+                }
+            };
+            if target_exists {
+                tracing::info!(
+                    target: "upload",
+                    "[UPLOAD] replace target resolved (user={}, upload_id={}, computed_asset_id={}, target_asset_id={})",
+                    user_id,
+                    upload_id,
+                    computed_asset_id,
+                    target_asset_id
+                );
+                forced_replace_asset_id = Some(target_asset_id.clone());
+                asset_id = target_asset_id;
+            } else {
+                tracing::warn!(
+                    target: "upload",
+                    "[UPLOAD] replace requested but target asset_id not found (user={}, upload_id={}, computed_asset_id={}, candidate={})",
+                    user_id,
+                    upload_id,
+                    computed_asset_id,
+                    target_asset_id
+                );
+            }
+        } else {
+            tracing::warn!(
+                target: "upload",
+                "[UPLOAD] replace requested but no target asset_id could be inferred (user={}, upload_id={}, computed_asset_id={})",
+                user_id,
+                upload_id,
+                computed_asset_id
+            );
+        }
+    }
 
     // Decide destination path if move_on_ingest is enabled
     let dest_path = if state.move_on_ingest {
@@ -946,41 +1030,50 @@ pub(crate) async fn ingest_finished_upload(
             .unwrap_or("");
         let sanitized = sanitize_filename_preserve_ext(orig_name_raw, &ext, &asset_id);
 
-        // Early first-wins dedupe by existing DB path for this asset_id
-        // If an existing row/path is present and the file exists, reuse it and discard the new temp file.
+        // Early first-wins dedupe by existing DB path for this asset_id.
+        // IMPORTANT: do not reuse existing file path for explicit replacements (`replace=1`),
+        // otherwise unlock flows can accidentally reuse a locked `.pae3` path and fail decode.
         let mut reuse_existing: Option<std::path::PathBuf> = None;
-        if let Some(pg) = &state.pg_client {
-            if let Ok(row) = pg
-                .query_opt(
-                    "SELECT path FROM photos WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 LIMIT 1",
-                    &[&org_id, &user_id, &asset_id],
-                )
-                .await
-            {
-                if let Some(r) = row {
-                    let p: String = r.get(0);
-                    let pb = std::path::PathBuf::from(&p);
-                    if pb.is_file() {
-                        reuse_existing = Some(pb);
-                    }
-                }
-            }
-        } else {
-            if let Ok(db) = state.get_user_data_database(user_id) {
-                let conn = db.lock();
-                if let Ok(mut s) =
-                    conn.prepare("SELECT path FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? LIMIT 1")
+        if !replace_requested {
+            if let Some(pg) = &state.pg_client {
+                if let Ok(row) = pg
+                    .query_opt(
+                        "SELECT path FROM photos WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 LIMIT 1",
+                        &[&org_id, &user_id, &asset_id],
+                    )
+                    .await
                 {
-                    if let Ok(p) =
-                        s.query_row(duckdb::params![org_id, user_id, &asset_id], |row| row.get::<_, String>(0))
-                    {
+                    if let Some(r) = row {
+                        let p: String = r.get(0);
                         let pb = std::path::PathBuf::from(&p);
                         if pb.is_file() {
                             reuse_existing = Some(pb);
                         }
                     }
                 }
+            } else {
+                if let Ok(db) = state.get_user_data_database(user_id) {
+                    let conn = db.lock();
+                    if let Ok(mut s) =
+                        conn.prepare("SELECT path FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? LIMIT 1")
+                    {
+                        if let Ok(p) =
+                            s.query_row(duckdb::params![org_id, user_id, &asset_id], |row| row.get::<_, String>(0))
+                        {
+                            let pb = std::path::PathBuf::from(&p);
+                            if pb.is_file() {
+                                reuse_existing = Some(pb);
+                            }
+                        }
+                    }
+                }
             }
+        } else {
+            tracing::info!(
+                target: "upload",
+                "[UPLOAD] replace requested; bypassing existing-path reuse for asset {}",
+                asset_id
+            );
         }
         if let Some(existing) = reuse_existing {
             let _ = tokio::fs::remove_file(src_path).await;
@@ -1067,6 +1160,7 @@ pub(crate) async fn ingest_finished_upload(
                 &embed_store,
                 &dest_path,
                 user_id,
+                forced_replace_asset_id.as_deref(),
             )
             .await?;
         } else {
@@ -1076,6 +1170,7 @@ pub(crate) async fn ingest_finished_upload(
                 &embed_store,
                 &dest_path,
                 user_id,
+                forced_replace_asset_id.as_deref(),
             )
             .await?;
         }
@@ -1323,7 +1418,15 @@ pub(crate) async fn ingest_finished_upload(
         let do_result: anyhow::Result<()> = async {
             if is_video_extension(&ext) {
                 tracing::info!(target: "upload", "[UPLOAD] indexing video (user={}, path={})", user_id, dest_path.display());
-                super::auth_handlers::index_video_for_user(state, &data_db_cur, &embed_store, &dest_path, user_id).await?;
+                super::auth_handlers::index_video_for_user(
+                    state,
+                    &data_db_cur,
+                    &embed_store,
+                    &dest_path,
+                    user_id,
+                    forced_replace_asset_id.as_deref(),
+                )
+                .await?;
                 // Prefer content_id pairing, else fallback to filename
                 if let Some(cid) = meta_get(&metadata, &["content_id", "contentId", "content-id"]) {
                     // stamp content_id onto this row
@@ -1349,7 +1452,15 @@ pub(crate) async fn ingest_finished_upload(
                     tracing::info!(target: "upload", "[UPLOAD] replace policy: existing=locked, incoming=unlocked → replacing + reindexing (asset_id={})", asset_id);
                 }
                 tracing::info!(target: "upload", "[UPLOAD] indexing photo (user={}, path={})", user_id, dest_path.display());
-                super::auth_handlers::index_single_photo_for_user(state, &data_db_cur, &embed_store, &dest_path, user_id).await?;
+                super::auth_handlers::index_single_photo_for_user(
+                    state,
+                    &data_db_cur,
+                    &embed_store,
+                    &dest_path,
+                    user_id,
+                    forced_replace_asset_id.as_deref(),
+                )
+                .await?;
                 // If we are replacing a previously LOCKED asset with an UNLOCKED upload, remove old locked containers
                 if asset_exists && existing_locked {
                     let locked_orig = state.locked_original_path_for(user_id, &asset_id);

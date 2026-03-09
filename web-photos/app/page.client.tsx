@@ -46,6 +46,88 @@ function toHex(u8: Uint8Array): string {
   return hex;
 }
 
+function isPhotoLocked(p: Photo | null | undefined): boolean {
+  if (!p) return false;
+  return p.locked === true || (p as any).locked === 1 || (p as any).locked === '1';
+}
+
+function isPhotoFavorite(p: Photo | null | undefined): boolean {
+  if (!p) return false;
+  return Number((p as any).favorites ?? 0) === 1;
+}
+
+async function fetchEncryptedForUnlock(
+  assetId: string,
+  headers?: Record<string, string>,
+): Promise<{ bytes: ArrayBuffer; source: 'image' | 'thumbnail' }> {
+  const tryFetch = async (
+    url: string,
+    source: 'image' | 'thumbnail',
+  ): Promise<{ bytes: ArrayBuffer; source: 'image' | 'thumbnail' } | null> => {
+    const resp = await fetch(url, {
+      headers,
+      cache: 'no-store',
+    });
+    if (!resp.ok) return null;
+    return { bytes: await resp.arrayBuffer(), source };
+  };
+
+  const direct = await tryFetch(`/api/images/${encodeURIComponent(assetId)}`, 'image');
+  if (direct) return direct;
+
+  const thumb = await tryFetch(`/api/thumbnails/${encodeURIComponent(assetId)}`, 'thumbnail');
+  if (thumb) return thumb;
+
+  const failResp = await fetch(`/api/images/${encodeURIComponent(assetId)}`, {
+    headers,
+    cache: 'no-store',
+  });
+  let details = '';
+  try { details = await failResp.text(); } catch {}
+  throw new Error(`Fetch encrypted failed ${failResp.status}${details ? `: ${details}` : ''}`);
+}
+
+function guessUnlockedMediaType(bytes: ArrayBuffer, isVideoHint: boolean): { ext: string; mime: string } {
+  const b = new Uint8Array(bytes);
+  if (b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff) return { ext: 'jpg', mime: 'image/jpeg' };
+  if (b.length >= 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47) return { ext: 'png', mime: 'image/png' };
+  if (b.length >= 12 && String.fromCharCode(...Array.from(b.subarray(0, 4))) === 'RIFF' && String.fromCharCode(...Array.from(b.subarray(8, 12))) === 'WEBP') {
+    return { ext: 'webp', mime: 'image/webp' };
+  }
+  if (b.length >= 12 && String.fromCharCode(...Array.from(b.subarray(4, 8))) === 'ftyp') {
+    const brand = String.fromCharCode(...Array.from(b.subarray(8, 12)));
+    if (brand === 'qt  ') return { ext: 'mov', mime: 'video/quicktime' };
+    if (brand === 'avif' || brand === 'avis') return { ext: 'avif', mime: 'image/avif' };
+    if (brand.startsWith('hei') || brand.startsWith('hev') || brand === 'mif1' || brand === 'msf1') {
+      return { ext: 'heic', mime: 'image/heic' };
+    }
+    return { ext: 'mp4', mime: 'video/mp4' };
+  }
+  return isVideoHint ? { ext: 'mp4', mime: 'video/mp4' } : { ext: 'jpg', mime: 'image/jpeg' };
+}
+
+async function waitUntilAssetUnlocked(
+  assetId: string,
+  headers?: Record<string, string>,
+  attempts: number = 20,
+  delayMs: number = 500,
+): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    const resp = await fetch(`/api/photos/state?asset_id=${encodeURIComponent(assetId)}`, {
+      headers,
+      cache: 'no-store',
+    });
+    if (resp.ok) {
+      try {
+        const state = await resp.json() as { exists?: boolean; locked?: boolean };
+        if (state?.exists === true && state?.locked === false) return true;
+      } catch {}
+    }
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  }
+  return false;
+}
+
 export default function HomePage() {
   const router = useRouter();
   const { toast } = useToast();
@@ -235,6 +317,10 @@ export default function HomePage() {
     if ((qs.state as any).locked === '1') {
       (qp as any).filter_locked_only = true;
       (qp as any).include_locked = true; // ensures backend PIN path
+    }
+    if ((qs.state as any).trash === '1') {
+      (qp as any).filter_trashed_only = true;
+      (qp as any).include_trashed = true;
     }
     // Map sort from URL state
     switch (st.sort) {
@@ -580,6 +666,37 @@ export default function HomePage() {
     }, 100);
   }, [queryClient]);
 
+  const handleEmptyTrash = useCallback(async () => {
+    try {
+      const res = await photosApi.clearTrash();
+      setSelectedPhotos([]);
+      if (qs.state.trash === '1') {
+        setAllPhotos([]);
+      }
+      await queryClient.invalidateQueries({ queryKey: ['photos'] });
+      await queryClient.invalidateQueries({
+        predicate: (q) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts',
+      });
+      setTimeout(() => {
+        queryClient.refetchQueries({ queryKey: ['photos'] });
+        queryClient.refetchQueries({
+          predicate: (q) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts',
+        });
+      }, 100);
+      toast({
+        title: 'Trash cleared',
+        description: `Removed ${res?.purged ?? 0} item${(res?.purged ?? 0) === 1 ? '' : 's'}.`,
+        variant: 'success',
+      });
+    } catch (e: any) {
+      toast({
+        title: 'Clear failed',
+        description: e?.message || String(e),
+        variant: 'destructive',
+      });
+    }
+  }, [queryClient, qs.state.trash, toast]);
+
   // Sort changes are driven by query param; no local handler needed
 
   // Determine which photos to display
@@ -589,14 +706,36 @@ export default function HomePage() {
     const latestQueryPhotos = photoResponse?.photos ?? [];
     const base = viewerOverride ?? (allPhotos.length > 0 ? allPhotos : latestQueryPhotos);
     const lockedOnly = (qs.state as any).locked === '1';
-    const isLocked = (p: Photo) => p.locked === true || (p as any).locked === 1 || (p as any).locked === '1';
-    if (lockedOnly) return base.filter(isLocked);
-    const unlocked = base.filter((p) => !isLocked(p));
+    if (lockedOnly) return base.filter(isPhotoLocked);
+    const unlocked = base.filter((p) => !isPhotoLocked(p));
     // Defensive fallback: if backend returns only locked entries while locked-only is off,
     // prefer showing the base result set rather than rendering an empty pane.
     if (unlocked.length === 0 && base.length > 0) return base;
     return unlocked;
   }, [viewerOverride, allPhotos, photoResponse?.photos, qs.state]);
+
+  const selectionMeta = useMemo(() => {
+    const byId = new Map<string, Photo>();
+    for (const p of displayPhotos) byId.set(p.asset_id, p);
+    for (const p of allPhotos) if (!byId.has(p.asset_id)) byId.set(p.asset_id, p);
+    for (const p of (photoResponse?.photos ?? [])) if (!byId.has(p.asset_id)) byId.set(p.asset_id, p);
+
+    const selectedItems: Photo[] = [];
+    for (const aid of selectedPhotos) {
+      const p = byId.get(aid);
+      if (p) selectedItems.push(p);
+    }
+
+    const anyLocked = selectedItems.some(isPhotoLocked);
+    const allLocked = selectedItems.length > 0 && selectedItems.every(isPhotoLocked);
+    const anyFav = selectedItems.some(isPhotoFavorite);
+    const allFav = selectedItems.length > 0 && selectedItems.every(isPhotoFavorite);
+    const selectedSet = new Set(selectedPhotos);
+    const allSelected = displayPhotos.length > 0 && displayPhotos.every((p) => selectedSet.has(p.asset_id));
+    const inTrash = qs.state.trash === '1';
+
+    return { anyLocked, allLocked, anyFav, allFav, allSelected, inTrash };
+  }, [selectedPhotos, displayPhotos, allPhotos, photoResponse?.photos, qs.state.trash]);
 
   // Temporary runtime diagnostics for mobile blank-grid investigations.
   useEffect(() => {
@@ -971,10 +1110,12 @@ export default function HomePage() {
   const lockCurrentPhoto = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!viewerPhoto) return;
+    const ensured = await ensurePinVerified();
+    if (!ensured) return;
     // Ensure UMK available
     const st = require('@/lib/stores/e2ee').useE2EEStore.getState();
     if (!st.umk) {
-      alert('Unlock E2EE first (Header → Unlock or Settings → Security)');
+      toast({ title: 'Lock failed', description: 'PIN verification did not unlock E2EE key', variant: 'destructive' });
       return;
     }
     try {
@@ -1062,19 +1203,25 @@ export default function HomePage() {
       setAllPhotos(prev => prev.map(p => p.asset_id === viewerPhoto.asset_id ? { ...p, locked: true } : p));
       try { await queryClient.invalidateQueries({ queryKey: ['photos'] }); await queryClient.invalidateQueries({ predicate: (q:any) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts' }); } catch {}
     } catch (err) { logger.error('Failed to lock (encrypt/replace) photo', err); }
-  }, [viewerPhoto, queryClient]);
+  }, [viewerPhoto, queryClient, ensurePinVerified, toast]);
 
   const unlockCurrentPhoto = useCallback(async (e: React.MouseEvent) => {
     e.stopPropagation();
     if (!viewerPhoto) return;
+    const ensured = await ensurePinVerified();
+    if (!ensured) return;
     try {
-      // Fetch encrypted original
-      const resp = await fetch(`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}`);
-      if (!resp.ok) throw new Error(`Fetch encrypted failed: ${resp.status}`);
-      const ab = await resp.arrayBuffer();
+      const headers = require('@/lib/stores/auth').useAuthStore.getState().token
+        ? { Authorization: `Bearer ${require('@/lib/stores/auth').useAuthStore.getState().token}` }
+        : undefined;
+      const encrypted = await fetchEncryptedForUnlock(viewerPhoto.asset_id, headers);
+      const ab = encrypted.bytes;
       // Ensure UMK
       const st = require('@/lib/stores/e2ee').useE2EEStore.getState();
-      if (!st.umk) { alert('Unlock E2EE first'); return; }
+      if (!st.umk) {
+        toast({ title: 'Unlock failed', description: 'PIN verification did not unlock E2EE key', variant: 'destructive' });
+        return;
+      }
       let hex = ''; for (let i=0;i<st.umk.length;i++) hex += st.umk[i].toString(16).padStart(2,'0');
       // @ts-ignore
       const worker = new Worker(new URL('../workers/e2ee.worker.ts', import.meta.url), { type: 'module' });
@@ -1083,18 +1230,26 @@ export default function HomePage() {
         worker.onerror = (er) => { try{worker.terminate();}catch{}; reject(er.error||new Error(String(er.message||er))); };
         worker.postMessage({ type: 'decrypt-v3', umkHex: hex, userIdUtf8: require('@/lib/stores/auth').useAuthStore.getState().user?.user_id || '', container: ab }, [ab]);
       });
-      const blob = new Blob([plain]);
+      const guessed = guessUnlockedMediaType(plain, viewerPhoto.is_video);
+      const blob = new Blob([plain], { type: guessed.mime });
       const tus = await import('tus-js-client');
-      const headers = require('@/lib/stores/auth').useAuthStore.getState().token ? { Authorization: `Bearer ${require('@/lib/stores/auth').useAuthStore.getState().token}` } : undefined;
       const up = new tus.Upload(blob as any, {
         endpoint: '/files/', chunkSize: 10*1024*1024, retryDelays: [0,1000,3000,5000], headers,
-        metadata: { filename: viewerPhoto.filename || `${viewerPhoto.asset_id}`, replace: '1' },
+        metadata: {
+          filename: `${viewerPhoto.asset_id}.${guessed.ext}`,
+          replace: '1',
+          asset_id_b58: viewerPhoto.asset_id,
+        },
         onError: (err: Error) => { throw err; }, onSuccess: () => {},
       }); up.start();
+      const unlocked = await waitUntilAssetUnlocked(viewerPhoto.asset_id, headers);
+      if (!unlocked) {
+        throw new Error('Unlock upload completed but asset is still locked on server');
+      }
       setAllPhotos(prev => prev.map(p => p.asset_id === viewerPhoto.asset_id ? { ...p, locked: false } : p));
       try { await queryClient.invalidateQueries({ queryKey: ['photos'] }); await queryClient.invalidateQueries({ predicate: (q:any) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts' }); } catch {}
     } catch (err) { logger.error('Failed to unlock (decrypt/replace) photo', err); }
-  }, [viewerPhoto, queryClient]);
+  }, [viewerPhoto, queryClient, ensurePinVerified, toast]);
 
   // Try to start playback for videos when viewer opens
   useEffect(() => {
@@ -1480,18 +1635,27 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
         
         onFilterToggle={() => setShowFilters(!showFilters)}
         selectedCount={selectedPhotos.length}
+        selectedFirstAssetId={selectedPhotos[0]}
+        selectedAssetIds={selectedPhotos}
         onSelectAll={handleSelectAll}
         onSelectNone={handleSelectNone}
+        selectionMeta={selectionMeta}
+        onBulkSelectAll={() => { if (selectionMeta.allSelected) handleSelectNone(); else handleSelectAll(); }}
         onBulkLock={async () => {
           // Batch lock selected (encrypt) — skips already-locked
           const { encryptV3WithWorker, fileToArrayBuffer, generateImageThumb, generateVideoThumb, umkToHex } = await import('@/lib/e2eeClient');
+          const ensured = await ensurePinVerified();
+          if (!ensured) return;
           const st = require('@/lib/stores/e2ee').useE2EEStore.getState();
           const token = require('@/lib/stores/auth').useAuthStore.getState().token;
           const userIdUtf8 = require('@/lib/stores/auth').useAuthStore.getState().user?.user_id || '';
           const umkHex = st.umk ? toHex(st.umk) : null;
           const tus = await import('tus-js-client');
           const hdrs = token ? { Authorization: `Bearer ${token}` } : undefined;
-          if (!umkHex) { alert('Unlock E2EE first to lock selected items'); return; }
+          if (!umkHex) {
+            toast({ title: 'Lock failed', description: 'PIN verification did not unlock E2EE key', variant: 'destructive' });
+            return;
+          }
           const toLock = selectedPhotos.filter(aid => {
             const p = allPhotos.find(x => x.asset_id === aid) || displayPhotos.find(x => x.asset_id === aid);
             return p && !p.locked;
@@ -1532,11 +1696,16 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
         }}
         onBulkUnlock={async () => {
           // Batch unlock selected (decrypt) — skips already-unlocked
+          const ensured = await ensurePinVerified();
+          if (!ensured) return;
           const st = require('@/lib/stores/e2ee').useE2EEStore.getState();
           const token = require('@/lib/stores/auth').useAuthStore.getState().token;
           const userIdUtf8 = require('@/lib/stores/auth').useAuthStore.getState().user?.user_id || '';
           const umkHex = st.umk ? toHex(st.umk) : null;
-          if (!umkHex) { alert('Unlock E2EE first to unlock selected items'); return; }
+          if (!umkHex) {
+            toast({ title: 'Unlock failed', description: 'PIN verification did not unlock E2EE key', variant: 'destructive' });
+            return;
+          }
           const tus = await import('tus-js-client');
           const hdrs = token ? { Authorization: `Bearer ${token}` } : undefined;
           const toUnlock = selectedPhotos.filter(aid => {
@@ -1544,12 +1713,13 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
             return p && p.locked;
           });
           let ok = 0, fail = 0;
+          let thumbRecovery = 0;
           const tasks = toUnlock.map(aid => async () => {
             const p = allPhotos.find(x => x.asset_id === aid) || displayPhotos.find(x => x.asset_id === aid);
             if (!p) return;
-            const resp = await fetch(`/api/images/${encodeURIComponent(aid)}`);
-            if (!resp.ok) throw new Error(`Fetch encrypted failed ${resp.status}`);
-            const ab = await resp.arrayBuffer();
+            const encrypted = await fetchEncryptedForUnlock(aid, hdrs);
+            if (encrypted.source === 'thumbnail') thumbRecovery += 1;
+            const ab = encrypted.bytes;
             // @ts-ignore
             const worker = new Worker(new URL('../workers/e2ee.worker.ts', import.meta.url), { type: 'module' });
             const plain: ArrayBuffer = await new Promise((resolve, reject) => {
@@ -1557,7 +1727,10 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
               worker.onerror = (er) => { try{worker.terminate();}catch{}; reject(er.error||new Error(String(er.message||er))); };
               worker.postMessage({ type: 'decrypt-v3', umkHex, userIdUtf8, container: ab }, [ab]);
             });
-            await new Promise<void>((res, rej)=>{ const up = new tus.Upload(new Blob([plain]) as any, { endpoint:'/files/', chunkSize:10*1024*1024, retryDelays:[0,1000,3000,5000], headers: hdrs, metadata: { filename: p.filename || aid, replace:'1' }, onError:(e:Error)=>rej(e), onSuccess:()=>res() }); up.start(); });
+            const guessed = guessUnlockedMediaType(plain, !!p.is_video);
+            await new Promise<void>((res, rej)=>{ const up = new tus.Upload(new Blob([plain], { type: guessed.mime }) as any, { endpoint:'/files/', chunkSize:10*1024*1024, retryDelays:[0,1000,3000,5000], headers: hdrs, metadata: { filename: `${aid}.${guessed.ext}`, replace:'1', asset_id_b58: aid }, onError:(e:Error)=>rej(e), onSuccess:()=>res() }); up.start(); });
+            const unlocked = await waitUntilAssetUnlocked(aid, hdrs);
+            if (!unlocked) throw new Error(`Asset still locked after unlock upload: ${aid}`);
             setAllPhotos(prev => prev.map(q => q.asset_id === aid ? { ...q, locked: false } : q));
           });
           const limit = 2;
@@ -1570,7 +1743,40 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
           };
           await Promise.all(Array.from({ length: Math.min(limit, tasks.length) }, () => runNext()));
           try { await queryClient.invalidateQueries({ queryKey: ['photos'] }); await queryClient.invalidateQueries({ predicate: (q:any)=>Array.isArray(q.queryKey)&&q.queryKey[0]==='media-counts' }); } catch {}
-          toast({ title: 'Batch Unlock', description: `${ok} unlocked, ${fail} failed`, variant: fail ? 'destructive' : 'success' });
+          const recoveryText = thumbRecovery > 0 ? `, ${thumbRecovery} recovered from locked thumbnail` : '';
+          toast({ title: 'Batch Unlock', description: `${ok} unlocked, ${fail} failed${recoveryText}`, variant: fail ? 'destructive' : 'success' });
+        }}
+        onBulkDelete={async () => {
+          const ids = Array.from(new Set(selectedPhotos));
+          if (ids.length === 0) return;
+          try {
+            const result = await photosApi.deletePhotos(ids);
+            const deletedSet = new Set(ids);
+            setSelectedPhotos((prev) => prev.filter((aid) => !deletedSet.has(aid)));
+            setAllPhotos((prev) => prev.filter((p) => !deletedSet.has(p.asset_id)));
+            if (viewerPhoto && deletedSet.has(viewerPhoto.asset_id)) {
+              setViewerIndex(null);
+            }
+            try {
+              await queryClient.invalidateQueries({ queryKey: ['photos'] });
+              await queryClient.invalidateQueries({
+                predicate: (q: any) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts',
+              });
+            } catch {}
+            const deleted = Number(result?.deleted ?? 0);
+            const requested = Number(result?.requested ?? ids.length);
+            toast({
+              title: deleted > 0 ? 'Moved to Trash' : 'Delete failed',
+              description: `${deleted} of ${requested} item${requested === 1 ? '' : 's'} moved`,
+              variant: deleted > 0 ? 'success' : 'destructive',
+            });
+          } catch (e: any) {
+            toast({
+              title: 'Delete failed',
+              description: e?.message || String(e),
+              variant: 'destructive',
+            });
+          }
         }}
         isLoading={isLoading}
       />
@@ -1579,7 +1785,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
         <AlbumChips onOpenFilters={() => setShowFilters(!showFilters)} />
       </SafeBoundary>
       {/* Media segmented control */}
-      <MediaTypeSegment />
+      <MediaTypeSegment onEmptyTrash={handleEmptyTrash} />
       {/* Locked-only + text search note */}
       {(lockedOnly && isTextSearch) ? (
         <div className="px-4 sm:px-6 lg:px-8 py-2 text-sm text-muted-foreground">

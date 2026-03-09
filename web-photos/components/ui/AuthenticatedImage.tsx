@@ -13,6 +13,7 @@ const THUMBNAIL_FETCH_CONCURRENCY = 4;
 let activeThumbnailFetches = 0;
 const thumbnailFetchWaiters: Array<() => void> = [];
 let thumbnailNetworkCooldownUntilMs = 0;
+let pendingViewerUserIdHydration: Promise<string | null> | null = null;
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => window.setTimeout(resolve, ms));
@@ -105,6 +106,35 @@ function putCachedThumbnailUrl(cacheKey: string, url: string) {
   }
 }
 
+async function ensureViewerUserId(token: string | null): Promise<string | null> {
+  const existing = useAuthStore.getState().user?.user_id ?? null;
+  if (existing) return existing;
+  if (!token) return null;
+  if (!pendingViewerUserIdHydration) {
+    pendingViewerUserIdHydration = (async () => {
+      try {
+        const res = await fetch('/api/auth/me', {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return null;
+        const me = await res.json();
+        const userId = typeof me?.user_id === 'string' && me.user_id.length > 0 ? me.user_id : null;
+        if (!userId) return null;
+        const latestToken = useAuthStore.getState().token ?? token;
+        if (latestToken) useAuthStore.getState().updateToken(latestToken, me);
+        logger.debug('[AUTHIMG] hydrated missing user_id via /api/auth/me');
+        return userId;
+      } catch {
+        logger.debug('[AUTHIMG] failed to hydrate user_id via /api/auth/me');
+        return null;
+      } finally {
+        pendingViewerUserIdHydration = null;
+      }
+    })();
+  }
+  return pendingViewerUserIdHydration;
+}
+
 interface AuthenticatedImageProps {
   assetId: string;
   alt: string;
@@ -149,8 +179,8 @@ export function AuthenticatedImage({
   const [upgrading, setUpgrading] = useState(false); // indicates higher quality (e.g., AVIF) is loading
   const [fullOwned, setFullOwned] = useState(false); // whether this component created fullUrl (so it should revoke)
   const fullErrorRetriesRef = useRef<Map<string, number>>(new Map());
-  const authState = useAuthStore();
-  const { token } = authState;
+  const token = useAuthStore(s => s.token);
+  const viewerUserId = useAuthStore(s => s.user?.user_id ?? null);
 
   // Subscribe to unlock state; when it flips to true (remembered unlock), refetch
   const isUnlocked = useE2EEStore(s => s.isUnlocked);
@@ -209,7 +239,12 @@ export function AuthenticatedImage({
         const st = useE2EEStore.getState();
         const umk = st.umk;
         const user = useAuthStore.getState().user;
-        if (!umk || !user?.user_id) { setLockedBlocked(true); throw new Error('LOCKED_NEEDS_UNLOCK'); }
+        let userIdForDecrypt = viewerUserId ?? user?.user_id ?? null;
+        if (!userIdForDecrypt) {
+          logger.debug('[AUTHIMG] locked media decrypt waiting for user_id hydration');
+          userIdForDecrypt = await ensureViewerUserId(token);
+        }
+        if (!umk || !userIdForDecrypt) { setLockedBlocked(true); throw new Error('LOCKED_NEEDS_UNLOCK'); }
         // Hexify UMK
         let hex = ''; for (let i=0;i<umk.length;i++) hex += umk[i].toString(16).padStart(2,'0');
         // Spin a fresh worker
@@ -235,7 +270,7 @@ export function AuthenticatedImage({
             }
           };
           worker.onerror = (e) => { try { worker.terminate(); } catch {}; reject(e.error || new Error(String(e.message||e))); };
-          worker.postMessage({ type: 'decrypt-v3', umkHex: hex, userIdUtf8: user.user_id, container: ab }, [ab]);
+          worker.postMessage({ type: 'decrypt-v3', umkHex: hex, userIdUtf8: userIdForDecrypt, container: ab }, [ab]);
         });
         // Opportunistically store UMK if remember is enabled and not already stored
         try {
@@ -411,7 +446,7 @@ export function AuthenticatedImage({
 	      isMounted = false;
 	    };
 	  // eslint-disable-next-line react-hooks/exhaustive-deps
-	  }, [assetId, token, progressive, variant, prefetchFullUrl, isUnlocked, inView, lazyEnabled]);
+	  }, [assetId, token, viewerUserId, progressive, variant, prefetchFullUrl, isUnlocked, inView, lazyEnabled]);
 
   // Cleanup blob URL when it changes
   useEffect(() => {
@@ -508,15 +543,21 @@ export function AuthenticatedImage({
                   if (ct.includes('application/octet-stream')) {
                     const ab = await response.arrayBuffer();
                     const st = useE2EEStore.getState();
-                    const umk = st.umk; const user = useAuthStore.getState().user;
-                    if (!umk || !user?.user_id) throw new Error('LOCKED_NEEDS_UNLOCK');
+                    const umk = st.umk;
+                    const user = useAuthStore.getState().user;
+                    let userIdForDecrypt = viewerUserId ?? user?.user_id ?? null;
+                    if (!userIdForDecrypt) {
+                      logger.debug('[AUTHIMG] full retry decrypt waiting for user_id hydration');
+                      userIdForDecrypt = await ensureViewerUserId(useAuthStore.getState().token ?? token);
+                    }
+                    if (!umk || !userIdForDecrypt) throw new Error('LOCKED_NEEDS_UNLOCK');
                     let hex = ''; for (let i=0;i<umk.length;i++) hex += umk[i].toString(16).padStart(2,'0');
                     // @ts-ignore
                     const worker = new Worker(new URL('../../workers/e2ee.worker.ts', import.meta.url), { type: 'module' });
                     const dec: ArrayBuffer = await new Promise((resolve, reject) => {
                       worker.onmessage = (ev: MessageEvent) => { const d:any = ev.data; if (d?.ok && d.kind==='v3-decrypted') { try{worker.terminate();}catch{}; resolve(d.container); } else if (d?.ok===false) { try{worker.terminate();}catch{}; reject(new Error(d.error||'decrypt failed')); } };
                       worker.onerror = (er:any) => { try{worker.terminate();}catch{}; reject(er?.error||new Error(String(er?.message||er))); };
-                      worker.postMessage({ type:'decrypt-v3', umkHex: hex, userIdUtf8: user.user_id, container: ab }, [ab]);
+                      worker.postMessage({ type:'decrypt-v3', umkHex: hex, userIdUtf8: userIdForDecrypt, container: ab }, [ab]);
                     });
                     return new Blob([dec]);
                   }

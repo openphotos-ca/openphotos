@@ -4,6 +4,7 @@ import React from 'react';
 import { useQueryState, MediaFacet } from '@/hooks/useQueryState';
 import { useQuery } from '@tanstack/react-query';
 import { photosApi } from '@/lib/api/photos';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
 export interface Counts { all?: number; photos?: number; videos?: number; locked?: number; locked_photos?: number; locked_videos?: number; trash?: number }
 
@@ -15,6 +16,7 @@ interface Props {
 export function MediaTypeSegment({ counts: countsProp, onEmptyTrash }: Props) {
   const { state, setMedia, setTrash } = useQueryState();
   const current: MediaFacet = state.media || 'all';
+  const [showEmptyConfirm, setShowEmptyConfirm] = React.useState(false);
   
   const { data: countsData } = useQuery<Counts>({
     queryKey: ['media-counts', state.favorite, state.album, state.albums?.join(','), state.albumSubtree, state.q, state.country, state.region, state.city, state.faces?.join(','), state.locked, state.trash],
@@ -81,6 +83,9 @@ export function MediaTypeSegment({ counts: countsProp, onEmptyTrash }: Props) {
   const photosDisplay = counts?.photos;
   const videosDisplay = counts?.videos;
   const trashDisplay = counts?.trash;
+  const trashCount = typeof trashDisplay === 'number' ? trashDisplay : 0;
+  const canEmptyTrash = !!onEmptyTrash && trashCount > 0;
+  const isTrashActive = state.trash === '1';
 
   return (
     <div className="sticky top-[var(--top-2,4.5rem)] z-20 bg-background/80 backdrop-blur border-b border-border">
@@ -89,26 +94,45 @@ export function MediaTypeSegment({ counts: countsProp, onEmptyTrash }: Props) {
           {btn('all', 'All', allDisplay)}
           {btn('photo', 'Photos', photosDisplay)}
           {btn('video', 'Videos', videosDisplay)}
-          <div className="flex items-center gap-2">
+          <div className={`inline-flex items-center rounded-md border ${isTrashActive ? 'bg-primary/10 text-primary border-primary/30' : 'bg-card text-foreground border-border'}`}>
             <button
-              onClick={() => setTrash(state.trash !== '1')}
-              className={`px-2 sm:px-3 py-1 sm:py-1.5 text-xs sm:text-sm whitespace-nowrap rounded-md border ${state.trash === '1' ? 'bg-primary/10 text-primary border-primary/30 hover:bg-primary/20' : 'bg-card text-foreground border-border hover:bg-muted'}`}
-              aria-pressed={state.trash === '1'}
+              onClick={() => setTrash(!isTrashActive)}
+              className={`px-2 sm:px-3 py-1 sm:py-1.5 text-xs sm:text-sm whitespace-nowrap rounded-l-md ${isTrashActive ? 'hover:bg-primary/20' : 'hover:bg-muted'}`}
+              aria-pressed={isTrashActive}
             >
-              {state.trash === '1' ? 'Hide Trash' : 'Trash'} {typeof trashDisplay === 'number' ? `(${trashDisplay})` : ''}
+              Trash ({trashCount})
             </button>
-            {state.trash === '1' && (
+            {isTrashActive && (
               <button
-                onClick={onEmptyTrash}
-                disabled={!trashDisplay || trashDisplay === 0}
-                className={`px-2 sm:px-3 py-1 sm:py-1.5 text-xs sm:text-sm whitespace-nowrap rounded-md border ${(!trashDisplay || trashDisplay === 0) ? 'bg-muted text-muted-foreground border-border cursor-not-allowed' : 'bg-destructive text-destructive-foreground border-destructive hover:bg-destructive/90'}`}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  if (canEmptyTrash) setShowEmptyConfirm(true);
+                }}
+                disabled={!canEmptyTrash}
+                aria-label="Empty Trash"
+                title="Empty Trash"
+                className={`mr-1 h-5 w-5 rounded-full text-[11px] leading-none border flex items-center justify-center ${canEmptyTrash ? 'border-primary/40 text-primary hover:bg-primary/20' : 'border-border text-muted-foreground cursor-not-allowed'}`}
               >
-                Empty Trash
+                x
               </button>
             )}
           </div>
         </div>
       </div>
+      <ConfirmDialog
+        open={showEmptyConfirm}
+        title="Empty Trash?"
+        description={`This will permanently delete ${trashCount} item${trashCount === 1 ? '' : 's'} from Trash.`}
+        confirmLabel="Empty Trash"
+        cancelLabel="Cancel"
+        variant="destructive"
+        onClose={() => setShowEmptyConfirm(false)}
+        onConfirm={() => {
+          setShowEmptyConfirm(false);
+          onEmptyTrash?.();
+        }}
+      />
     </div>
   );
 }
