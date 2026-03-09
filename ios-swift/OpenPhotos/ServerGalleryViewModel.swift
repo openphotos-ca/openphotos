@@ -563,6 +563,13 @@ final class ServerGalleryViewModel: ObservableObject {
         }
     }
 
+    /// Clears all cached query snapshots. Use after mutations that can affect membership
+    /// across many filter combinations (for example album add/remove) so next filter toggle
+    /// reflects fresh server data.
+    func invalidateAllCache() {
+        cache.removeAll()
+    }
+
     private func signatureBase(of key: String) -> String {
         // Best-effort: remove media-type selectors (`filter_is_video`, `filter_trashed_only`) so we can compare across tabs.
         // This keeps the logic resilient if ordering changes.

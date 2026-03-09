@@ -120,22 +120,42 @@ enum TimeRangePreset {
     }
 }
 
+enum CloudCheckScope {
+    case allPhotos
+    case currentSelection
+}
+
 class GalleryViewModel: ObservableObject {
-    @Published var photos: [PHAsset] = []
+    @Published var photos: [PHAsset] = [] {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     var allPhotos: [PHAsset] = []  // Store all photos separately
     @Published var selectedPhotos: Set<PHAsset> = []
     @Published var isLoading = false
     @Published var isSelectionMode = false
-    @Published var searchText = ""
+    @Published var searchText = "" {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     @Published var showingPermissionAlert = false
     
     // New properties for enhanced gallery
-    @Published var selectedMediaType: MediaType = .all
-    @Published var selectedAlbum: String? = nil
-    @Published var selectedAlbumId: Int64? = nil
-    @Published var selectedAlbumIds: Set<Int64> = []
+    @Published var selectedMediaType: MediaType = .all {
+        didSet { invalidateFilteredMediaCaches() }
+    }
+    @Published var selectedAlbum: String? = nil {
+        didSet { invalidateFilteredMediaCaches() }
+    }
+    @Published var selectedAlbumId: Int64? = nil {
+        didSet { invalidateFilteredMediaCaches() }
+    }
+    @Published var selectedAlbumIds: Set<Int64> = [] {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     @Published var includeSubalbums: Bool = false {
-        didSet { recomputeAlbumFilter() }
+        didSet {
+            recomputeAlbumFilter()
+            invalidateFilteredMediaCaches()
+        }
     }
     @Published var sortOption: SortOption = .dateNewest {
         didSet {
@@ -147,29 +167,44 @@ class GalleryViewModel: ObservableObject {
             if !(sortOption == .dateNewest || sortOption == .dateOldest) && layout == .timeline {
                 layout = .grid
             }
+            invalidateFilteredMediaCaches()
         }
     }
-    @Published var selectedFilter: FilterType? = nil
+    @Published var selectedFilter: FilterType? = nil {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     // Layout (persisted)
     @AppStorage("galleryLayout") private var layoutRawValue: String = LayoutOption.grid.rawValue
     @Published var layout: LayoutOption = .grid {
         didSet { layoutRawValue = layout.rawValue }
     }
-    @Published var showFavoritesOnly: Bool = false
+    @Published var showFavoritesOnly: Bool = false {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     // Locked filter: when false (default), locked items are excluded.
     // When true, only locked items are shown (requires unlock gate in UI).
-    @Published var showLockedOnly: Bool = false
+    @Published var showLockedOnly: Bool = false {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     // Per-photo lock override cache (localIdentifier -> override).
     //
     // This is used for lightweight UI elements (e.g., lock badges) and is kept in sync via
     // `SyncRepository.lockOverrideChangedNotification` to avoid per-cell DB reads during scrolling.
-    @Published private(set) var lockOverrideByLocalIdentifier: [String: Bool] = [:]
+    @Published private(set) var lockOverrideByLocalIdentifier: [String: Bool] = [:] {
+        didSet { invalidateFilteredMediaCaches(clearLockCache: true) }
+    }
     // Per-photo cloud backup cache (localIdentifier -> backed up).
     //
     // Populated from local DB and kept in sync via `SyncRepository.cloudStatusChangedNotification`.
     @Published private(set) var cloudBackedUpLocalIdentifiers: Set<String> = []
     // Per-photo cloud backup cache (localIdentifier -> missing in cloud, but only after being checked).
-    @Published private(set) var cloudMissingLocalIdentifiers: Set<String> = []
+    @Published private(set) var cloudMissingLocalIdentifiers: Set<String> = [] {
+        didSet {
+            if selectedFilter == .missingInCloud {
+                invalidateFilteredMediaCaches()
+            }
+        }
+    }
     @Published var isCloudCheckRunning: Bool = false
     // Deprecated: system albums (kept for backward compatibility)
     @Published var albums: [AlbumInfo] = []
@@ -178,10 +213,24 @@ class GalleryViewModel: ObservableObject {
     @Published var dbAlbumsByRecent: [Album] = [] // Ordered by most recent use (for chips)
     @Published var recentlyCreatedAlbumId: Int64? = nil // Used to float new album to front of chips
     @Published var showingTimeRangeDialog = false
-    @Published var selectedTimeRange: TimeRangePreset = .allTime
-    @Published var customStartDate: Date? = nil
-    @Published var customEndDate: Date? = nil
+    @Published var selectedTimeRange: TimeRangePreset = .allTime {
+        didSet { invalidateFilteredMediaCaches() }
+    }
+    @Published var customStartDate: Date? = nil {
+        didSet { invalidateFilteredMediaCaches() }
+    }
+    @Published var customEndDate: Date? = nil {
+        didSet { invalidateFilteredMediaCaches() }
+    }
     private var randomSeed = Int.random(in: 0...Int.max)
+    private var cloudCheckTask: Task<Void, Never>? = nil
+    private var filterInputsVersion: Int = 0
+    private var filteredMediaCacheVersion: Int = -1
+    private var filteredMediaCache: [PHAsset] = []
+    private var filteredMediaWithoutTypeCacheVersion: Int = -1
+    private var filteredMediaWithoutTypeCache: [PHAsset] = []
+    private var cachedLockStateByLocalIdentifier: [String: Bool] = [:]
+    private var cachedLockScopeSelectedOnly: Bool?
     
     // Full-screen viewer properties
     @Published var showingFullScreenViewer = false
@@ -328,18 +377,62 @@ class GalleryViewModel: ObservableObject {
         }
     }
 
+    private func invalidateFilteredMediaCaches(clearLockCache: Bool = false) {
+        filterInputsVersion &+= 1
+        filteredMediaCacheVersion = -1
+        filteredMediaWithoutTypeCacheVersion = -1
+        if clearLockCache {
+            cachedLockStateByLocalIdentifier.removeAll(keepingCapacity: true)
+            cachedLockScopeSelectedOnly = nil
+        }
+    }
+
+    private func isAssetLockedCached(localIdentifier: String, scopeSelectedOnly: Bool) -> Bool {
+        if cachedLockScopeSelectedOnly != scopeSelectedOnly {
+            cachedLockScopeSelectedOnly = scopeSelectedOnly
+            cachedLockStateByLocalIdentifier.removeAll(keepingCapacity: true)
+        }
+        if let override = lockOverrideByLocalIdentifier[localIdentifier] {
+            return override
+        }
+        if let cached = cachedLockStateByLocalIdentifier[localIdentifier] {
+            return cached
+        }
+        let locked = AlbumService.shared.isAssetLocked(
+            assetLocalIdentifier: localIdentifier,
+            scopeSelectedOnly: scopeSelectedOnly
+        )
+        cachedLockStateByLocalIdentifier[localIdentifier] = locked
+        return locked
+    }
+
     @MainActor
-    func startCloudCheck() {
+    func startCloudCheck(scope: CloudCheckScope) {
         guard !isCloudCheckRunning else { return }
-        let snapshot = allPhotos
+
+        let snapshot: [PHAsset]
+        switch scope {
+        case .allPhotos:
+            snapshot = allPhotos
+        case .currentSelection:
+            snapshot = filteredMedia
+        }
+
         guard !snapshot.isEmpty else {
-            ToastManager.shared.show("No photos to check")
+            switch scope {
+            case .allPhotos:
+                ToastManager.shared.show("No photos to check")
+            case .currentSelection:
+                ToastManager.shared.show("No photos in current selection")
+            }
             return
         }
+
         isCloudCheckRunning = true
+        cloudCheckTask = nil
         ToastManager.shared.show("Checking cloud backup…", duration: 2.0)
 
-        Task.detached { [weak self] in
+        let task = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             do {
                 let result = try await CloudBackupCheckService.shared.runCloudCheck(
@@ -347,18 +440,37 @@ class GalleryViewModel: ObservableObject {
                     onProgress: { _, _ in }
                 )
                 await MainActor.run {
+                    self.cloudCheckTask = nil
                     self.isCloudCheckRunning = false
                     self.refreshCloudBackedUp()
                     self.refreshCloudMissing()
                     ToastManager.shared.showPinned("Cloud check: \(result.backedUp) backed up, \(result.missing) missing, \(result.skipped) not checked")
                 }
+            } catch is CancellationError {
+                await MainActor.run {
+                    self.cloudCheckTask = nil
+                    self.isCloudCheckRunning = false
+                    self.refreshCloudBackedUp()
+                    self.refreshCloudMissing()
+                    ToastManager.shared.show("Cloud check stopped")
+                }
             } catch {
                 await MainActor.run {
+                    self.cloudCheckTask = nil
                     self.isCloudCheckRunning = false
                     ToastManager.shared.showPinned("Cloud check failed: \(error.localizedDescription)")
                 }
             }
         }
+
+        cloudCheckTask = task
+    }
+
+    @MainActor
+    func stopCloudCheck() {
+        guard isCloudCheckRunning, let task = cloudCheckTask else { return }
+        ToastManager.shared.show("Stopping cloud check…", duration: 1.5)
+        task.cancel()
     }
     
     private func handleAuthorizationChange(_ status: PHAuthorizationStatus) {
@@ -393,6 +505,16 @@ class GalleryViewModel: ObservableObject {
         photoService.loadPhotos()
         loadDbAlbums()
     }
+
+    func syncSelectedAssets(_ assets: [PHAsset], source: String = "photos-actions") {
+        guard !assets.isEmpty else { return }
+        HybridUploadManager.shared.startUpload(assets: assets)
+        let localIds = Set(assets.map { $0.localIdentifier })
+        SyncService.shared.scheduleManualCloudCheckAfterUpload(
+            localIdentifiers: localIds,
+            source: source
+        )
+    }
     
     // MARK: - Album Database
     
@@ -418,6 +540,7 @@ class GalleryViewModel: ObservableObject {
         DispatchQueue.main.async { [weak self] in
             self?.dbAlbums = all
             self?.dbAlbumsByRecent = recent
+            self?.invalidateFilteredMediaCaches(clearLockCache: true)
         }
     }
 
@@ -551,13 +674,12 @@ class GalleryViewModel: ObservableObject {
     
     func startSelectionMode() {
         isSelectionMode = true
-        // Don't clear selected photos - preserve existing selection
     }
     
     func exitSelectionMode() {
-        // Only exit selection mode, keep selected photos if any
+        // Exit selection mode and clear previous selections.
         isSelectionMode = false
-        // Don't clear selectedPhotos here - keep them for the action bar
+        selectedPhotos.removeAll()
     }
     
     func clearSelection() {
@@ -654,6 +776,10 @@ class GalleryViewModel: ObservableObject {
     // MARK: - Computed Properties
     
     var filteredMedia: [PHAsset] {
+        if filteredMediaCacheVersion == filterInputsVersion {
+            return filteredMediaCache
+        }
+
         var assets = photos
         
         // Filter by media type
@@ -724,11 +850,11 @@ class GalleryViewModel: ObservableObject {
             let onlySelectedScope = (AuthManager.shared.syncScope == .selectedAlbums)
             if showLockedOnly {
                 assets = assets.filter { asset in
-                    AlbumService.shared.isAssetLocked(assetLocalIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
+                    isAssetLockedCached(localIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
                 }
             } else {
                 assets = assets.filter { asset in
-                    !AlbumService.shared.isAssetLocked(assetLocalIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
+                    !isAssetLockedCached(localIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
                 }
             }
         }
@@ -753,12 +879,18 @@ class GalleryViewModel: ObservableObject {
             // In full implementation, this would search by metadata, location, etc.
             // For now, we'll just return the sorted and filtered results
         }
-        
+
+        filteredMediaCache = assets
+        filteredMediaCacheVersion = filterInputsVersion
         return assets
     }
     
     // Helper to get filtered media without media type filter
     private var filteredMediaWithoutMediaType: [PHAsset] {
+        if filteredMediaWithoutTypeCacheVersion == filterInputsVersion {
+            return filteredMediaWithoutTypeCache
+        }
+
         var assets = photos
         
         // If photos are filtered via multi-select OR tree selection, avoid refiltering here
@@ -788,11 +920,11 @@ class GalleryViewModel: ObservableObject {
             let onlySelectedScope = (AuthManager.shared.syncScope == .selectedAlbums)
             if showLockedOnly {
                 assets = assets.filter { asset in
-                    AlbumService.shared.isAssetLocked(assetLocalIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
+                    isAssetLockedCached(localIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
                 }
             } else {
                 assets = assets.filter { asset in
-                    !AlbumService.shared.isAssetLocked(assetLocalIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
+                    !isAssetLockedCached(localIdentifier: asset.localIdentifier, scopeSelectedOnly: onlySelectedScope)
                 }
             }
         }
@@ -831,7 +963,8 @@ class GalleryViewModel: ObservableObject {
                 assets = assets.filter { missing.contains($0.localIdentifier) }
             }
         }
-        
+        filteredMediaWithoutTypeCache = assets
+        filteredMediaWithoutTypeCacheVersion = filterInputsVersion
         return assets
     }
     

@@ -2,6 +2,7 @@ import SwiftUI
 
 // Server-backed Photos tab view. Mirrors the layout of the local Gallery with server data.
 struct ServerGalleryView: View {
+    let isActiveTab: Bool
     @StateObject var viewModel = ServerGalleryViewModel()
     @EnvironmentObject var auth: AuthManager
     @EnvironmentObject var unlockCtl: E2EEUnlockController
@@ -21,7 +22,6 @@ struct ServerGalleryView: View {
     @State private var albumTreeSelectedId: Int? = nil
     @State private var showLogin: Bool = false
     @State private var showFilters: Bool = false
-    @State private var showReindexConfirmation: Bool = false
     // Header collapse on scroll
     @State private var showHeaders: Bool = true
     @State private var lastOffset: CGFloat = 0
@@ -45,6 +45,12 @@ struct ServerGalleryView: View {
     @State private var showManageFaces: Bool = false
     @State private var isEnterpriseEdition: Bool = false
     @State private var didInitialLoad: Bool = false
+    @State private var pendingPostSyncRefresh: Bool = false
+    @State private var pendingSyncCompletionVersion: Int64 = 0
+    @State private var lastConsumedSyncCompletionVersion: Int64 = 0
+    @State private var lastAutoRefreshAt: Date = .distantPast
+    @State private var hasScheduledThrottledAutoRefreshRetry: Bool = false
+    private let autoRefreshThrottleSeconds: TimeInterval = 1.5
 
     // Sharing state (Enterprise Edition)
     @State private var showSharing: Bool = false
@@ -53,6 +59,8 @@ struct ServerGalleryView: View {
     @State private var shareError: String? = nil
     @State private var showShareError: Bool = false
     @State private var isPreparingShare: Bool = false
+    @State private var didCreateShareInCurrentSheet: Bool = false
+    @State private var showEmptyTrashConfirm: Bool = false
 
     // Similar Media state
     @State private var showSimilarMedia: Bool = false
@@ -85,6 +93,78 @@ struct ServerGalleryView: View {
         }
     }
 
+    private func syncCompletionVersion(from notification: Notification) -> Int64? {
+        guard let raw = notification.userInfo?[SyncRunCompletedUserInfoKey.version] else { return nil }
+        if let n = raw as? NSNumber { return n.int64Value }
+        if let v = raw as? Int64 { return v }
+        if let v = raw as? Int { return Int64(v) }
+        if let s = raw as? String, let v = Int64(s) { return v }
+        return nil
+    }
+
+    private func markPostSyncRefreshPending(version: Int64, source: String) {
+        guard version > lastConsumedSyncCompletionVersion else {
+            print(
+                "[PERF] cloud-auto-refresh-skip reason=already-consumed source=\(source) version=\(version) consumed=\(lastConsumedSyncCompletionVersion)"
+            )
+            return
+        }
+        pendingPostSyncRefresh = true
+        pendingSyncCompletionVersion = max(pendingSyncCompletionVersion, version)
+        print(
+            "[PERF] cloud-auto-refresh-scheduled source=\(source) version=\(version) is_active_tab=\(isActiveTab ? 1 : 0)"
+        )
+    }
+
+    private func handleSyncRunCompleted(version: Int64) {
+        markPostSyncRefreshPending(version: version, source: "notification")
+        runDeferredPostSyncRefreshIfNeeded(source: "notification")
+    }
+
+    private func runDeferredPostSyncRefreshIfNeeded(source: String) {
+        guard pendingPostSyncRefresh else { return }
+        guard isActiveTab else {
+            print(
+                "[PERF] cloud-auto-refresh-skip reason=tab-inactive source=\(source) pending_version=\(pendingSyncCompletionVersion)"
+            )
+            return
+        }
+        let version = pendingSyncCompletionVersion
+        guard version > lastConsumedSyncCompletionVersion else {
+            pendingPostSyncRefresh = false
+            print(
+                "[PERF] cloud-auto-refresh-skip reason=already-consumed source=\(source) version=\(version) consumed=\(lastConsumedSyncCompletionVersion)"
+            )
+            return
+        }
+        performPostSyncRefresh(reason: source, version: version)
+    }
+
+    private func performPostSyncRefresh(reason: String, version: Int64) {
+        let now = Date()
+        let elapsed = now.timeIntervalSince(lastAutoRefreshAt)
+        if elapsed < autoRefreshThrottleSeconds {
+            let wait = max(0.1, autoRefreshThrottleSeconds - elapsed)
+            print(
+                "[PERF] cloud-auto-refresh-skip reason=throttled source=\(reason) version=\(version) wait_ms=\(Int(wait * 1000.0))"
+            )
+            guard !hasScheduledThrottledAutoRefreshRetry else { return }
+            hasScheduledThrottledAutoRefreshRetry = true
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait) {
+                self.hasScheduledThrottledAutoRefreshRetry = false
+                self.runDeferredPostSyncRefreshIfNeeded(source: "throttle-retry")
+            }
+            return
+        }
+
+        lastAutoRefreshAt = now
+        pendingPostSyncRefresh = false
+        lastConsumedSyncCompletionVersion = version
+        print("[PERF] cloud-auto-refresh-run source=\(reason) version=\(version)")
+        viewModel.refreshAll(resetPage: true, forceNetwork: true)
+        Task { await viewModel.reloadAlbums() }
+    }
+
     var body: some View {
         mainContent
             .safeAreaInset(edge: .bottom) {
@@ -115,6 +195,13 @@ struct ServerGalleryView: View {
                 } else if !auth.isAuthenticated {
                     didInitialLoad = false
                 }
+                if auth.isAuthenticated {
+                    let latestVersion = SyncService.shared.latestSyncCompletionVersion()
+                    if latestVersion > lastConsumedSyncCompletionVersion {
+                        markPostSyncRefreshPending(version: latestVersion, source: "onAppear-fallback")
+                        runDeferredPostSyncRefreshIfNeeded(source: "onAppear-fallback")
+                    }
+                }
             }
             .onChange(of: auth.isAuthenticated) { isAuthed in
                 if isAuthed {
@@ -125,6 +212,15 @@ struct ServerGalleryView: View {
                     didInitialLoad = false
                     isEnterpriseEdition = false
                     CapabilitiesService.shared.invalidate()
+                    pendingPostSyncRefresh = false
+                    pendingSyncCompletionVersion = 0
+                    lastConsumedSyncCompletionVersion = 0
+                    hasScheduledThrottledAutoRefreshRetry = false
+                }
+            }
+            .onChange(of: isActiveTab) { active in
+                if active {
+                    runDeferredPostSyncRefreshIfNeeded(source: "tab-active")
                 }
             }
             .onChange(of: auth.serverURL) { _ in
@@ -153,6 +249,13 @@ struct ServerGalleryView: View {
             .edgesIgnoringSafeArea(.top)
             .onReceive(NotificationCenter.default.publisher(for: .authUnauthorized)) { _ in
                 showLogin = true
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .syncRunCompleted)) { note in
+                guard let version = syncCompletionVersion(from: note) else {
+                    print("[PERF] cloud-auto-refresh-skip reason=missing-version source=notification")
+                    return
+                }
+                handleSyncRunCompleted(version: version)
             }
             .fullScreenCover(item: $selectedViewer) { sel in
                 let start = viewModel.photos.firstIndex(where: { $0.asset_id == sel.id }) ?? 0
@@ -190,12 +293,15 @@ struct ServerGalleryView: View {
             .sheet(isPresented: $showSharing) {
                 SharingView()
             }
-            .sheet(isPresented: $showCreateShare) {
+            .sheet(isPresented: $showCreateShare, onDismiss: handleCreateShareSheetDismissed) {
                 if let context = shareContext {
                     CreateShareSheet(
                         objectKind: context.kind,
                         objectId: context.id,
-                        objectName: context.name
+                        objectName: context.name,
+                        onShareCreated: {
+                            didCreateShareInCurrentSheet = true
+                        }
                     )
                 } else {
                     // This shouldn't happen, but provide fallback UI
@@ -215,6 +321,15 @@ struct ServerGalleryView: View {
                 }
             } message: {
                 Text(shareError ?? "An error occurred while sharing")
+            }
+            .alert("Empty Trash?", isPresented: $showEmptyTrashConfirm) {
+                Button("Empty Trash", role: .destructive) {
+                    Task { await emptyTrash() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                let trashCount = viewModel.mediaCounts?.trash ?? 0
+                Text("This will permanently delete \(trashCount) item\(trashCount == 1 ? "" : "s") from Trash.")
             }
             .overlay {
                 if isPreparingShare {
@@ -347,6 +462,9 @@ struct ServerGalleryView: View {
                                         let totalSpacing = spacing * (columnsCount - 1) + spacing * 2
                                         let size = ((UIScreen.main.bounds.width - totalSpacing) / columnsCount).rounded(.down)
                                         RemoteThumbnailView(photo: p, cellSize: size)
+                                            .overlay(alignment: .bottom) {
+                                                cloudRatingBadge(for: p)
+                                            }
                                             .overlay(alignment: .topTrailing) {
                                                 if viewModel.isSelectionMode {
                                                     let isSel = viewModel.selected.contains(p.asset_id)
@@ -358,7 +476,6 @@ struct ServerGalleryView: View {
                                                     .allowsHitTesting(false)
                                                 }
                                             }
-                                            .onLongPressGesture(minimumDuration: 0.3) { viewModel.isSelectionMode = true; viewModel.toggleSelection(assetId: p.asset_id) }
                                             .onTapGesture { if viewModel.isSelectionMode { viewModel.toggleSelection(assetId: p.asset_id) } else { onTileTap(p) } }
                                             .onAppear { if idx >= viewModel.photos.count - 12 { Task { await viewModel.loadNextPageIfNeeded() } } }
                                     }
@@ -488,10 +605,15 @@ struct ServerGalleryView: View {
                     mediaTypeTab(title: "All", count: viewModel.mediaCounts?.all ?? 0, isSelected: viewModel.selectedMediaType == .all) { viewModel.selectedMediaType = .all }
                     mediaTypeTab(title: "Photos", count: viewModel.mediaCounts?.photos ?? 0, isSelected: viewModel.selectedMediaType == .photos) { viewModel.selectedMediaType = .photos }
                     mediaTypeTab(title: "Videos", count: viewModel.mediaCounts?.videos ?? 0, isSelected: viewModel.selectedMediaType == .videos) { viewModel.selectedMediaType = .videos }
-                    mediaTypeTab(title: "Trash", count: viewModel.mediaCounts?.trash ?? 0, isSelected: viewModel.selectedMediaType == .trash) { viewModel.selectedMediaType = .trash }
+                    trashMediaTypeTab(
+                        count: viewModel.mediaCounts?.trash ?? 0,
+                        isSelected: viewModel.selectedMediaType == .trash,
+                        onSelect: { viewModel.selectedMediaType = .trash },
+                        onEmptyTrash: { showEmptyTrashConfirm = true }
+                    )
                     Spacer()
                     Button {
-                        showReindexConfirmation = true
+                        Task { await viewModel.pullToRefresh() }
                     } label: {
                         Image(systemName: "arrow.clockwise")
                             .font(.system(size: 16, weight: .semibold))
@@ -501,14 +623,6 @@ struct ServerGalleryView: View {
                     .disabled(viewModel.isLoading)
                     .accessibilityLabel("Refresh")
                     .buttonStyle(.plain)
-                    .alert("ReIndex Photos?", isPresented: $showReindexConfirmation) {
-                        Button("Cancel", role: .cancel) {}
-                        Button("ReIndex") {
-                            viewModel.refreshCurrentTabAndInvalidateOtherMediaTypes()
-                        }
-                    } message: {
-                        Text("This will refresh and reindex photos for the current view.")
-                    }
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
@@ -531,12 +645,15 @@ struct ServerGalleryView: View {
             Button("Select All") { viewModel.selectAll() }
             Button("Deselect All") { viewModel.deselectAll() }
             Spacer()
-            Button("Actions") { showingActions = true }
+            if !viewModel.selected.isEmpty {
+                Button("Actions") { showingActions = true }
+            }
         }
         .padding()
         .background(.ultraThinMaterial)
         .confirmationDialog("Actions", isPresented: $showingActions) {
-            Button("Share Selected") {
+            Button("Add to Album…") { albumPickerRemoveMode = false; showAlbumPicker = true }
+            Button("Share") {
                 // Dismiss the action dialog first
                 showingActions = false
 
@@ -549,6 +666,7 @@ struct ServerGalleryView: View {
 
                 // If only one photo selected, share it directly
                 if viewModel.selected.count == 1, let singleAsset = viewModel.selected.first {
+                    didCreateShareInCurrentSheet = false
                     shareContext = ShareContext(
                         kind: .asset,
                         id: singleAsset,
@@ -565,32 +683,46 @@ struct ServerGalleryView: View {
                             isPreparingShare = true
                         }
 
+                        var preparedAlbumId: Int? = nil
                         do {
-                            let albumName = "Shared Selection (\(viewModel.selected.count) photos)"
+                            let selectedAssetIds = Array(viewModel.selected)
+                            let albumName = "Shared Selection (\(selectedAssetIds.count) photos)"
 
                             // Create a new album
                             let album = try await ServerPhotosService.shared.createAlbum(
                                 name: albumName,
-                                description: "Collection of \(viewModel.selected.count) photos for sharing"
+                                // Hidden from regular album listings; used as immutable share snapshot.
+                                description: "Share snapshot"
                             )
+                            preparedAlbumId = album.id
 
                             // Add all selected photos to the album
                             try await ServerPhotosService.shared.addPhotosToAlbum(
                                 albumId: album.id,
-                                assetIds: Array(viewModel.selected)
+                                assetIds: selectedAssetIds
                             )
 
                             // Now share the album containing all photos
                             await MainActor.run {
                                 isPreparingShare = false
+                                didCreateShareInCurrentSheet = false
                                 shareContext = ShareContext(
                                     kind: .album,
                                     id: String(album.id),
-                                    name: albumName
+                                    name: albumName,
+                                    temporaryAlbumId: album.id
                                 )
                                 showCreateShare = true
                             }
                         } catch {
+                            if let albumId = preparedAlbumId {
+                                do {
+                                    try await ServerPhotosService.shared.deleteAlbum(id: albumId)
+                                    print("[SHARE] cleaned failed selection album id=\(albumId)")
+                                } catch {
+                                    print("[SHARE] failed cleanup after prepare error id=\(albumId) error=\(error.localizedDescription)")
+                                }
+                            }
                             await MainActor.run {
                                 isPreparingShare = false
                                 shareError = "Failed to prepare photos for sharing: \(error.localizedDescription)"
@@ -600,17 +732,10 @@ struct ServerGalleryView: View {
                     }
                 }
             }
-            Divider()
-            Button("Favorite") { Task { await bulkFavorite(true) } }
-            Button("Unfavorite") { Task { await bulkFavorite(false) } }
-            Button("Add to Album…") { albumPickerRemoveMode = false; showAlbumPicker = true }
-            Button("Remove from Album…") { albumPickerRemoveMode = true; showAlbumPicker = true }
-            Button("Lock (one-way)") { Task { await bulkLock() } }
-            Button("Delete (to Trash)", role: .destructive) { Task { await bulkDelete() } }
-            Button("Restore from Trash") { Task { await bulkRestore() } }
-            Button("Set Rating ★★★★☆") { Task { await bulkRating(4) } }
+            Button("Lock") { Task { await bulkLock() } }
+            Button("Add to Favorites") { Task { await bulkFavorite(true) } }
+            Button("Delete", role: .destructive) { Task { await bulkDelete() } }
             Button("Clear Rating") { Task { await bulkRating(nil) } }
-            Button("Edit Caption/Description…") { showMetadataSheet = true }
             Button("Cancel", role: .cancel) {}
         }
     }
@@ -683,6 +808,42 @@ struct ServerGalleryView: View {
         .buttonStyle(PlainButtonStyle())
     }
 
+    private func trashMediaTypeTab(
+        count: Int,
+        isSelected: Bool,
+        onSelect: @escaping () -> Void,
+        onEmptyTrash: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 4) {
+            Button(action: onSelect) {
+                Text("Trash \(count)")
+                    .font(.caption2)
+                    .fontWeight(isSelected ? .semibold : .regular)
+                    .foregroundColor(isSelected ? .blue : .secondary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .allowsTightening(true)
+            }
+            .buttonStyle(PlainButtonStyle())
+
+            if isSelected {
+                Button(action: onEmptyTrash) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(count > 0 ? .blue : .secondary)
+                        .frame(width: 16, height: 16)
+                        .background(Circle().fill(Color.blue.opacity(0.12)))
+                }
+                .buttonStyle(PlainButtonStyle())
+                .disabled(count <= 0)
+                .accessibilityLabel("Empty Trash")
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(RoundedRectangle(cornerRadius: 16).fill(isSelected ? Color.blue.opacity(0.1) : Color.clear))
+    }
+
     // MARK: - Actions
     private func toggleSelectionMode() {
         // Do not allow entering selection mode while header is hidden.
@@ -715,16 +876,50 @@ struct ServerGalleryView: View {
         viewModel.refreshAll(resetPage: true)
     }
     private func bulkLock() async {
-        let ids = viewModel.selected
+        let ids = Array(viewModel.selected)
+        guard !ids.isEmpty else { return }
+        print("[LOCKED] bulk lock requested count=\(ids.count)")
         guard E2EEManager.shared.hasValidUMKRespectingTTL() || E2EEManager.shared.unlockWithDeviceKey(prompt: "Unlock to lock items") else {
             unlockCtl.requireUnlock(reason: "Unlock to lock items") { ok in Task { if ok { self.viewModel.refreshAll(resetPage: true) } } }
             return
         }
-        await withTaskGroup(of: Void.self) { group in
-            for id in ids { group.addTask { try? await ServerPhotosService.shared.lock(assetId: id) } }
+
+        var photoById = Dictionary(uniqueKeysWithValues: viewModel.photos.map { ($0.asset_id, $0) })
+        let missingIds = ids.filter { photoById[$0] == nil }
+        if !missingIds.isEmpty {
+            if let fetched = try? await ServerPhotosService.shared.getPhotosByAssetIds(missingIds, includeLocked: true) {
+                for photo in fetched { photoById[photo.asset_id] = photo }
+            }
         }
+
+        var lockedCount = 0
+        var failedCount = 0
+        for id in ids {
+            guard let photo = photoById[id] else {
+                failedCount += 1
+                print("[LOCKED] bulk lock missing photo model asset=\(id)")
+                continue
+            }
+            do {
+                try await ServerPhotosService.shared.lockWithEncryption(photo: photo)
+                lockedCount += 1
+                print("[LOCKED] bulk lock success asset=\(id)")
+            } catch {
+                failedCount += 1
+                print("[LOCKED] bulk lock failed asset=\(id) err=\(error.localizedDescription)")
+            }
+        }
+
         await MainActor.run { viewModel.selected.removeAll(); viewModel.isSelectionMode = false }
-        viewModel.refreshAll(resetPage: true)
+        // Lock mutates membership across locked/unlocked result sets. Drop all cached snapshots so
+        // switching to Locked filter does not restore stale pre-lock data.
+        viewModel.invalidateAllCache()
+        viewModel.refreshAll(resetPage: true, forceNetwork: true)
+        if failedCount > 0 {
+            ToastManager.shared.show("Locked \(lockedCount), failed \(failedCount)")
+        } else if lockedCount > 0 {
+            ToastManager.shared.show("Locked \(lockedCount)")
+        }
     }
     private func bulkDelete() async {
         let ids = Array(viewModel.selected)
@@ -766,6 +961,23 @@ struct ServerGalleryView: View {
         // Mutations must bypass the in-memory cache so counts and grids update immediately.
         viewModel.refreshCurrentTabAndInvalidateOtherMediaTypes()
     }
+    @ViewBuilder
+    private func cloudRatingBadge(for photo: ServerPhoto) -> some View {
+        if let raw = photo.rating {
+            let rating = max(0, min(raw, 5))
+            if rating > 0 {
+                let stars = String(repeating: "★", count: rating) + String(repeating: "☆", count: max(0, 5 - rating))
+                Text(stars)
+                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .foregroundColor(.yellow)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(Color.black.opacity(0.65), in: Capsule())
+                    .padding(.bottom, 5)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
     private func bulkRestore() async {
         let ids = Array(viewModel.selected)
         try? await ServerPhotosService.shared.restorePhotos(assetIds: ids)
@@ -806,27 +1018,67 @@ struct ServerGalleryView: View {
         // Mutations must bypass the in-memory cache so counts and grids update immediately.
         viewModel.refreshCurrentTabAndInvalidateOtherMediaTypes()
     }
+
+    private func emptyTrash() async {
+        do {
+            let purged = try await ServerPhotosService.shared.emptyTrash()
+            await MainActor.run {
+                viewModel.selected.removeAll()
+                viewModel.isSelectionMode = false
+                if viewModel.selectedMediaType == .trash {
+                    viewModel.photos.removeAll()
+                }
+                if let counts = viewModel.mediaCounts {
+                    viewModel.mediaCounts = ServerMediaCounts(
+                        all: counts.all,
+                        photos: counts.photos,
+                        videos: counts.videos,
+                        locked: counts.locked,
+                        locked_photos: counts.locked_photos,
+                        locked_videos: counts.locked_videos,
+                        trash: 0
+                    )
+                }
+            }
+            viewModel.refreshCurrentTabAndInvalidateOtherMediaTypes()
+            ToastManager.shared.show("Trash cleared (\(purged))")
+        } catch {
+            ToastManager.shared.show("Failed to empty trash")
+        }
+    }
+
     private func bulkRating(_ rating: Int?) async {
         let ids = viewModel.selected
         await withTaskGroup(of: Void.self) { group in
             for id in ids { group.addTask { try? await ServerPhotosService.shared.updateRating(assetId: id, rating: rating) } }
         }
         await MainActor.run { viewModel.selected.removeAll(); viewModel.isSelectionMode = false }
-        viewModel.refreshAll(resetPage: true)
+        // Ratings are frequently stale in list cache; force a network readback after mutation.
+        viewModel.refreshAll(resetPage: true, forceNetwork: true)
     }
     private func addSelectedToAlbum() async {
         guard let aid = albumPickerSelectedId else { return }
         let ids = Array(viewModel.selected)
         try? await ServerPhotosService.shared.addPhotosToAlbum(albumId: aid, assetIds: ids)
-        await MainActor.run { viewModel.selected.removeAll(); viewModel.isSelectionMode = false }
-        viewModel.refreshAll(resetPage: true)
+        await MainActor.run {
+            viewModel.selected.removeAll()
+            viewModel.isSelectionMode = false
+            viewModel.invalidateAllCache()
+        }
+        viewModel.refreshAll(resetPage: true, forceNetwork: true)
+        Task { await viewModel.reloadAlbums() }
     }
     private func removeSelectedFromAlbum() async {
         guard let aid = albumPickerSelectedId else { return }
         let ids = Array(viewModel.selected)
         try? await ServerPhotosService.shared.removePhotosFromAlbum(albumId: aid, assetIds: ids)
-        await MainActor.run { viewModel.selected.removeAll(); viewModel.isSelectionMode = false }
-        viewModel.refreshAll(resetPage: true)
+        await MainActor.run {
+            viewModel.selected.removeAll()
+            viewModel.isSelectionMode = false
+            viewModel.invalidateAllCache()
+        }
+        viewModel.refreshAll(resetPage: true, forceNetwork: true)
+        Task { await viewModel.reloadAlbums() }
     }
     private func applyMetadata() async {
         let ids = viewModel.selected
@@ -922,6 +1174,26 @@ struct ServerGalleryView: View {
         dirAccum = 0
         lastDir = 0
         lastOffset = 0
+    }
+
+    private func handleCreateShareSheetDismissed() {
+        let context = shareContext
+        let didCreateShare = didCreateShareInCurrentSheet
+        shareContext = nil
+        didCreateShareInCurrentSheet = false
+
+        guard !didCreateShare, let albumId = context?.temporaryAlbumId else {
+            return
+        }
+
+        Task {
+            do {
+                try await ServerPhotosService.shared.deleteAlbum(id: albumId)
+                print("[SHARE] cleaned temporary selection album id=\(albumId)")
+            } catch {
+                print("[SHARE] failed to clean temporary selection album id=\(albumId) error=\(error.localizedDescription)")
+            }
+        }
     }
 
     private var headerIsVisible: Bool { showHeaders || viewModel.photos.isEmpty }
@@ -1102,4 +1374,12 @@ struct ShareContext {
     let kind: Share.ObjectKind
     let id: String
     let name: String?
+    let temporaryAlbumId: Int?
+
+    init(kind: Share.ObjectKind, id: String, name: String?, temporaryAlbumId: Int? = nil) {
+        self.kind = kind
+        self.id = id
+        self.name = name
+        self.temporaryAlbumId = temporaryAlbumId
+    }
 }

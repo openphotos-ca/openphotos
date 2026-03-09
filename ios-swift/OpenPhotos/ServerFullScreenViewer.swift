@@ -232,7 +232,16 @@ struct ServerFullScreenViewer: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                 } else {
                     Color.black.frame(width: geo.size.width, height: geo.size.height)
-                        .task { await loadCurrentImage() }
+                        .onAppear {
+                            let assetId = current.asset_id
+                            guard !assetId.isEmpty else { return }
+                            // Use an unstructured task here. A `.task` attached to this branch gets
+                            // canceled immediately when `isLoadingImage` flips true (branch swap),
+                            // causing an endless cancel/restart loop.
+                            if imageCache[assetId] == nil && !failedImageAssetIds.contains(assetId) {
+                                Task { await loadImage(assetId: assetId) }
+                            }
+                        }
                 }
                 if isLive {
                     liveBadge
@@ -761,7 +770,14 @@ struct ServerFullScreenViewer: View {
 
     private func lock() async {
         guard E2EEManager.shared.hasValidUMKRespectingTTL() || E2EEManager.shared.unlockWithDeviceKey(prompt: "Unlock to lock item") else { ToastManager.shared.show("Unlock required"); return }
-        do { try await ServerPhotosService.shared.lock(assetId: current.asset_id); await hydrateUI(); ToastManager.shared.show("Locked") } catch { ToastManager.shared.show("Lock failed") }
+        do {
+            try await ServerPhotosService.shared.lockWithEncryption(photo: current)
+            await hydrateUI()
+            ToastManager.shared.show("Locked")
+        } catch {
+            let msg = (error as NSError).localizedDescription
+            ToastManager.shared.show(msg.isEmpty ? "Lock failed" : msg)
+        }
     }
     private func unlock() async {
         // Unlock is server-side via metadata change path; in OSS we support one-way lock. Keep UI feedback only.
@@ -855,6 +871,7 @@ struct ServerFullScreenViewer: View {
             // 2) Fetch original image bytes; handle locked via PAE3 decrypt. Use AuthorizedHTTPClient for auth/refresh.
             let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/images/" + (assetId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? assetId))
             var req = URLRequest(url: url)
+            req.timeoutInterval = 30
             // Prefer original HEIC when supported by the client
             req.setValue("image/heic, image/*;q=0.8", forHTTPHeaderField: "Accept")
 
@@ -1554,6 +1571,8 @@ private struct EEInlineShareSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var email: String = ""
     @State private var linkURL: String? = nil
+    private let shareService = ShareService.shared
+    private let photosService = ServerPhotosService.shared
     var body: some View {
         NavigationView {
             Form {
@@ -1570,30 +1589,73 @@ private struct EEInlineShareSheet: View {
         }
     }
     private func createBasicShare() async {
-        // Minimal owner-side creation; advanced E2EE prep handled separately.
-        struct Req: Encodable { let object_kind: String; let object_id: String; let recipients: [String] }
         do {
-            var req = URLRequest(url: AuthorizedHTTPClient.shared.buildURL(path: "/api/ee/shares"))
-            req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            AuthManager.shared.authHeader().forEach { k, v in req.setValue(v, forHTTPHeaderField: k) }
-            let body = Req(object_kind: "asset", object_id: assetId, recipients: [email])
-            req.httpBody = try JSONEncoder().encode(body)
-            _ = try await AuthorizedHTTPClient.shared.request(req)
+            let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                ToastManager.shared.show("Enter a recipient first")
+                return
+            }
+
+            let recipient: CreateShareRequest.RecipientInput
+            if trimmed.contains("@") {
+                recipient = CreateShareRequest.RecipientInput(
+                    type: "external_email",
+                    id: nil,
+                    email: trimmed,
+                    permissions: nil
+                )
+            } else {
+                recipient = CreateShareRequest.RecipientInput(
+                    type: "user",
+                    id: trimmed,
+                    email: nil,
+                    permissions: nil
+                )
+            }
+
+            let request = CreateShareRequest(
+                object: CreateShareRequest.ShareObject(kind: "asset", id: assetId),
+                name: filename,
+                defaultPermissions: SharePermissions.commenter.rawValue,
+                expiresAt: nil,
+                includeFaces: nil,
+                includeSubtree: false,
+                recipients: [recipient]
+            )
+
+            let share = try await shareService.createShare(request)
+            do {
+                try await ShareE2EEManager.shared.prepareOwnerShareE2EEIfNeeded(share: share)
+            } catch {
+                print("[SHARE-E2EE] inline prep failed share=\(share.id) err=\(error.localizedDescription)")
+            }
             ToastManager.shared.show("Share created")
         } catch { ToastManager.shared.show("Share failed") }
     }
     private func createPublicLink() async {
-        struct Req: Encodable { let object_kind: String; let object_id: String; let name: String }
         do {
-            var req = URLRequest(url: AuthorizedHTTPClient.shared.buildURL(path: "/api/ee/public-links"))
-            req.httpMethod = "POST"; req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            AuthManager.shared.authHeader().forEach { k, v in req.setValue(v, forHTTPHeaderField: k) }
-            let body = Req(object_kind: "asset", object_id: assetId, name: filename)
-            req.httpBody = try JSONEncoder().encode(body)
-            let (data, http) = try await AuthorizedHTTPClient.shared.request(req)
-            guard (200..<300).contains(http.statusCode) else { throw URLError(.badServerResponse) }
-            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let code = obj["code"] as? String {
-                await MainActor.run { linkURL = AuthManager.shared.serverURL + "/s/" + code }
+            let cleanName = filename.trimmingCharacters(in: .whitespacesAndNewlines)
+            let albumName = cleanName.isEmpty ? "Shared Photo" : cleanName
+            let album = try await photosService.createAlbum(
+                name: albumName,
+                description: "Auto-created for public link"
+            )
+            try await photosService.addPhotosToAlbum(albumId: album.id, assetIds: [assetId])
+
+            let request = CreatePublicLinkRequest(
+                name: albumName,
+                scopeKind: "album",
+                scopeAlbumId: album.id,
+                permissions: SharePermissions.VIEW,
+                expiresAt: nil,
+                pin: nil,
+                coverAssetId: assetId,
+                moderationEnabled: nil
+            )
+
+            let link = try await shareService.createPublicLink(request)
+            await MainActor.run {
+                linkURL = link.url
             }
             ToastManager.shared.show("Link created")
         } catch { ToastManager.shared.show("Create link failed") }

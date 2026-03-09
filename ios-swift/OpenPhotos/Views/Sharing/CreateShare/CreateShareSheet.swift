@@ -13,16 +13,24 @@ struct CreateShareSheet: View {
     let objectId: String
     let objectName: String?
     let selectionCount: Int
+    let onShareCreated: (() -> Void)?
 
     @StateObject private var viewModel: CreateShareViewModel
     @State private var showSuccessAlert = false
     @Environment(\.dismiss) private var dismiss
 
-    init(objectKind: Share.ObjectKind, objectId: String, objectName: String? = nil, selectionCount: Int = 1) {
+    init(
+        objectKind: Share.ObjectKind,
+        objectId: String,
+        objectName: String? = nil,
+        selectionCount: Int = 1,
+        onShareCreated: (() -> Void)? = nil
+    ) {
         self.objectKind = objectKind
         self.objectId = objectId
         self.objectName = objectName
         self.selectionCount = selectionCount
+        self.onShareCreated = onShareCreated
         self._viewModel = StateObject(wrappedValue: CreateShareViewModel(
             objectKind: objectKind,
             objectId: objectId,
@@ -68,6 +76,7 @@ struct CreateShareSheet: View {
                     Task {
                         do {
                             try await viewModel.createShare()
+                            onShareCreated?()
                             showSuccessAlert = true
                         } catch {
                             // Error is displayed in form

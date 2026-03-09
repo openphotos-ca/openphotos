@@ -294,6 +294,65 @@ final class SyncRepository {
         }
         return Set(rows)
     }
+
+    /// Returns the subset of `localIdentifiers` currently marked as backed up in local cache.
+    ///
+    /// Query is chunked to keep SQLite placeholder count bounded.
+    func getCloudBackedUpLocalIdentifiers(in localIdentifiers: [String]) -> Set<String> {
+        guard !localIdentifiers.isEmpty else { return [] }
+        let chunkSize = 300
+        var result: Set<String> = []
+        var index = 0
+        while index < localIdentifiers.count {
+            let end = min(index + chunkSize, localIdentifiers.count)
+            let chunk = Array(localIdentifiers[index..<end])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+            SELECT DISTINCT local_identifier
+            FROM photos
+            WHERE local_identifier IN (\(placeholders))
+              AND cloud_backed_up = 1
+            """
+            let rows: [String] = db.executeSelect(sql, parameters: chunk) { stmt in
+                guard let ptr = sqlite3_column_text(stmt, 0) else { return nil }
+                return String(cString: ptr)
+            }
+            result.formUnion(rows)
+            index = end
+        }
+        return result
+    }
+
+    /// Marks all rows for the given local identifiers as synced.
+    ///
+    /// This is used after cloud-check confirms server presence for a local asset.
+    @discardableResult
+    func markSyncedForLocalIdentifiers(_ localIdentifiers: Set<String>) -> Int {
+        guard !localIdentifiers.isEmpty else { return 0 }
+        let now = Int64(Date().timeIntervalSince1970)
+        let ids = Array(localIdentifiers)
+        let chunkSize = 300
+        var index = 0
+        while index < ids.count {
+            let end = min(index + chunkSize, ids.count)
+            let chunk = Array(ids[index..<end])
+            for localId in chunk {
+                ensurePhotoRow(localIdentifier: localId)
+            }
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+            UPDATE photos
+            SET sync_state = 2, sync_at = ?, attempts = 0, last_error = NULL
+            WHERE local_identifier IN (\(placeholders))
+            """
+            var params: [Any] = [now]
+            params.append(contentsOf: chunk)
+            _ = db.executeQuery(sql, parameters: params)
+            index = end
+        }
+        scheduleStatsChangedNotification()
+        return ids.count
+    }
 }
 
 extension SyncRepository {
@@ -496,6 +555,41 @@ extension SyncRepository {
         _ = db.executeQuery(
             "UPDATE photos SET sync_state = 0 WHERE sync_state = 4 AND (last_attempt_at IS NULL OR last_attempt_at <= ?)",
             parameters: [cutoff]
+        )
+        scheduleStatsChangedNotification()
+        return count
+    }
+
+    // Requeue failed rows that look transient (timeouts / 5xx / temporary transport issues).
+    // Keeps `attempts` intact so permanently unhealthy items eventually stop auto-retrying.
+    @discardableResult
+    func retryTransientFailed(maxAttempts: Int = 12) -> Int {
+        let patterns = [
+            "%timed out%",
+            "%timeout%",
+            "%network connection was lost%",
+            "%not connected to the internet%",
+            "%cannot connect to host%",
+            "%temporarily unavailable%",
+            "http 408%",
+            "http 429%",
+            "http 5%"
+        ]
+        let errorExpr = "lower(COALESCE(last_error, ''))"
+        let transientClause = patterns.map { _ in "\(errorExpr) LIKE ?" }.joined(separator: " OR ")
+        let whereClause = "sync_state = 3 AND attempts <= ? AND (\(transientClause))"
+        var params: [Any] = [maxAttempts]
+        params.append(contentsOf: patterns)
+
+        let count: Int = db.executeSelect(
+            "SELECT COUNT(*) FROM photos WHERE \(whereClause)",
+            parameters: params
+        ) { stmt in Int(sqlite3_column_int(stmt, 0)) }.first ?? 0
+        guard count > 0 else { return 0 }
+
+        _ = db.executeQuery(
+            "UPDATE photos SET sync_state = 0 WHERE \(whereClause)",
+            parameters: params
         )
         scheduleStatsChangedNotification()
         return count

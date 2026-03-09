@@ -28,14 +28,11 @@ struct LoginView: View {
                     }
                     .pickerStyle(.segmented)
                 }
-                Section(header: Text("Server")) {
+                Section {
                     ServerAddressEditor(onValidationChanged: { msg in
                         serverValidationMessage = msg
                     })
                     .environmentObject(auth)
-                }
-
-                Section(header: Text(isRegister ? "Create Account" : "Login")) {
                     if isRegister {
                         TextField("Full Name", text: $name)
                             .textContentType(.name)

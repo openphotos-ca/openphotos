@@ -14,7 +14,7 @@ struct ContentView: View {
             if auth.isAuthenticated {
                 TabView(selection: $selectedTab) {
                     // New server-backed Photos tab (first)
-                    ServerGalleryView()
+                    ServerGalleryView(isActiveTab: selectedTab == 0)
                         .environmentObject(auth)
                         .environmentObject(unlockCtl)
                         .tabItem {

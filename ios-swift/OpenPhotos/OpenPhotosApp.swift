@@ -78,14 +78,31 @@ struct OpenPhotosApp: App {
             case .active:
                 // On resume, repair any stale 'uploading' state
                 SyncRepository.shared.recoverStuckUploading()
+                HybridUploadManager.shared.handleSceneDidBecomeActive()
                 // Auto-retry background-queued items older than N minutes
                 let mins = max(1, AuthManager.shared.autoRetryBgMinutes)
-                let requeued = SyncRepository.shared.retryBackgroundQueued(olderThan: Int64(mins * 60))
-                if requeued > 0 {
-                    let itemsWord = requeued == 1 ? "item" : "items"
-                    ToastManager.shared.show("Requeued \(requeued) background \(itemsWord)")
+                let requeuedBg = SyncRepository.shared.retryBackgroundQueued(olderThan: Int64(mins * 60))
+                let requeuedTransientFailed = SyncRepository.shared.retryTransientFailed()
+                let requeuedTotal = requeuedBg + requeuedTransientFailed
+                if requeuedTotal > 0 {
+                    let itemsWord = requeuedTotal == 1 ? "item" : "items"
+                    if requeuedTransientFailed > 0 {
+                        print(
+                            "[UPLOAD] foreground auto-retry requeued transient failed items=\(requeuedTransientFailed) bgQueued=\(requeuedBg)"
+                        )
+                    }
+                    ToastManager.shared.show("Requeued \(requeuedTotal) stalled \(itemsWord)")
                     // Kick a normal sync pass (respects current network policy)
                     SyncService.shared.syncNow(forceRetryFailed: false)
+                } else {
+                    let stats = SyncRepository.shared.getStats(
+                        scope: AuthManager.shared.syncScope,
+                        includeUnassigned: AuthManager.shared.syncIncludeUnassigned
+                    )
+                    if stats.pending > 0 || stats.uploading > 0 || stats.bgQueued > 0 {
+                        // Resume interrupted runs promptly after app returns to foreground.
+                        SyncService.shared.syncNow(forceRetryFailed: false)
+                    }
                 }
             @unknown default:
                 break

@@ -79,6 +79,8 @@ class CreateShareViewModel: ObservableObject {
     let objectName: String?
 
     private let shareService = ShareService.shared
+    private let photosService = ServerPhotosService.shared
+    private let shareE2EEManager = ShareE2EEManager.shared
 
     init(objectKind: Share.ObjectKind, objectId: String, objectName: String? = nil, selectionCount: Int = 1) {
         self.objectKind = objectKind
@@ -181,7 +183,17 @@ class CreateShareViewModel: ObservableObject {
             )
 
             // Call API
-            _ = try await shareService.createShare(request)
+            let share = try await runWithTransientRetry(label: "create-share") {
+                try await self.shareService.createShare(request)
+            }
+
+            // If this share contains locked assets, publish share E2EE material (envelopes + wraps)
+            // so recipients can render locked thumbnails immediately.
+            do {
+                try await shareE2EEManager.prepareOwnerShareE2EEIfNeeded(share: share)
+            } catch {
+                print("[SHARE-E2EE] prep failed share=\(share.id) err=\(error.localizedDescription)")
+            }
         } catch {
             self.error = error.localizedDescription
             throw error
@@ -204,24 +216,94 @@ class CreateShareViewModel: ObservableObject {
                 permissionValue |= SharePermissions.COMMENT | SharePermissions.LIKE | SharePermissions.UPLOAD
             }
 
+            let resolved = try await resolvePublicLinkScope()
+
             // Build request
             let request = CreatePublicLinkRequest(
                 name: shareName,
-                scopeKind: objectKind.rawValue,
-                scopeAlbumId: objectKind == .album ? Int(objectId) : nil,
+                scopeKind: resolved.scopeKind,
+                scopeAlbumId: resolved.scopeAlbumId,
                 permissions: permissionValue,
                 expiresAt: pubHasExpiry ? pubExpiryDate.ISO8601Format() : nil,
                 pin: pubRequirePin ? pubPin : nil,
-                coverAssetId: pubCoverAssetId ?? "default",
+                coverAssetId: resolved.coverAssetId,
                 moderationEnabled: pubModeration
             )
 
             // Call API
-            _ = try await shareService.createPublicLink(request)
+            _ = try await runWithTransientRetry(label: "create-public-link") {
+                try await self.shareService.createPublicLink(request)
+            }
         } catch {
             self.error = error.localizedDescription
             throw error
         }
+    }
+
+    /// Public links only support `album` / `upload_only` scopes on backend.
+    /// For single-asset shares, auto-create a one-item album and link to that album.
+    private func resolvePublicLinkScope() async throws -> (scopeKind: String, scopeAlbumId: Int?, coverAssetId: String) {
+        if objectKind == .album {
+            guard let albumId = Int(objectId) else {
+                throw NSError(
+                    domain: "CreateShareViewModel",
+                    code: 1,
+                    userInfo: [NSLocalizedDescriptionKey: "Invalid album id for public link"]
+                )
+            }
+            return ("album", albumId, pubCoverAssetId ?? "default")
+        }
+
+        let title = shareName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let albumName = title.isEmpty ? "Shared Photo" : title
+        let album = try await runWithTransientRetry(label: "create-public-link-album") {
+            try await self.photosService.createAlbum(
+                name: albumName,
+                description: "Auto-created for public link"
+            )
+        }
+        try await runWithTransientRetry(label: "add-public-link-photo-to-album") {
+            try await self.photosService.addPhotosToAlbum(albumId: album.id, assetIds: [self.objectId])
+            return ()
+        }
+        return ("album", album.id, pubCoverAssetId ?? objectId)
+    }
+
+    private func runWithTransientRetry<T>(label: String, operation: () async throws -> T) async throws -> T {
+        do {
+            return try await operation()
+        } catch {
+            guard isTransientNetworkError(error) else {
+                throw error
+            }
+            let ns = error as NSError
+            print("[SHARE] \(label) transient failure code=\(ns.code) domain=\(ns.domain) retry=1")
+            try await Task.sleep(nanoseconds: 400_000_000)
+            return try await operation()
+        }
+    }
+
+    private func isTransientNetworkError(_ error: Error) -> Bool {
+        let ns = error as NSError
+        if ns.domain == NSURLErrorDomain {
+            switch ns.code {
+            case NSURLErrorTimedOut,
+                NSURLErrorCannotFindHost,
+                NSURLErrorCannotConnectToHost,
+                NSURLErrorNetworkConnectionLost,
+                NSURLErrorNotConnectedToInternet,
+                NSURLErrorDNSLookupFailed:
+                return true
+            default:
+                break
+            }
+        }
+
+        let text = ns.localizedDescription.lowercased()
+        return text.contains("network connection was lost")
+            || text.contains("timed out")
+            || text.contains("not connected to internet")
+            || text.contains("cannot connect to host")
     }
 }
 

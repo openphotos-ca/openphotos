@@ -12,6 +12,52 @@ struct CloudBackupCheckResult {
     let skipped: Int
 }
 
+private final class ExportRequestContinuationState {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<URL, Error>?
+    private var requestID: PHAssetResourceDataRequestID?
+    private var finished: Bool = false
+
+    func setContinuation(_ cont: CheckedContinuation<URL, Error>) {
+        lock.lock()
+        continuation = cont
+        lock.unlock()
+    }
+
+    func setRequestID(_ id: PHAssetResourceDataRequestID) {
+        lock.lock()
+        requestID = id
+        lock.unlock()
+    }
+
+    func currentRequestID() -> PHAssetResourceDataRequestID? {
+        lock.lock()
+        let id = requestID
+        lock.unlock()
+        return id
+    }
+
+    func resume(_ result: Result<URL, Error>) {
+        lock.lock()
+        guard !finished else {
+            lock.unlock()
+            return
+        }
+        finished = true
+        let cont = continuation
+        continuation = nil
+        lock.unlock()
+
+        guard let cont else { return }
+        switch result {
+        case .success(let url):
+            cont.resume(returning: url)
+        case .failure(let error):
+            cont.resume(throwing: error)
+        }
+    }
+}
+
 final class CloudBackupCheckService {
     static let shared = CloudBackupCheckService()
 
@@ -41,6 +87,7 @@ final class CloudBackupCheckService {
         let chunkSize = 20
         var i = 0
         while i < assets.count {
+            try Task.checkCancellation()
             let chunk = Array(assets[i..<min(i + chunkSize, assets.count)])
             i += chunk.count
 
@@ -63,6 +110,7 @@ final class CloudBackupCheckService {
             }
 
             for asset in chunk {
+                try Task.checkCancellation()
                 let localId = asset.localIdentifier
                 guard let res = primaryResourceToCheck(for: asset) else {
                     work.append(AssetWork(localIdentifier: localId, components: [], isSkippableFailure: true))
@@ -103,6 +151,8 @@ final class CloudBackupCheckService {
                             candidates: exported.candidates
                         )
                     }
+                } catch let cancelError as CancellationError {
+                    throw cancelError
                 } catch {
                     failed = true
                 }
@@ -120,10 +170,12 @@ final class CloudBackupCheckService {
             if queryIds.isEmpty {
                 present = []
             } else {
+                try Task.checkCancellation()
                 present = try await existsWithRetry(backupIds: Array(queryIds))
             }
 
             for w in work {
+                try Task.checkCancellation()
                 processed += 1
                 onProgress(processed, total)
 
@@ -151,6 +203,7 @@ final class CloudBackupCheckService {
             }
         }
 
+        try Task.checkCancellation()
         DispatchQueue.main.async {
             NotificationCenter.default.post(
                 name: SyncRepository.cloudBulkStatusChangedNotification,
@@ -161,11 +214,14 @@ final class CloudBackupCheckService {
     }
 
     private func existsWithRetry(backupIds: [String]) async throws -> Set<String> {
+        try Task.checkCancellation()
         do {
             return try await ServerPhotosService.shared.existsFullyBackedUp(backupIds: backupIds)
         } catch {
             if isRetryableNetworkError(error) {
-                try? await Task.sleep(nanoseconds: 700_000_000)
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: 700_000_000)
+                try Task.checkCancellation()
                 return try await ServerPhotosService.shared.existsFullyBackedUp(backupIds: backupIds)
             }
             throw error
@@ -259,6 +315,7 @@ final class CloudBackupCheckService {
         asset: PHAsset,
         userId: String
     ) async throws -> ExportedCandidates {
+        try Task.checkCancellation()
         await exportSemaphore.wait()
         defer { exportSemaphore.signal() }
 
@@ -271,6 +328,7 @@ final class CloudBackupCheckService {
             allowNetwork: true,
             filename: filename
         )
+        try Task.checkCancellation()
 
         // Normalize: if the file is actually HEIC/HEIF but has a misleading .jpg/.jpeg name, convert to JPEG.
         var normalizedURL = exportedURL
@@ -282,6 +340,7 @@ final class CloudBackupCheckService {
                 }
             }
         }
+        try Task.checkCancellation()
 
         var candidates: [String] = []
         if let raw = BackupId.computeBackupId(fileURL: normalizedURL, userId: userId) {
@@ -298,6 +357,7 @@ final class CloudBackupCheckService {
             }
         }
 
+        try Task.checkCancellation()
         return ExportedCandidates(candidates: candidates, normalizedURL: normalizedURL)
     }
 
@@ -306,6 +366,7 @@ final class CloudBackupCheckService {
         allowNetwork: Bool,
         filename: String
     ) async throws -> URL {
+        try Task.checkCancellation()
         let tmpDir = FileManager.default.temporaryDirectory
         let destURL = tmpDir.appendingPathComponent(UUID().uuidString + "_" + filename)
         FileManager.default.createFile(atPath: destURL.path, contents: nil, attributes: nil)
@@ -317,18 +378,35 @@ final class CloudBackupCheckService {
         let opts = PHAssetResourceRequestOptions()
         opts.isNetworkAccessAllowed = allowNetwork
 
-        return try await withCheckedThrowingContinuation { cont in
-            self.exportManager.requestData(for: resource, options: opts) { data in
-                try? handle.write(contentsOf: data)
-            } completionHandler: { error in
-                if let error {
-                    try? FileManager.default.removeItem(at: destURL)
-                    cont.resume(throwing: error)
-                    return
+        let continuationState = ExportRequestContinuationState()
+
+        return try await withTaskCancellationHandler(operation: {
+            try await withCheckedThrowingContinuation { cont in
+                continuationState.setContinuation(cont)
+                let requestID = self.exportManager.requestData(for: resource, options: opts) { data in
+                    try? handle.write(contentsOf: data)
+                } completionHandler: { error in
+                    if let error {
+                        try? FileManager.default.removeItem(at: destURL)
+                        continuationState.resume(.failure(error))
+                        return
+                    }
+                    continuationState.resume(.success(destURL))
                 }
-                cont.resume(returning: destURL)
+                continuationState.setRequestID(requestID)
+                if Task.isCancelled {
+                    self.exportManager.cancelDataRequest(requestID)
+                    try? FileManager.default.removeItem(at: destURL)
+                    continuationState.resume(.failure(CancellationError()))
+                }
             }
-        }
+        }, onCancel: {
+            if let requestID = continuationState.currentRequestID() {
+                self.exportManager.cancelDataRequest(requestID)
+            }
+            try? FileManager.default.removeItem(at: destURL)
+            continuationState.resume(.failure(CancellationError()))
+        })
     }
 
     private func isHEICContainer(url: URL) -> Bool {
@@ -566,6 +644,36 @@ enum BackupId {
 }
 
 enum ImageConversion {
+    private static func imageByRemovingAlphaForJPEG(_ image: CGImage) -> CGImage {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return image
+        default:
+            break
+        }
+
+        let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue).union(.byteOrder32Big)
+        guard let ctx = CGContext(
+            data: nil,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return image
+        }
+
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        // JPEG cannot represent alpha; flatten onto white once to avoid opaque+alpha encoder warnings.
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(rect)
+        ctx.draw(image, in: rect)
+        return ctx.makeImage() ?? image
+    }
+
     static func convertHEICtoJPEG(inputURL: URL, quality: CGFloat) -> (url: URL, width: Int, height: Int)? {
         guard let src = CGImageSourceCreateWithURL(inputURL as CFURL, nil) else { return nil }
         let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as NSDictionary?
@@ -578,11 +686,12 @@ enum ImageConversion {
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let cgOriented = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+        let jpegReady = imageByRemovingAlphaForJPEG(cgOriented)
         let destURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         let encProps: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
-        CGImageDestinationAddImage(dest, cgOriented, encProps as CFDictionary)
+        CGImageDestinationAddImage(dest, jpegReady, encProps as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
-        return (destURL, cgOriented.width, cgOriented.height)
+        return (destURL, jpegReady.width, jpegReady.height)
     }
 }

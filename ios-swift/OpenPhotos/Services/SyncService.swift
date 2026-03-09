@@ -14,6 +14,13 @@ final class SyncService: NSObject {
     private var isRunning = false
     private var pendingSync = false
     private var pendingForceRetryFailed = false
+    private var currentRunAssetLocalIdentifiers: Set<String> = []
+    private var pendingManualCloudCheckLocalIdentifiers: Set<String> = []
+    private var isManualCloudCheckWatcherArmed: Bool = false
+    private var isManualCloudCheckRunning: Bool = false
+    private var isAutoCloudCheckRunning: Bool = false
+    private var pendingAutoCloudCheckLocalIdentifiers: Set<String> = []
+    private var syncCompletionVersion: Int64 = 0
     private struct CandidateStats {
         var preNetworkCount: Int = 0
         var postNetworkCount: Int = 0
@@ -21,13 +28,22 @@ final class SyncService: NSObject {
     }
     private var lastCandidateStats = CandidateStats()
     private let queue = DispatchQueue(label: "sync.service.queue")
+    private let queueSpecificKey = DispatchSpecificKey<Void>()
 
     private override init() {
         super.init()
+        queue.setSpecific(key: queueSpecificKey, value: ())
         monitor.pathUpdateHandler = { [weak self] path in
             self?.isExpensiveNetwork = path.isExpensive
         }
         monitor.start(queue: DispatchQueue(label: "sync.network.monitor"))
+    }
+
+    func latestSyncCompletionVersion() -> Int64 {
+        if DispatchQueue.getSpecific(key: queueSpecificKey) != nil {
+            return syncCompletionVersion
+        }
+        return queue.sync { syncCompletionVersion }
     }
 
     func syncOnAppOpen() {
@@ -93,6 +109,29 @@ final class SyncService: NSObject {
         )
     }
 
+    /// Register a Photos-tab manual sync selection for post-sync cloud-check.
+    ///
+    /// The check runs only after the uploader becomes idle, and confirmed cloud-backed items
+    /// are marked as synced in the local repository.
+    func scheduleManualCloudCheckAfterUpload(
+        localIdentifiers: Set<String>,
+        source: String = "photos-actions"
+    ) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            guard !localIdentifiers.isEmpty else { return }
+            let before = self.pendingManualCloudCheckLocalIdentifiers.count
+            self.pendingManualCloudCheckLocalIdentifiers.formUnion(localIdentifiers)
+            let added = max(0, self.pendingManualCloudCheckLocalIdentifiers.count - before)
+            print(
+                "[PERF] cloud-check-manual-scheduled source=\(source) added_ids=\(added) pending_ids=\(self.pendingManualCloudCheckLocalIdentifiers.count)"
+            )
+            guard !self.isManualCloudCheckWatcherArmed else { return }
+            self.isManualCloudCheckWatcherArmed = true
+            self.pollUntilUploaderIdleForManualCloudCheck(source: source)
+        }
+    }
+
     private func scheduleSync(reason: String, forceRetryFailed: Bool) {
         queue.async { [weak self] in
             guard let self else { return }
@@ -117,6 +156,7 @@ final class SyncService: NSObject {
             }
             print("[SYNC] buildCandidates start scope=\(self.auth.syncScope.rawValue) includeUnassigned=\(self.auth.syncIncludeUnassigned) forceRetryFailed=\(forceRetryFailed)")
             let assets = self.buildCandidates(forceRetryFailed: forceRetryFailed)
+            self.currentRunAssetLocalIdentifiers = Set(assets.map { $0.localIdentifier })
             if assets.isEmpty {
                 DispatchQueue.main.async {
                     let stats = self.lastCandidateStats
@@ -160,7 +200,21 @@ final class SyncService: NSObject {
         }
     }
 
+    private func pollUntilUploaderIdleForManualCloudCheck(source: String) {
+        queue.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self else { return }
+            if self.uploader.isSyncBusy() {
+                self.pollUntilUploaderIdleForManualCloudCheck(source: source)
+                return
+            }
+            self.isManualCloudCheckWatcherArmed = false
+            self.consumeManualCloudCheckIfPossible(source: "\(source)-idle")
+        }
+    }
+
     private func finishSyncAndMaybeRerun() {
+        let completedRunLocalIdentifiers = currentRunAssetLocalIdentifiers
+        currentRunAssetLocalIdentifiers = []
         let shouldRerun = pendingSync
         let force = pendingForceRetryFailed
         pendingSync = false
@@ -168,7 +222,187 @@ final class SyncService: NSObject {
         isRunning = false
         if shouldRerun {
             scheduleSync(reason: "coalesced", forceRetryFailed: force)
+            return
         }
+        publishSyncRunCompletedLocked()
+        scheduleAutoCloudCheckAfterRun(localIdentifiers: completedRunLocalIdentifiers)
+    }
+
+    // Must be called on `queue`.
+    private func publishSyncRunCompletedLocked() {
+        syncCompletionVersion += 1
+        let version = syncCompletionVersion
+        print("[PERF] sync-run-complete version=\(version)")
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: .syncRunCompleted,
+                object: nil,
+                userInfo: [SyncRunCompletedUserInfoKey.version: NSNumber(value: version)]
+            )
+        }
+    }
+
+    private func scheduleAutoCloudCheckAfterRun(localIdentifiers: Set<String>) {
+        let requested = localIdentifiers.count
+        guard requested > 0 else {
+            print("[PERF] cloud-check-auto-skip reason=no-run-assets requested_ids=0")
+            return
+        }
+
+        let repo = SyncRepository.shared
+        let eligible = Set(localIdentifiers.filter { repo.isLocalIdentifierSynced($0) })
+        let eligibleCount = eligible.count
+        guard eligibleCount > 0 else {
+            print(
+                "[PERF] cloud-check-auto-skip reason=no-eligible-assets requested_ids=\(requested) eligible_ids=0"
+            )
+            return
+        }
+
+        if isAutoCloudCheckRunning {
+            coalescePendingAutoCloudCheck(ids: eligible, requested: requested)
+            return
+        }
+        startAutoCloudCheck(ids: eligible, source: "sync-idle", requested: requested)
+    }
+
+    private func coalescePendingAutoCloudCheck(ids: Set<String>, requested: Int) {
+        let before = pendingAutoCloudCheckLocalIdentifiers.count
+        pendingAutoCloudCheckLocalIdentifiers.formUnion(ids)
+        let added = max(0, pendingAutoCloudCheckLocalIdentifiers.count - before)
+        print(
+            "[PERF] cloud-check-auto-skip reason=coalesced requested_ids=\(requested) added_ids=\(added) pending_ids=\(pendingAutoCloudCheckLocalIdentifiers.count)"
+        )
+    }
+
+    private func startAutoCloudCheck(ids: Set<String>, source: String, requested: Int) {
+        guard !ids.isEmpty else {
+            print(
+                "[PERF] cloud-check-auto-skip reason=no-eligible-assets requested_ids=\(requested) eligible_ids=0"
+            )
+            return
+        }
+        isAutoCloudCheckRunning = true
+        let identifiers = Array(ids)
+        let startedAt = Date()
+        print(
+            "[PERF] cloud-check-auto-start source=\(source) requested_ids=\(requested) eligible_ids=\(identifiers.count)"
+        )
+
+        Task.detached(priority: .utility) {
+            let assets = SyncService.fetchAssetsByLocalIdentifiers(identifiers)
+            let resolvedCount = assets.count
+            if resolvedCount == 0 {
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
+                SyncService.shared.queue.async {
+                    SyncService.shared.finalizeAutoCloudCheckCycle(
+                        logLine: "[PERF] cloud-check-auto-skip reason=no-assets-resolved source=\(source) requested_ids=\(requested) eligible_ids=\(identifiers.count) resolved_ids=0 elapsed_ms=\(elapsedMs)"
+                    )
+                }
+                return
+            }
+
+            do {
+                let result = try await CloudBackupCheckService.shared.runCloudCheck(
+                    assets: assets,
+                    onProgress: { _, _ in }
+                )
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
+                SyncService.shared.queue.async {
+                    SyncService.shared.finalizeAutoCloudCheckCycle(
+                        logLine: "[PERF] cloud-check-auto-done source=\(source) requested_ids=\(requested) eligible_ids=\(identifiers.count) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) checked=\(result.checked) backed_up=\(result.backedUp) missing=\(result.missing) skipped=\(result.skipped)"
+                    )
+                }
+            } catch {
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
+                let msg = error.localizedDescription.replacingOccurrences(of: "\n", with: " ")
+                SyncService.shared.queue.async {
+                    SyncService.shared.finalizeAutoCloudCheckCycle(
+                        logLine: "[PERF] cloud-check-auto-failed source=\(source) requested_ids=\(requested) eligible_ids=\(identifiers.count) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) error=\(msg)"
+                    )
+                }
+            }
+        }
+    }
+
+    // Must be called on `queue`.
+    private func finalizeAutoCloudCheckCycle(logLine: String) {
+        isAutoCloudCheckRunning = false
+        print(logLine)
+        consumePendingAutoCloudCheckIfNeeded()
+        consumeManualCloudCheckIfPossible(source: "after-auto")
+    }
+
+    private func consumePendingAutoCloudCheckIfNeeded() {
+        guard !isAutoCloudCheckRunning else { return }
+        let pending = pendingAutoCloudCheckLocalIdentifiers
+        pendingAutoCloudCheckLocalIdentifiers.removeAll(keepingCapacity: true)
+        guard !pending.isEmpty else { return }
+        startAutoCloudCheck(ids: pending, source: "coalesced", requested: pending.count)
+    }
+
+    private func consumeManualCloudCheckIfPossible(source: String) {
+        guard !isAutoCloudCheckRunning else { return }
+        guard !isManualCloudCheckRunning else { return }
+        let pending = pendingManualCloudCheckLocalIdentifiers
+        pendingManualCloudCheckLocalIdentifiers.removeAll(keepingCapacity: true)
+        guard !pending.isEmpty else { return }
+        startManualCloudCheck(ids: pending, source: source)
+    }
+
+    private func startManualCloudCheck(ids: Set<String>, source: String) {
+        guard !ids.isEmpty else { return }
+        isManualCloudCheckRunning = true
+        let identifiers = Array(ids)
+        let requested = identifiers.count
+        let startedAt = Date()
+        print(
+            "[PERF] cloud-check-manual-start source=\(source) requested_ids=\(requested)"
+        )
+
+        Task.detached(priority: .utility) {
+            let assets = SyncService.fetchAssetsByLocalIdentifiers(identifiers)
+            let resolvedCount = assets.count
+            if resolvedCount == 0 {
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
+                SyncService.shared.queue.async {
+                    SyncService.shared.finalizeManualCloudCheckCycle(
+                        logLine: "[PERF] cloud-check-manual-skip reason=no-assets-resolved source=\(source) requested_ids=\(requested) resolved_ids=0 elapsed_ms=\(elapsedMs)"
+                    )
+                }
+                return
+            }
+
+            do {
+                let result = try await CloudBackupCheckService.shared.runCloudCheck(
+                    assets: assets,
+                    onProgress: { _, _ in }
+                )
+                let backedUpLocalIds = SyncRepository.shared.getCloudBackedUpLocalIdentifiers(in: identifiers)
+                let markedSynced = SyncRepository.shared.markSyncedForLocalIdentifiers(backedUpLocalIds)
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
+                SyncService.shared.queue.async {
+                    SyncService.shared.finalizeManualCloudCheckCycle(
+                        logLine: "[PERF] cloud-check-manual-done source=\(source) requested_ids=\(requested) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) checked=\(result.checked) backed_up=\(result.backedUp) missing=\(result.missing) skipped=\(result.skipped) marked_synced=\(markedSynced)"
+                    )
+                }
+            } catch {
+                let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
+                let msg = error.localizedDescription.replacingOccurrences(of: "\n", with: " ")
+                SyncService.shared.queue.async {
+                    SyncService.shared.finalizeManualCloudCheckCycle(
+                        logLine: "[PERF] cloud-check-manual-failed source=\(source) requested_ids=\(requested) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) error=\(msg)"
+                    )
+                }
+            }
+        }
+    }
+
+    // Must be called on `queue`.
+    private func finalizeManualCloudCheckCycle(logLine: String) {
+        isManualCloudCheckRunning = false
+        print(logLine)
+        consumeManualCloudCheckIfPossible(source: "manual-coalesced")
     }
 
     private func buildCandidates(forceRetryFailed: Bool) -> [PHAsset] {
@@ -294,14 +528,18 @@ final class SyncService: NSObject {
 
     // Fetch PHAsset objects by local identifiers in batches to avoid full-library scans and memory spikes.
     private func fetchAssetsByLocalIdentifiers(_ ids: Set<String>, batchSize: Int = 500) -> [PHAsset] {
+        Self.fetchAssetsByLocalIdentifiers(Array(ids), batchSize: batchSize)
+    }
+
+    // Fetch PHAsset objects by local identifiers in batches to avoid full-library scans and memory spikes.
+    private static func fetchAssetsByLocalIdentifiers(_ ids: [String], batchSize: Int = 500) -> [PHAsset] {
         if ids.isEmpty { return [] }
         var result: [PHAsset] = []
         result.reserveCapacity(ids.count)
-        let all = Array(ids)
         var i = 0
-        while i < all.count {
-            let end = min(i + batchSize, all.count)
-            let slice = Array(all[i..<end])
+        while i < ids.count {
+            let end = min(i + batchSize, ids.count)
+            let slice = Array(ids[i..<end])
             let fetchResult = PHAsset.fetchAssets(withLocalIdentifiers: slice, options: nil)
             fetchResult.enumerateObjects { asset, _, _ in
                 result.append(asset)

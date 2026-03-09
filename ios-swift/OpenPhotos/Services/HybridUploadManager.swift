@@ -35,8 +35,46 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private let tusQueue = DispatchQueue(label: "hybrid.tus.queue")
     private var tusCancelFlags: [UUID: Bool] = [:]
     private var pendingTus: [UploadItem] = []
+    private var tusEnqueuedAtUptime: [UUID: TimeInterval] = [:]
     private var activeTusWorkers: Int = 0
-    private let maxTusWorkers: Int = 2
+    private var foregroundTusSuspended: Bool = false
+    private var liveComponentPendingByContentId: [String: Int] = [:]
+    private let minTusWorkers: Int = 2
+    private let maxTusWorkers: Int = 3
+    private let tusScaleUpPendingThreshold: Int = 10
+    private let tusScaleDownPendingThreshold: Int = 4
+    private let tusThroughputGuardMinSamples: Int = 12
+    private let tusHealthEwmaAlpha: Double = 0.2
+    private let tusScaleDecisionCooldownSeconds: TimeInterval = 25.0
+    private let tusScaleDownEwmaMBpsThreshold: Double = 0.34
+    private let tusScaleUpEwmaMBpsThreshold: Double = 0.42
+    private let tusScaleDownEwmaUploadMsThreshold: Double = 9_000.0
+    private let tusScaleUpEwmaUploadMsThreshold: Double = 11_000.0
+    private let tusScaleDownTimeoutRateThreshold: Double = 0.08
+    private let tusScaleDownStallRateThreshold: Double = 0.03
+    private let tusScaleUpTimeoutRateCeiling: Double = 0.02
+    private let tusScaleUpStallRateCeiling: Double = 0.01
+    private let tusThroughputGuardDownConsecutiveRequired: Int = 3
+    private let tusThroughputGuardUpConsecutiveRequired: Int = 2
+    private let tusThroughputGuardRecoveryHoldSeconds: TimeInterval = 95.0
+    private let tusThroughputGuardRecoveryUpConsecutiveRequired: Int = 4
+    private let tusProbeAfterThroughputGuardCooldownSeconds: TimeInterval = 160.0
+    private let tusProbeUpPendingThresholdAfterGuard: Int = 26
+    private let tusCreateLatencyGuardMinSamples: Int = 16
+    private let tusCreateLatencyGuardEwmaMsThreshold: Double = 1_000.0
+    private let tusCreateLatencyGuardConsecutiveRequired: Int = 5
+    private let tusCreateLatencyGuardReleaseEwmaMsThreshold: Double = 700.0
+    private let tusCreateLatencyGuardReleaseConsecutiveRequired: Int = 12
+    private let tusCreateLatencyGuardMinHoldSeconds: TimeInterval = 150.0
+    private let tusProbeUpPendingThreshold: Int = 18
+    private let tusProbeUpIntervalSeconds: TimeInterval = 75.0
+    private let tusProbeHighWorkerHoldSeconds: TimeInterval = 35.0
+    private let tusPatchTimeoutSeconds: TimeInterval = 30.0
+    private let tusPatchTimeoutDegradedSeconds: TimeInterval = 40.0
+    private let tusPatchTimeoutPoorLinkSeconds: TimeInterval = 45.0
+    private let tusPatchAdaptiveMinSamples: Int = 6
+    private let tusMaxStallRecoveriesPerUpload: Int = 1
+    private var tusConcurrencyState = TusConcurrencyState()
     // Limit export concurrency to avoid too many open files
     private let exportSemaphore = DispatchSemaphore(value: 3)
     private let exportResultsQueue = DispatchQueue(label: "hybrid.export.results")
@@ -73,6 +111,559 @@ final class HybridUploadManager: NSObject, ObservableObject {
     // Stop flag used when user requests a foreground restart (ReSync while syncing).
     private let runControlQueue = DispatchQueue(label: "hybrid.upload.run.control")
     private var stopForResyncRequested: Bool = false
+
+    // Deferred server verification (batched, single utility task).
+    private let deferredVerifyStateQueue = DispatchQueue(label: "hybrid.upload.verify.state")
+    private var deferredVerifyEntriesByContentId: [String: DeferredVerifyEntry] = [:]
+    private var deferredVerifyLoopTask: Task<Void, Never>?
+    private let deferredVerifyPollSecondsBusy: TimeInterval = 5.0
+    private let deferredVerifyPollSecondsBusyHighExists: TimeInterval = 10.0
+    private let deferredVerifyPollSecondsBusyVeryHighExists: TimeInterval = 15.0
+    private let deferredVerifyBusyPollHighExistsMs: Int = 700
+    private let deferredVerifyBusyPollVeryHighExistsMs: Int = 1200
+    private let deferredVerifyBusyPollMinExistsCalls: Int = 16
+    private let deferredVerifyPollSecondsIdle: TimeInterval = 2.0
+    private let deferredVerifyTimedOutRepollFastSeconds: TimeInterval = 8.0
+    private let deferredVerifyTimedOutRepollMediumSeconds: TimeInterval = 12.0
+    private let deferredVerifyTimedOutRepollSlowSeconds: TimeInterval = 25.0
+    private let deferredVerifyAllTimedOutRepollFastSeconds: TimeInterval = 20.0
+    private let deferredVerifyAllTimedOutRepollMediumSeconds: TimeInterval = 35.0
+    private let deferredVerifyAllTimedOutRepollSlowSeconds: TimeInterval = 60.0
+    private let deferredVerifyPostForegroundIdleBoostWindowSeconds: TimeInterval = 120.0
+    private let deferredVerifyPostForegroundIdleRepollSeconds: TimeInterval = 6.0
+    private let deferredVerifyIdleEntryRepollLowPendingThreshold: Int = 8
+    private let deferredVerifyIdleEntryRepollVeryLowPendingThreshold: Int = 3
+    private let deferredVerifyIdleEntryRepollLowPendingSeconds: TimeInterval = 2.8
+    private let deferredVerifyIdleEntryRepollVeryLowPendingSeconds: TimeInterval = 3.5
+    private let deferredVerifyTimedOutRepollHighPendingThreshold: Int = 96
+    private let deferredVerifyTimedOutRepollMediumPendingThreshold: Int = 28
+    private let deferredVerifyMaxWaitSeconds: TimeInterval = 60.0
+    private let deferredVerifyMaxAttempts: Int = 20
+    private let verifyDecisionQueue = DispatchQueue(label: "hybrid.upload.verify.decision")
+    private let verifyImmediateBypassPendingThreshold: Int = 8
+    private let verifyImmediateMissStreakBypassThreshold: Int = 20
+    private let verifyImmediateProbeInterval: Int = 12
+    private var verifyImmediateMissStreak: Int = 0
+    private var verifyPolicyBypassCount: Int = 0
+
+    // Upload performance metrics (summary-oriented, low-overhead).
+    private let perfQueue = DispatchQueue(label: "hybrid.upload.perf.queue")
+    private var perfRunState = UploadPerfRunState()
+    private var perfBgAttemptStartedAt: [String: TimeInterval] = [:]
+    private var perfBgFirstQueuedAtByBodyName: [String: TimeInterval] = [:]
+    private let perfSummaryMinIntervalSeconds: TimeInterval = 12.0
+    private let perfSummaryEveryCompletions: Int = 8
+    private let perfSlowUploadThresholdSeconds: TimeInterval = 20.0
+
+    private struct TusConcurrencyState {
+        var targetWorkers: Int = 2
+        var uploadSamples: Int = 0
+        var ewmaUploadMBps: Double = 0
+        var ewmaUploadMs: Double = 0
+        var createSamples: Int = 0
+        var ewmaCreateMs: Double = 0
+        var ewmaPatchRetriesPerItem: Double = 0
+        var ewmaPatchTimeoutsPerItem: Double = 0
+        var ewmaStallRecoveriesPerItem: Double = 0
+        var createLatencySignalStreak: Int = 0
+        var createLatencyRecoveryStreak: Int = 0
+        var createLatencyGuardActive: Bool = false
+        var createLatencyGuardHoldUntilUptime: TimeInterval = 0
+        var throughputDownSignalStreak: Int = 0
+        var throughputUpSignalStreak: Int = 0
+        var throughputGuardHoldUntilUptime: TimeInterval = 0
+        var lastThroughputGuardDownscaleAtUptime: TimeInterval = 0
+        var lastProbeScaleUpAtUptime: TimeInterval = 0
+        var lastScaleChangeAtUptime: TimeInterval = 0
+    }
+
+    private struct DeferredVerifyEntry {
+        let contentId: String
+        let filename: String
+        let assetId: String
+        let waitForLivePairing: Bool
+        var attempts: Int
+        let queuedAtUptime: TimeInterval
+        var timedOutAtUptime: TimeInterval?
+        var lastPolledAtUptime: TimeInterval
+    }
+
+    private enum VerifyResult {
+        case immediateOk
+        case deferredQueued
+        case failed
+    }
+
+    private struct UploadPerfRunState {
+        var runId: Int = 0
+        var startedAtUptime: TimeInterval = 0
+        var plannedAssets: Int = 0
+        var exportedItems: Int = 0
+        var preflightSkipped: Int = 0
+        var batchCount: Int = 0
+        var exportBatchTotalSeconds: TimeInterval = 0
+        var preflightTotalSeconds: TimeInterval = 0
+        var batchTotalSeconds: TimeInterval = 0
+        var tusCompleted: Int = 0
+        var bgCompleted: Int = 0
+        var failed: Int = 0
+        var uploadedBytes: Int64 = 0
+        var queueWaitTotalSeconds: TimeInterval = 0
+        var queueWaitSamples: Int = 0
+        var tusUploadTotalSeconds: TimeInterval = 0
+        var tusUploadSamples: Int = 0
+        var bgUploadTotalSeconds: TimeInterval = 0
+        var bgUploadSamples: Int = 0
+        var backpressureWaitTotalSeconds: TimeInterval = 0
+        var backpressureEvents: Int = 0
+        var verifyImmediateOk: Int = 0
+        var verifyImmediatePolicySkipped: Int = 0
+        var verifyDeferredQueued: Int = 0
+        var verifyDeferredConfirmed: Int = 0
+        var verifyDeferredTimedOut: Int = 0
+        var headSkipped: Int = 0
+        var headPerformed: Int = 0
+        var workerScaleUpEvents: Int = 0
+        var workerScaleDownEvents: Int = 0
+        var workerScaleThroughputDownEvents: Int = 0
+        var workerTargetMax: Int = 2
+        var existsCalls: Int = 0
+        var existsTotalSeconds: TimeInterval = 0
+        var patchRetries: Int = 0
+        var patchTimeouts: Int = 0
+        var stallRecoveries: Int = 0
+        var lastSummaryAtUptime: TimeInterval = 0
+    }
+
+    private func perfNow() -> TimeInterval {
+        ProcessInfo.processInfo.systemUptime
+    }
+
+    private func perfMs(_ seconds: TimeInterval) -> Int {
+        max(0, Int((seconds * 1000.0).rounded()))
+    }
+
+    private func perfMBps(bytes: Int64, seconds: TimeInterval) -> String {
+        guard seconds > 0 else { return "n/a" }
+        let mbps = (Double(bytes) / (1024.0 * 1024.0)) / seconds
+        return String(format: "%.2f", mbps)
+    }
+
+    private func ewma(previous: Double, sample: Double, alpha: Double) -> Double {
+        guard alpha > 0 && alpha <= 1 else { return sample }
+        if previous <= 0 { return sample }
+        return ((1.0 - alpha) * previous) + (alpha * sample)
+    }
+
+    private func deferredTimedOutRepollIntervalSeconds(pendingEntries: Int) -> TimeInterval {
+        if pendingEntries >= deferredVerifyTimedOutRepollHighPendingThreshold {
+            return deferredVerifyTimedOutRepollFastSeconds
+        }
+        if pendingEntries >= deferredVerifyTimedOutRepollMediumPendingThreshold {
+            return deferredVerifyTimedOutRepollMediumSeconds
+        }
+        return deferredVerifyTimedOutRepollSlowSeconds
+    }
+
+    private func deferredAllTimedOutRepollIntervalSeconds(pendingEntries: Int) -> TimeInterval {
+        if pendingEntries >= deferredVerifyTimedOutRepollHighPendingThreshold {
+            return deferredVerifyAllTimedOutRepollFastSeconds
+        }
+        if pendingEntries >= deferredVerifyTimedOutRepollMediumPendingThreshold {
+            return deferredVerifyAllTimedOutRepollMediumSeconds
+        }
+        return deferredVerifyAllTimedOutRepollSlowSeconds
+    }
+
+    private func applyDeferredIdleTailRepollBoost(
+        baseSeconds: TimeInterval,
+        hasForegroundUploadWork: Bool,
+        now: TimeInterval,
+        lastForegroundWorkAt: TimeInterval?
+    ) -> TimeInterval {
+        guard !hasForegroundUploadWork else { return baseSeconds }
+        guard let lastForegroundWorkAt else { return baseSeconds }
+        let idleElapsed = max(0, now - lastForegroundWorkAt)
+        guard idleElapsed <= deferredVerifyPostForegroundIdleBoostWindowSeconds else {
+            return baseSeconds
+        }
+        return min(baseSeconds, deferredVerifyPostForegroundIdleRepollSeconds)
+    }
+
+    private func deferredIdleEntryPollIntervalSeconds(
+        hasForegroundUploadWork: Bool,
+        pendingEntries: Int,
+        allEntriesTimedOut: Bool
+    ) -> TimeInterval {
+        guard !hasForegroundUploadWork else { return 0 }
+        guard !allEntriesTimedOut else { return 0 }
+        if pendingEntries <= deferredVerifyIdleEntryRepollVeryLowPendingThreshold {
+            return deferredVerifyIdleEntryRepollVeryLowPendingSeconds
+        }
+        if pendingEntries <= deferredVerifyIdleEntryRepollLowPendingThreshold {
+            return deferredVerifyIdleEntryRepollLowPendingSeconds
+        }
+        return deferredVerifyPollSecondsIdle
+    }
+
+    private func deferredBusyPollIntervalSeconds() -> TimeInterval {
+        let avgExistsMs: Int = perfQueue.sync {
+            guard perfRunState.existsCalls >= deferredVerifyBusyPollMinExistsCalls else { return 0 }
+            let avg = perfRunState.existsTotalSeconds / Double(max(1, perfRunState.existsCalls))
+            return perfMs(avg)
+        }
+        if avgExistsMs >= deferredVerifyBusyPollVeryHighExistsMs {
+            return deferredVerifyPollSecondsBusyVeryHighExists
+        }
+        if avgExistsMs >= deferredVerifyBusyPollHighExistsMs {
+            return deferredVerifyPollSecondsBusyHighExists
+        }
+        return deferredVerifyPollSecondsBusy
+    }
+
+    private func preferredTusPatchTimeoutSeconds() -> TimeInterval {
+        tusQueue.sync {
+            let samples = tusConcurrencyState.uploadSamples
+            if samples < tusPatchAdaptiveMinSamples {
+                return tusPatchTimeoutSeconds
+            }
+            let timeoutSignal = tusConcurrencyState.ewmaPatchTimeoutsPerItem >= tusScaleUpTimeoutRateCeiling
+            let stallSignal = tusConcurrencyState.ewmaStallRecoveriesPerItem >= tusScaleUpStallRateCeiling
+            if timeoutSignal || stallSignal {
+                return tusPatchTimeoutPoorLinkSeconds
+            }
+            let degradedThroughput = tusConcurrencyState.ewmaUploadMBps > 0 &&
+                tusConcurrencyState.ewmaUploadMBps < tusScaleDownEwmaMBpsThreshold &&
+                tusConcurrencyState.ewmaUploadMs >= tusScaleDownEwmaUploadMsThreshold
+            if degradedThroughput {
+                return tusPatchTimeoutDegradedSeconds
+            }
+            return tusPatchTimeoutSeconds
+        }
+    }
+
+    private func pendingLiveComponents(forContentId contentId: String) -> Int {
+        tusQueue.sync { liveComponentPendingByContentId[contentId] ?? 0 }
+    }
+
+    private func trackLiveComponentEnqueueIfNeeded(_ item: UploadItem) {
+        guard item.isLiveComponent else { return }
+        let previous = liveComponentPendingByContentId[item.contentId] ?? 0
+        let updated = previous + 1
+        liveComponentPendingByContentId[item.contentId] = updated
+        AppLog.debug(
+            AppLog.upload,
+            "[PERF] live-pair-track content_id=\(item.contentId) phase=enqueue pending_live=\(updated)"
+        )
+    }
+
+    private func trackLiveComponentSettledIfNeeded(_ item: UploadItem) {
+        guard item.isLiveComponent else { return }
+        tusQueue.async {
+            let previous = self.liveComponentPendingByContentId[item.contentId] ?? 0
+            let updated = max(0, previous - 1)
+            if updated == 0 {
+                self.liveComponentPendingByContentId.removeValue(forKey: item.contentId)
+            } else {
+                self.liveComponentPendingByContentId[item.contentId] = updated
+            }
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] live-pair-track content_id=\(item.contentId) phase=settled pending_live=\(updated)"
+            )
+        }
+    }
+
+    private func perfStartRun(totalAssets: Int) {
+        let now = perfNow()
+        deferredVerifyStateQueue.sync {
+            deferredVerifyLoopTask?.cancel()
+            deferredVerifyLoopTask = nil
+            deferredVerifyEntriesByContentId.removeAll(keepingCapacity: true)
+        }
+        verifyDecisionQueue.sync {
+            verifyImmediateMissStreak = 0
+            verifyPolicyBypassCount = 0
+        }
+        tusQueue.sync {
+            liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+            tusConcurrencyState.targetWorkers = minTusWorkers
+            tusConcurrencyState.uploadSamples = 0
+            tusConcurrencyState.ewmaUploadMBps = 0
+            tusConcurrencyState.ewmaUploadMs = 0
+            tusConcurrencyState.createSamples = 0
+            tusConcurrencyState.ewmaCreateMs = 0
+            tusConcurrencyState.ewmaPatchRetriesPerItem = 0
+            tusConcurrencyState.ewmaPatchTimeoutsPerItem = 0
+            tusConcurrencyState.ewmaStallRecoveriesPerItem = 0
+            tusConcurrencyState.createLatencySignalStreak = 0
+            tusConcurrencyState.createLatencyRecoveryStreak = 0
+            tusConcurrencyState.createLatencyGuardActive = false
+            tusConcurrencyState.createLatencyGuardHoldUntilUptime = 0
+            tusConcurrencyState.throughputDownSignalStreak = 0
+            tusConcurrencyState.throughputUpSignalStreak = 0
+            tusConcurrencyState.throughputGuardHoldUntilUptime = 0
+            tusConcurrencyState.lastThroughputGuardDownscaleAtUptime = 0
+            tusConcurrencyState.lastProbeScaleUpAtUptime = now
+            tusConcurrencyState.lastScaleChangeAtUptime = now - tusScaleDecisionCooldownSeconds
+        }
+        perfQueue.sync {
+            perfRunState.runId += 1
+            perfRunState.startedAtUptime = now
+            perfRunState.plannedAssets = totalAssets
+            perfRunState.exportedItems = 0
+            perfRunState.preflightSkipped = 0
+            perfRunState.batchCount = 0
+            perfRunState.exportBatchTotalSeconds = 0
+            perfRunState.preflightTotalSeconds = 0
+            perfRunState.batchTotalSeconds = 0
+            perfRunState.tusCompleted = 0
+            perfRunState.bgCompleted = 0
+            perfRunState.failed = 0
+            perfRunState.uploadedBytes = 0
+            perfRunState.queueWaitTotalSeconds = 0
+            perfRunState.queueWaitSamples = 0
+            perfRunState.tusUploadTotalSeconds = 0
+            perfRunState.tusUploadSamples = 0
+            perfRunState.bgUploadTotalSeconds = 0
+            perfRunState.bgUploadSamples = 0
+            perfRunState.backpressureWaitTotalSeconds = 0
+            perfRunState.backpressureEvents = 0
+            perfRunState.verifyImmediateOk = 0
+            perfRunState.verifyImmediatePolicySkipped = 0
+            perfRunState.verifyDeferredQueued = 0
+            perfRunState.verifyDeferredConfirmed = 0
+            perfRunState.verifyDeferredTimedOut = 0
+            perfRunState.headSkipped = 0
+            perfRunState.headPerformed = 0
+            perfRunState.workerScaleUpEvents = 0
+            perfRunState.workerScaleDownEvents = 0
+            perfRunState.workerScaleThroughputDownEvents = 0
+            perfRunState.workerTargetMax = self.minTusWorkers
+            perfRunState.existsCalls = 0
+            perfRunState.existsTotalSeconds = 0
+            perfRunState.patchRetries = 0
+            perfRunState.patchTimeouts = 0
+            perfRunState.stallRecoveries = 0
+            perfRunState.lastSummaryAtUptime = now
+            perfBgAttemptStartedAt.removeAll(keepingCapacity: true)
+            perfBgFirstQueuedAtByBodyName.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func perfRecordBatch(exportedCount: Int, skippedCount: Int) {
+        perfQueue.async {
+            self.perfRunState.exportedItems += exportedCount
+            self.perfRunState.preflightSkipped += skippedCount
+        }
+    }
+
+    private func perfRecordBatchTimings(exportSeconds: TimeInterval, preflightSeconds: TimeInterval, batchSeconds: TimeInterval) {
+        perfQueue.async {
+            self.perfRunState.batchCount += 1
+            self.perfRunState.exportBatchTotalSeconds += max(0, exportSeconds)
+            self.perfRunState.preflightTotalSeconds += max(0, preflightSeconds)
+            self.perfRunState.batchTotalSeconds += max(0, batchSeconds)
+        }
+    }
+
+    private func perfRecordBackpressureWait(_ seconds: TimeInterval) {
+        guard seconds > 0 else { return }
+        perfQueue.async {
+            self.perfRunState.backpressureEvents += 1
+            self.perfRunState.backpressureWaitTotalSeconds += seconds
+        }
+    }
+
+    private func perfRecordForegroundCompletion(bytes: Int64, queueWait: TimeInterval?, uploadSeconds: TimeInterval) {
+        perfQueue.async {
+            self.perfRunState.tusCompleted += 1
+            self.perfRunState.uploadedBytes += max(0, bytes)
+            if let queueWait {
+                self.perfRunState.queueWaitTotalSeconds += max(0, queueWait)
+                self.perfRunState.queueWaitSamples += 1
+            }
+            self.perfRunState.tusUploadTotalSeconds += max(0, uploadSeconds)
+            self.perfRunState.tusUploadSamples += 1
+        }
+    }
+
+    private func perfRecordBackgroundCompletion(bytes: Int64, uploadSeconds: TimeInterval?) {
+        perfQueue.async {
+            self.perfRunState.bgCompleted += 1
+            self.perfRunState.uploadedBytes += max(0, bytes)
+            if let uploadSeconds {
+                self.perfRunState.bgUploadTotalSeconds += max(0, uploadSeconds)
+                self.perfRunState.bgUploadSamples += 1
+            }
+        }
+    }
+
+    private func perfRecordFailure() {
+        perfQueue.async { self.perfRunState.failed += 1 }
+    }
+
+    private func perfRecordExistsCall(_ seconds: TimeInterval) {
+        perfQueue.async {
+            self.perfRunState.existsCalls += 1
+            self.perfRunState.existsTotalSeconds += max(0, seconds)
+        }
+    }
+
+    private func perfRecordVerifyImmediateOk() {
+        perfQueue.async { self.perfRunState.verifyImmediateOk += 1 }
+    }
+
+    private func perfRecordVerifyImmediatePolicySkipped() {
+        perfQueue.async { self.perfRunState.verifyImmediatePolicySkipped += 1 }
+    }
+
+    private func perfRecordVerifyDeferredQueued() {
+        perfQueue.async { self.perfRunState.verifyDeferredQueued += 1 }
+    }
+
+    private func perfRecordVerifyDeferredConfirmed() {
+        perfQueue.async { self.perfRunState.verifyDeferredConfirmed += 1 }
+    }
+
+    private func perfRecordVerifyDeferredTimedOut() {
+        perfQueue.async { self.perfRunState.verifyDeferredTimedOut += 1 }
+    }
+
+    private func perfRecordHeadSkipped() {
+        perfQueue.async { self.perfRunState.headSkipped += 1 }
+    }
+
+    private func perfRecordHeadPerformed() {
+        perfQueue.async { self.perfRunState.headPerformed += 1 }
+    }
+
+    private func perfRecordTusTransport(patchRetries: Int, patchTimeouts: Int, stallRecoveries: Int) {
+        perfQueue.async {
+            self.perfRunState.patchRetries += max(0, patchRetries)
+            self.perfRunState.patchTimeouts += max(0, patchTimeouts)
+            self.perfRunState.stallRecoveries += max(0, stallRecoveries)
+        }
+    }
+
+    private func perfRecordWorkerScale(target: Int, previous: Int, reason: String) {
+        perfQueue.async {
+            if target > previous {
+                self.perfRunState.workerScaleUpEvents += 1
+            } else if target < previous {
+                self.perfRunState.workerScaleDownEvents += 1
+                if reason == "throughput_guard" {
+                    self.perfRunState.workerScaleThroughputDownEvents += 1
+                }
+            }
+            self.perfRunState.workerTargetMax = max(self.perfRunState.workerTargetMax, target)
+        }
+    }
+
+    private func perfRegisterBackgroundTaskStart(taskDescription: String, bodyName: String) {
+        let now = perfNow()
+        perfQueue.async {
+            self.perfBgAttemptStartedAt[taskDescription] = now
+            if self.perfBgFirstQueuedAtByBodyName[bodyName] == nil {
+                self.perfBgFirstQueuedAtByBodyName[bodyName] = now
+            }
+        }
+    }
+
+    private func perfConsumeBackgroundAttemptDuration(taskDescription: String) -> TimeInterval? {
+        let now = perfNow()
+        return perfQueue.sync {
+            guard let started = perfBgAttemptStartedAt.removeValue(forKey: taskDescription) else { return nil }
+            return max(0, now - started)
+        }
+    }
+
+    private func perfFinishBackgroundEndToEndDuration(bodyName: String) -> TimeInterval? {
+        let now = perfNow()
+        return perfQueue.sync {
+            guard let started = perfBgFirstQueuedAtByBodyName.removeValue(forKey: bodyName) else { return nil }
+            return max(0, now - started)
+        }
+    }
+
+    private func perfShouldLogSummaryLocked(now: TimeInterval, force: Bool) -> Bool {
+        let completions = perfRunState.tusCompleted + perfRunState.bgCompleted + perfRunState.failed
+        if force { return completions > 0 || perfRunState.exportedItems > 0 || perfRunState.backpressureEvents > 0 }
+        if completions < perfSummaryEveryCompletions { return false }
+        return (now - perfRunState.lastSummaryAtUptime) >= perfSummaryMinIntervalSeconds
+    }
+
+    private func perfLogSummary(reason: String, force: Bool = false) {
+        let now = perfNow()
+        let rolling = tusQueue.sync {
+            (
+                samples: tusConcurrencyState.uploadSamples,
+                uploadMBps: tusConcurrencyState.ewmaUploadMBps,
+                uploadMs: tusConcurrencyState.ewmaUploadMs,
+                patchRetries: tusConcurrencyState.ewmaPatchRetriesPerItem,
+                patchTimeouts: tusConcurrencyState.ewmaPatchTimeoutsPerItem,
+                stallRecoveries: tusConcurrencyState.ewmaStallRecoveriesPerItem
+            )
+        }
+        let line: String? = perfQueue.sync {
+            guard perfShouldLogSummaryLocked(now: now, force: force) else { return nil }
+            let elapsed = max(0, now - perfRunState.startedAtUptime)
+            let queueWaitMs = perfRunState.queueWaitSamples > 0
+                ? perfMs(perfRunState.queueWaitTotalSeconds / Double(perfRunState.queueWaitSamples))
+                : 0
+            let avgTusMs = perfRunState.tusUploadSamples > 0
+                ? perfMs(perfRunState.tusUploadTotalSeconds / Double(perfRunState.tusUploadSamples))
+                : 0
+            let avgBgMs = perfRunState.bgUploadSamples > 0
+                ? perfMs(perfRunState.bgUploadTotalSeconds / Double(perfRunState.bgUploadSamples))
+                : 0
+            let avgExportBatchMs = perfRunState.batchCount > 0
+                ? perfMs(perfRunState.exportBatchTotalSeconds / Double(perfRunState.batchCount))
+                : 0
+            let avgPreflightMs = perfRunState.batchCount > 0
+                ? perfMs(perfRunState.preflightTotalSeconds / Double(perfRunState.batchCount))
+                : 0
+            let avgBatchMs = perfRunState.batchCount > 0
+                ? perfMs(perfRunState.batchTotalSeconds / Double(perfRunState.batchCount))
+                : 0
+            let avgBackpressureMs = perfRunState.backpressureEvents > 0
+                ? perfMs(perfRunState.backpressureWaitTotalSeconds / Double(perfRunState.backpressureEvents))
+                : 0
+            let avgExistsMs = perfRunState.existsCalls > 0
+                ? perfMs(perfRunState.existsTotalSeconds / Double(perfRunState.existsCalls))
+                : 0
+
+            let bottleneckCandidates: [(String, Int)] = [
+                ("export_batch", avgExportBatchMs),
+                ("preflight", avgPreflightMs),
+                ("queue_wait", queueWaitMs),
+                ("tus_upload", avgTusMs),
+                ("bg_upload", avgBgMs),
+                ("backpressure_wait", avgBackpressureMs)
+            ].filter { $0.1 > 0 }
+            let bottleneck = bottleneckCandidates.max { $0.1 < $1.1 } ?? ("none", 0)
+
+            let totalDone = perfRunState.tusCompleted + perfRunState.bgCompleted + perfRunState.failed
+            let throughput = perfMBps(bytes: perfRunState.uploadedBytes, seconds: max(elapsed, 0.001))
+            perfRunState.lastSummaryAtUptime = now
+            return "[PERF] run=\(perfRunState.runId) reason=\(reason) elapsed_ms=\(perfMs(elapsed)) planned_assets=\(perfRunState.plannedAssets) exported=\(perfRunState.exportedItems) skipped=\(perfRunState.preflightSkipped) done=\(totalDone) tus_done=\(perfRunState.tusCompleted) bg_done=\(perfRunState.bgCompleted) failed=\(perfRunState.failed) avg_export_batch_ms=\(avgExportBatchMs) avg_preflight_ms=\(avgPreflightMs) avg_batch_ms=\(avgBatchMs) avg_queue_wait_ms=\(queueWaitMs) avg_tus_ms=\(avgTusMs) avg_bg_ms=\(avgBgMs) uploaded_bytes=\(perfRunState.uploadedBytes) avg_run_MBps=\(throughput) backpressure_events=\(perfRunState.backpressureEvents) avg_backpressure_wait_ms=\(avgBackpressureMs) backpressure_wait_ms=\(perfMs(perfRunState.backpressureWaitTotalSeconds)) verify_immediate_ok=\(perfRunState.verifyImmediateOk) verify_policy_skip=\(perfRunState.verifyImmediatePolicySkipped) verify_deferred_queued=\(perfRunState.verifyDeferredQueued) verify_deferred_ok=\(perfRunState.verifyDeferredConfirmed) verify_deferred_timeout=\(perfRunState.verifyDeferredTimedOut) head_skipped=\(perfRunState.headSkipped) head_performed=\(perfRunState.headPerformed) worker_scale_up=\(perfRunState.workerScaleUpEvents) worker_scale_down=\(perfRunState.workerScaleDownEvents) worker_scale_down_throughput=\(perfRunState.workerScaleThroughputDownEvents) worker_target_max=\(perfRunState.workerTargetMax) exists_calls=\(perfRunState.existsCalls) avg_exists_ms=\(avgExistsMs) patch_retries=\(perfRunState.patchRetries) patch_timeouts=\(perfRunState.patchTimeouts) stall_recoveries=\(perfRunState.stallRecoveries) rolling_upload_MBps=\(String(format: "%.2f", rolling.uploadMBps)) rolling_upload_ms=\(Int(rolling.uploadMs.rounded())) rolling_patch_retries=\(String(format: "%.2f", rolling.patchRetries)) rolling_patch_timeouts=\(String(format: "%.2f", rolling.patchTimeouts)) rolling_stall_recoveries=\(String(format: "%.2f", rolling.stallRecoveries)) rolling_samples=\(rolling.samples) top_stage=\(bottleneck.0) top_stage_ms=\(bottleneck.1)"
+        }
+        if let line {
+            AppLog.info(AppLog.upload, line)
+        }
+    }
+
+    private func perfLogDeferredDrain(reason: String) {
+        let now = perfNow()
+        let line: String? = perfQueue.sync {
+            guard perfRunState.startedAtUptime > 0 else { return nil }
+            let elapsed = max(0, now - perfRunState.startedAtUptime)
+            return "[PERF] verify-deferred-drained run=\(perfRunState.runId) reason=\(reason) elapsed_ms=\(perfMs(elapsed)) verify_deferred_ok=\(perfRunState.verifyDeferredConfirmed) verify_deferred_timeout=\(perfRunState.verifyDeferredTimedOut)"
+        }
+        if let line {
+            AppLog.info(AppLog.upload, line)
+        }
+    }
 
     private func setStopForResyncRequested(_ requested: Bool) {
         runControlQueue.sync { stopForResyncRequested = requested }
@@ -120,12 +711,39 @@ final class HybridUploadManager: NSObject, ObservableObject {
         setupBackgroundSession()
         cleanupOrphanedUploadTempArtifactsOnLaunch()
         pathMonitor.pathUpdateHandler = { [weak self] path in
-            self?.isExpensiveNetwork = path.isExpensive
-            self?.isNetworkAvailable = (path.status == .satisfied)
+            guard let self else { return }
+            self.isExpensiveNetwork = path.isExpensive
+            self.isNetworkAvailable = (path.status == .satisfied)
+            self.tusQueue.async {
+                self.maybeStartTusWorkers(reason: "path-change")
+            }
         }
         pathMonitor.start(queue: DispatchQueue(label: "hybrid.upload.network"))
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePowerOrThermalStateChange),
+            name: ProcessInfo.thermalStateDidChangeNotification,
+            object: nil
+        )
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(handlePowerOrThermalStateChange),
+            name: NSNotification.Name("NSProcessInfoPowerStateDidChange"),
+            object: nil
+        )
 
         // ScenePhase changes are handled in OpenPhotosApp; no UIKit lifecycle observers here.
+    }
+
+    @objc
+    private func handlePowerOrThermalStateChange() {
+        tusQueue.async {
+            self.maybeStartTusWorkers(reason: "power-thermal-change")
+        }
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
     }
 
     func setBackgroundCompletionHandler(_ handler: @escaping () -> Void) {
@@ -164,15 +782,57 @@ final class HybridUploadManager: NSObject, ObservableObject {
         tusQueue.sync { pendingTus.count }
     }
 
-    private func continueProcessBatchWhenBacklogAllows(assets: [PHAsset], startIndex: Int) {
-        if isStopForResyncRequested() { return }
+    private func isForegroundTusSuspended() -> Bool {
+        tusQueue.sync { foregroundTusSuspended }
+    }
+
+    private func setForegroundTusSuspended(_ suspended: Bool, reason: String) {
+        tusQueue.sync {
+            let previous = foregroundTusSuspended
+            guard previous != suspended else { return }
+            foregroundTusSuspended = suspended
+            if suspended {
+                // Scene background: drop in-memory foreground queue and force worker retirement.
+                pendingTus.removeAll()
+                tusEnqueuedAtUptime.removeAll(keepingCapacity: true)
+                liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+                tusConcurrencyState.targetWorkers = 0
+            } else if activeTusWorkers > 0 && pendingTus.isEmpty {
+                // Scene active: recover from stale worker counters after background suspension.
+                activeTusWorkers = 0
+            }
+            AppLog.info(
+                AppLog.upload,
+                "[PERF] tus-scene-suspend reason=\(reason) suspended=\(suspended ? 1 : 0) active_workers=\(activeTusWorkers) pending=\(pendingTus.count)"
+            )
+        }
+    }
+
+    func handleSceneDidBecomeActive() {
+        setForegroundTusSuspended(false, reason: "scene-active")
+        tusQueue.async {
+            self.maybeStartTusWorkers(reason: "scene-active")
+        }
+    }
+
+    private func continueProcessBatchWhenBacklogAllows(assets: [PHAsset], startIndex: Int, waitStartedAt: TimeInterval? = nil) {
+        if isStopForResyncRequested() || isForegroundTusSuspended() { return }
         let pending = pendingTusCount()
         if pending >= maxPendingTusBeforeNextExportBatch {
             print("[SYNC-UPLOAD] Backpressure: pendingTus=\(pending) >= \(maxPendingTusBeforeNextExportBatch); waiting to export next batch")
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + exportBackpressurePollSeconds) { [weak self] in
-                self?.continueProcessBatchWhenBacklogAllows(assets: assets, startIndex: startIndex)
+                self?.continueProcessBatchWhenBacklogAllows(
+                    assets: assets,
+                    startIndex: startIndex,
+                    waitStartedAt: waitStartedAt ?? self?.perfNow()
+                )
             }
             return
+        }
+        if let waitStartedAt {
+            let waited = max(0, perfNow() - waitStartedAt)
+            perfRecordBackpressureWait(waited)
+            AppLog.debug(AppLog.upload, "[PERF] backpressure released start=\(startIndex) waited_ms=\(perfMs(waited)) pendingTus=\(pending)")
         }
         processBatch(assets: assets, startIndex: startIndex)
     }
@@ -285,6 +945,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
     func startUpload(assets: [PHAsset]) {
         // New run begins; clear any previous stop request.
         setStopForResyncRequested(false)
+        setForegroundTusSuspended(false, reason: "sync-start")
+        perfStartRun(totalAssets: assets.count)
         // Ensure token freshness before kicking off uploads
         Task { await AuthManager.shared.refreshIfNeeded() }
         // Ensure TUS client reflects current server URL
@@ -300,11 +962,15 @@ final class HybridUploadManager: NSObject, ObservableObject {
             print("[SYNC-UPLOAD] photosOnly filter: total=\(assets.count) -> \(effectiveAssets.count)")
         }
         print("[SYNC-UPLOAD] Starting batched export+upload. total=\(effectiveAssets.count) batch=\(exportBatchSize)")
+        AppLog.info(
+            AppLog.upload,
+            "[PERF] sync-start assets_total=\(assets.count) assets_effective=\(effectiveAssets.count) min_tus_workers=\(minTusWorkers) max_tus_workers=\(maxTusWorkers) export_batch=\(exportBatchSize) export_parallelism=3 pending_limit=\(maxPendingTusBeforeNextExportBatch)"
+        )
         processBatch(assets: effectiveAssets, startIndex: 0)
     }
 
     private func processBatch(assets: [PHAsset], startIndex: Int) {
-        if isStopForResyncRequested() {
+        if isStopForResyncRequested() || isForegroundTusSuspended() {
             print("[SYNC-UPLOAD] stop requested; aborting remaining batches")
             return
         }
@@ -321,11 +987,29 @@ final class HybridUploadManager: NSObject, ObservableObject {
             return
         }
         print("[SYNC-UPLOAD] Exporting batch [\(startIndex)..<\(end)) free=\(free)")
+        let batchStart = perfNow()
+        let exportStart = batchStart
         exportAssetsToTempFiles(assets: slice) { [weak self] exported in
             guard let self else { return }
-            if self.isStopForResyncRequested() { return }
+            if self.isStopForResyncRequested() || self.isForegroundTusSuspended() { return }
+            let exportElapsed = max(0, self.perfNow() - exportStart)
+            let exportedBytes = exported.reduce(Int64(0)) { $0 + max(0, $1.totalBytes) }
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] batch-export range=\(startIndex)..<\(end) exported=\(exported.count) bytes=\(exportedBytes) export_ms=\(self.perfMs(exportElapsed)) avg_MBps=\(self.perfMBps(bytes: exportedBytes, seconds: max(exportElapsed, 0.001)))"
+            )
+            let preflightStart = self.perfNow()
             self.preflightFilterAlreadyBackedUp(exported) { uploadable in
-                if self.isStopForResyncRequested() { return }
+                if self.isStopForResyncRequested() || self.isForegroundTusSuspended() { return }
+                let preflightElapsed = max(0, self.perfNow() - preflightStart)
+                let batchElapsed = max(0, self.perfNow() - batchStart)
+                let skipped = max(0, exported.count - uploadable.count)
+                self.perfRecordBatch(exportedCount: exported.count, skippedCount: skipped)
+                self.perfRecordBatchTimings(exportSeconds: exportElapsed, preflightSeconds: preflightElapsed, batchSeconds: batchElapsed)
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] batch-ready range=\(startIndex)..<\(end) uploadable=\(uploadable.count) skipped_preflight=\(skipped) preflight_ms=\(self.perfMs(preflightElapsed)) batch_total_ms=\(self.perfMs(batchElapsed))"
+                )
                 DispatchQueue.main.async {
                     self.items.append(contentsOf: uploadable)
                 }
@@ -418,12 +1102,12 @@ final class HybridUploadManager: NSObject, ObservableObject {
             let end = min(i + chunkSize, assetIds.count)
             let chunk = Array(assetIds[i..<end])
             do {
-                let found = try await ServerPhotosService.shared.existsFullyBackedUp(assetIds: chunk)
+                let found = try await existsAssetIdsChunk(chunk)
                 present.formUnion(found)
             } catch {
                 if isRetryableNetworkError(error) {
                     try? await Task.sleep(nanoseconds: 700_000_000)
-                    let found = try await ServerPhotosService.shared.existsFullyBackedUp(assetIds: chunk)
+                    let found = try await existsAssetIdsChunk(chunk)
                     present.formUnion(found)
                 } else {
                     throw error
@@ -432,6 +1116,18 @@ final class HybridUploadManager: NSObject, ObservableObject {
             i = end
         }
         return present
+    }
+
+    private func existsAssetIdsChunk(_ assetIds: [String]) async throws -> Set<String> {
+        let started = perfNow()
+        do {
+            let found = try await ServerPhotosService.shared.existsFullyBackedUp(assetIds: assetIds)
+            perfRecordExistsCall(max(0, perfNow() - started))
+            return found
+        } catch {
+            perfRecordExistsCall(max(0, perfNow() - started))
+            throw error
+        }
     }
 
     private func isRetryableNetworkError(_ error: Error) -> Bool {
@@ -460,10 +1156,17 @@ final class HybridUploadManager: NSObject, ObservableObject {
         return false
     }
 
+    private func hasDeferredVerificationWork() -> Bool {
+        deferredVerifyStateQueue.sync {
+            deferredVerifyLoopTask != nil || !deferredVerifyEntriesByContentId.isEmpty
+        }
+    }
+
     func isSyncBusy() -> Bool {
         let activityBusy = activityQueue.sync { activeExportBatches > 0 || activePreflightChecks > 0 }
-        let tusBusy = tusQueue.sync { activeTusWorkers > 0 || !pendingTus.isEmpty }
-        return activityBusy || tusBusy
+        let tusBusy = tusQueue.sync { !foregroundTusSuspended && (activeTusWorkers > 0 || !pendingTus.isEmpty) }
+        let deferredVerifyBusy = hasDeferredVerificationWork()
+        return activityBusy || tusBusy || deferredVerifyBusy
     }
 
     /// Only mark a content item as synced from its primary upload component.
@@ -476,105 +1179,728 @@ final class HybridUploadManager: NSObject, ObservableObject {
         return !item.isLiveComponent
     }
 
+    private func shouldDelayVerificationForLivePairing(for item: UploadItem) -> Bool {
+        guard shouldMarkSyncedInRepository(for: item) else { return false }
+        return pendingLiveComponents(forContentId: item.contentId) > 0
+    }
+
     /// Mark synced after server confirmation. If confirmation is temporarily unavailable
     /// (for example while live-photo pairing/ingest is still settling), keep the item pending
     /// and verify again in the background instead of marking it failed immediately.
-    private func markSyncedAfterServerVerification(for item: UploadItem) async -> Bool {
-        guard shouldMarkSyncedInRepository(for: item) else { return true }
+    private func markSyncedAfterServerVerification(
+        for item: UploadItem,
+        preferDeferred: Bool = false,
+        preferDeferredReason: String? = nil,
+        waitForLivePairing: Bool = false
+    ) async -> VerifyResult {
+        guard shouldMarkSyncedInRepository(for: item) else { return .immediateOk }
         let aid = preflightAssetId(for: item)
-        return await markSyncedAfterServerVerification(contentId: item.contentId, filename: item.filename, assetId: aid)
+        return await markSyncedAfterServerVerification(
+            contentId: item.contentId,
+            filename: item.filename,
+            assetId: aid,
+            preferDeferred: preferDeferred,
+            preferDeferredReason: preferDeferredReason,
+            waitForLivePairing: waitForLivePairing
+        )
     }
 
-    private func scheduleDeferredServerVerification(contentId: String, filename: String, assetId: String) {
-        Task.detached(priority: .utility) { [weak self] in
-            guard let self else { return }
-            let attempts = 12
-            for attempt in 0..<attempts {
-                do {
-                    let present = try await self.existsAssetIdsWithRetry([assetId])
-                    if present.contains(assetId) {
-                        SyncRepository.shared.markSynced(contentId: contentId)
-                        print("[UPLOAD] deferred verify confirmed asset_id=\(assetId) file=\(filename) attempt=\(attempt + 1)")
-                        return
-                    }
-                } catch {
-                    // Best-effort deferred checker: keep trying until timeout.
-                }
-                if attempt < attempts - 1 {
-                    try? await Task.sleep(nanoseconds: 2_000_000_000)
-                }
+    private func shouldPreferDeferredVerificationForForeground() -> (prefer: Bool, reason: String) {
+        let pending = pendingTusCount()
+        if pending >= verifyImmediateBypassPendingThreshold {
+            return (true, "backlog")
+        }
+        return verifyDecisionQueue.sync {
+            guard verifyImmediateMissStreak >= verifyImmediateMissStreakBypassThreshold else {
+                return (false, "normal")
             }
-            print("[UPLOAD] deferred verify timed out asset_id=\(assetId) file=\(filename); remains pending")
+            verifyPolicyBypassCount += 1
+            if verifyPolicyBypassCount % verifyImmediateProbeInterval == 0 {
+                return (false, "probe")
+            }
+            return (true, "miss_streak")
         }
     }
 
-    private func markSyncedAfterServerVerification(contentId: String, filename: String, assetId: String?) async -> Bool {
+    private func recordImmediateVerifyHit() {
+        verifyDecisionQueue.async {
+            self.verifyImmediateMissStreak = 0
+            self.verifyPolicyBypassCount = 0
+        }
+    }
+
+    private func recordImmediateVerifyMiss() {
+        verifyDecisionQueue.async {
+            self.verifyImmediateMissStreak += 1
+        }
+    }
+
+    private func queueDeferredServerVerification(
+        contentId: String,
+        filename: String,
+        assetId: String,
+        waitForLivePairing: Bool = false
+    ) {
+        deferredVerifyStateQueue.async {
+            if self.deferredVerifyEntriesByContentId[contentId] == nil {
+                let entry = DeferredVerifyEntry(
+                    contentId: contentId,
+                    filename: filename,
+                    assetId: assetId,
+                    waitForLivePairing: waitForLivePairing,
+                    attempts: 0,
+                    queuedAtUptime: self.perfNow(),
+                    timedOutAtUptime: nil,
+                    lastPolledAtUptime: 0
+                )
+                self.deferredVerifyEntriesByContentId[contentId] = entry
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-deferred-enqueue content_id=\(contentId) asset_id=\(assetId) pending_entries=\(self.deferredVerifyEntriesByContentId.count)"
+                )
+            }
+            self.ensureDeferredVerifierLoopRunningLocked()
+        }
+    }
+
+    private func ensureDeferredVerifierLoopRunningLocked() {
+        guard deferredVerifyLoopTask == nil else { return }
+        deferredVerifyLoopTask = Task.detached(priority: .utility) { [weak self] in
+            await self?.runDeferredVerifierLoop()
+        }
+    }
+
+    private func runDeferredVerifierLoop() async {
+        defer {
+            deferredVerifyStateQueue.async {
+                self.deferredVerifyLoopTask = nil
+            }
+        }
+
+        var lastForegroundUploadWorkAtUptime: TimeInterval?
+        while !Task.isCancelled {
+            let hasForegroundUploadWork = tusQueue.sync { activeTusWorkers > 0 || !pendingTus.isEmpty }
+            let livePendingByContent = tusQueue.sync { liveComponentPendingByContentId }
+            let busyPollSeconds = deferredBusyPollIntervalSeconds()
+            let loopNow = perfNow()
+            if hasForegroundUploadWork {
+                lastForegroundUploadWorkAtUptime = loopNow
+            }
+            let pendingEntryCount = deferredVerifyStateQueue.sync { deferredVerifyEntriesByContentId.count }
+            let allEntriesTimedOut = deferredVerifyStateQueue.sync {
+                !deferredVerifyEntriesByContentId.isEmpty &&
+                    deferredVerifyEntriesByContentId.values.allSatisfy { $0.timedOutAtUptime != nil }
+            }
+            let timedOutRepollBaseSeconds = allEntriesTimedOut
+                ? deferredAllTimedOutRepollIntervalSeconds(pendingEntries: pendingEntryCount)
+                : deferredTimedOutRepollIntervalSeconds(pendingEntries: pendingEntryCount)
+            let timedOutRepollSeconds = applyDeferredIdleTailRepollBoost(
+                baseSeconds: timedOutRepollBaseSeconds,
+                hasForegroundUploadWork: hasForegroundUploadWork,
+                now: loopNow,
+                lastForegroundWorkAt: lastForegroundUploadWorkAtUptime
+            )
+            let idleEntryPollIntervalSeconds = deferredIdleEntryPollIntervalSeconds(
+                hasForegroundUploadWork: hasForegroundUploadWork,
+                pendingEntries: pendingEntryCount,
+                allEntriesTimedOut: allEntriesTimedOut
+            )
+            let snapshot: [DeferredVerifyEntry] = deferredVerifyStateQueue.sync {
+                guard !deferredVerifyEntriesByContentId.isEmpty else { return [] }
+                return deferredVerifyEntriesByContentId.values.compactMap { entry in
+                    if entry.waitForLivePairing && (livePendingByContent[entry.contentId] ?? 0) > 0 {
+                        return nil
+                    }
+                    let elapsedSinceLastPoll = max(0, loopNow - entry.lastPolledAtUptime)
+                    guard let timedOutAt = entry.timedOutAtUptime else {
+                        if idleEntryPollIntervalSeconds > 0 && elapsedSinceLastPoll < idleEntryPollIntervalSeconds {
+                            return nil
+                        }
+                        return entry
+                    }
+                    if hasForegroundUploadWork {
+                        return nil
+                    }
+                    let elapsedSinceTimeout = max(0, loopNow - timedOutAt)
+                    guard elapsedSinceTimeout >= timedOutRepollSeconds else {
+                        return nil
+                    }
+                    guard elapsedSinceLastPoll >= timedOutRepollSeconds else {
+                        return nil
+                    }
+                    return entry
+                }
+            }
+            let stillPendingBeforePoll = deferredVerifyStateQueue.sync { !deferredVerifyEntriesByContentId.isEmpty }
+            if !stillPendingBeforePoll {
+                perfLogDeferredDrain(reason: "drained")
+                return
+            }
+            if snapshot.isEmpty {
+                let pollSeconds: TimeInterval
+                if hasForegroundUploadWork {
+                    pollSeconds = busyPollSeconds
+                } else if allEntriesTimedOut {
+                    pollSeconds = timedOutRepollSeconds
+                } else {
+                    pollSeconds = min(
+                        timedOutRepollSeconds,
+                        max(deferredVerifyPollSecondsIdle, idleEntryPollIntervalSeconds)
+                    )
+                }
+                try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
+                continue
+            }
+
+            let uniqueAssetIds = Array(Set(snapshot.map { $0.assetId }))
+            var present: Set<String> = []
+            var pollFailed = false
+            do {
+                present = try await existsAssetIdsWithRetry(uniqueAssetIds)
+            } catch {
+                pollFailed = true
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-deferred-poll-failed pending_entries=\(snapshot.count) error=\(error.localizedDescription)"
+                )
+            }
+
+            var confirmed: [DeferredVerifyEntry] = []
+            var timedOut: [DeferredVerifyEntry] = []
+            let now = perfNow()
+            deferredVerifyStateQueue.sync {
+                for snap in snapshot {
+                    guard var entry = deferredVerifyEntriesByContentId[snap.contentId] else { continue }
+                    if entry.waitForLivePairing && (livePendingByContent[entry.contentId] ?? 0) > 0 {
+                        deferredVerifyEntriesByContentId[entry.contentId] = entry
+                        continue
+                    }
+                    entry.lastPolledAtUptime = now
+                    if present.contains(entry.assetId) {
+                        deferredVerifyEntriesByContentId.removeValue(forKey: entry.contentId)
+                        confirmed.append(entry)
+                        continue
+                    }
+                    if pollFailed {
+                        deferredVerifyEntriesByContentId[entry.contentId] = entry
+                        continue
+                    }
+                    if entry.timedOutAtUptime != nil {
+                        deferredVerifyEntriesByContentId[entry.contentId] = entry
+                        continue
+                    }
+                    entry.attempts += 1
+                    let waited = max(0, now - entry.queuedAtUptime)
+                    if waited >= deferredVerifyMaxWaitSeconds || entry.attempts >= deferredVerifyMaxAttempts {
+                        entry.timedOutAtUptime = now
+                        deferredVerifyEntriesByContentId[entry.contentId] = entry
+                        timedOut.append(entry)
+                    } else {
+                        deferredVerifyEntriesByContentId[entry.contentId] = entry
+                    }
+                }
+            }
+
+            for entry in confirmed {
+                SyncRepository.shared.markSynced(contentId: entry.contentId)
+                perfRecordVerifyDeferredConfirmed()
+                let waited = max(0, perfNow() - entry.queuedAtUptime)
+                let recoveredAfterTimeout = (entry.timedOutAtUptime != nil) ? 1 : 0
+                print("[UPLOAD] deferred verify confirmed asset_id=\(entry.assetId) file=\(entry.filename) attempts=\(entry.attempts + 1)")
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-deferred-confirmed content_id=\(entry.contentId) asset_id=\(entry.assetId) attempts=\(entry.attempts + 1) waited_ms=\(perfMs(waited)) recovered_after_timeout=\(recoveredAfterTimeout)"
+                )
+            }
+            for entry in timedOut {
+                perfRecordVerifyDeferredTimedOut()
+                let waited = max(0, perfNow() - entry.queuedAtUptime)
+                print("[UPLOAD] deferred verify timed out asset_id=\(entry.assetId) file=\(entry.filename); remains pending and will be rechecked")
+                AppLog.info(
+                    AppLog.upload,
+                    "[PERF] verify-deferred-timeout content_id=\(entry.contentId) asset_id=\(entry.assetId) attempts=\(entry.attempts) waited_ms=\(perfMs(waited)) will_retry=1"
+                )
+            }
+
+            let stillPending = deferredVerifyStateQueue.sync { !deferredVerifyEntriesByContentId.isEmpty }
+            if !stillPending {
+                perfLogDeferredDrain(reason: "drained")
+                return
+            }
+            let allPendingTimedOut = deferredVerifyStateQueue.sync {
+                !deferredVerifyEntriesByContentId.isEmpty && deferredVerifyEntriesByContentId.values.allSatisfy { $0.timedOutAtUptime != nil }
+            }
+            let pendingAfterCount = deferredVerifyStateQueue.sync { deferredVerifyEntriesByContentId.count }
+            let timedOutRepollAfterBaseSeconds = allPendingTimedOut
+                ? deferredAllTimedOutRepollIntervalSeconds(pendingEntries: pendingAfterCount)
+                : deferredTimedOutRepollIntervalSeconds(pendingEntries: pendingAfterCount)
+            let timedOutRepollAfterSeconds = applyDeferredIdleTailRepollBoost(
+                baseSeconds: timedOutRepollAfterBaseSeconds,
+                hasForegroundUploadWork: hasForegroundUploadWork,
+                now: now,
+                lastForegroundWorkAt: lastForegroundUploadWorkAtUptime
+            )
+            let idleEntryPollAfterSeconds = deferredIdleEntryPollIntervalSeconds(
+                hasForegroundUploadWork: hasForegroundUploadWork,
+                pendingEntries: pendingAfterCount,
+                allEntriesTimedOut: allPendingTimedOut
+            )
+            let pollSeconds: TimeInterval
+            if hasForegroundUploadWork {
+                pollSeconds = busyPollSeconds
+            } else if allPendingTimedOut {
+                pollSeconds = timedOutRepollAfterSeconds
+            } else {
+                pollSeconds = max(deferredVerifyPollSecondsIdle, idleEntryPollAfterSeconds)
+            }
+            try? await Task.sleep(nanoseconds: UInt64(pollSeconds * 1_000_000_000))
+        }
+    }
+
+    private func markSyncedAfterServerVerification(
+        contentId: String,
+        filename: String,
+        assetId: String?,
+        preferDeferred: Bool = false,
+        preferDeferredReason: String? = nil,
+        waitForLivePairing: Bool = false
+    ) async -> VerifyResult {
         guard let aid = assetId, !aid.isEmpty else {
             let msg = "Upload completed but missing asset_id for verification"
             SyncRepository.shared.markFailed(contentId: contentId, error: msg)
             print("[UPLOAD] verify failed missing-asset-id file=\(filename)")
-            return false
+            return .failed
+        }
+
+        if preferDeferred {
+            let note = "Awaiting server ingest confirmation"
+            SyncRepository.shared.markPending(contentId: contentId, note: note)
+            perfRecordVerifyImmediatePolicySkipped()
+            perfRecordVerifyDeferredQueued()
+            queueDeferredServerVerification(
+                contentId: contentId,
+                filename: filename,
+                assetId: aid,
+                waitForLivePairing: waitForLivePairing
+            )
+            print("[UPLOAD] verify deferred by policy asset_id=\(aid) file=\(filename) reason=\(preferDeferredReason ?? "unspecified")")
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] verify-deferred-queued content_id=\(contentId) asset_id=\(aid) mode=fast_deferred reason=policy_\(preferDeferredReason ?? "unspecified")"
+            )
+            return .deferredQueued
         }
 
         do {
-            // Quick-path verification window.
-            for attempt in 0..<4 {
-                let present = try await existsAssetIdsWithRetry([aid])
-                if present.contains(aid) {
-                    SyncRepository.shared.markSynced(contentId: contentId)
-                    return true
-                }
-                if attempt < 3 {
-                    try? await Task.sleep(nanoseconds: 1_000_000_000)
-                }
+            let present = try await existsAssetIdsWithRetry([aid])
+            if present.contains(aid) {
+                SyncRepository.shared.markSynced(contentId: contentId)
+                perfRecordVerifyImmediateOk()
+                recordImmediateVerifyHit()
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-immediate-ok content_id=\(contentId) asset_id=\(aid) mode=fast_deferred"
+                )
+                return .immediateOk
             }
+            recordImmediateVerifyMiss()
             let note = "Awaiting server ingest confirmation"
             SyncRepository.shared.markPending(contentId: contentId, note: note)
-            scheduleDeferredServerVerification(contentId: contentId, filename: filename, assetId: aid)
+            perfRecordVerifyDeferredQueued()
+            queueDeferredServerVerification(
+                contentId: contentId,
+                filename: filename,
+                assetId: aid,
+                waitForLivePairing: waitForLivePairing
+            )
             print("[UPLOAD] verify deferred ingest-confirmation asset_id=\(aid) file=\(filename)")
-            return true
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] verify-deferred-queued content_id=\(contentId) asset_id=\(aid) mode=fast_deferred"
+            )
+            return .deferredQueued
         } catch {
             let note = "Verification request failed: \(error.localizedDescription)"
             SyncRepository.shared.markPending(contentId: contentId, note: note)
-            scheduleDeferredServerVerification(contentId: contentId, filename: filename, assetId: aid)
+            perfRecordVerifyDeferredQueued()
+            queueDeferredServerVerification(
+                contentId: contentId,
+                filename: filename,
+                assetId: aid,
+                waitForLivePairing: waitForLivePairing
+            )
             print("[UPLOAD] verify request failed; deferred file=\(filename) err=\(error.localizedDescription)")
-            return true
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] verify-deferred-queued content_id=\(contentId) asset_id=\(aid) mode=fast_deferred reason=request_failed"
+            )
+            return .deferredQueued
         }
     }
 
     private func enqueueTus(_ newItems: [UploadItem]) {
         tusQueue.async {
+            if self.foregroundTusSuspended {
+                AppLog.info(
+                    AppLog.upload,
+                    "[PERF] tus-enqueue-reroute reason=scene-background items=\(newItems.count)"
+                )
+                DispatchQueue.global(qos: .utility).async {
+                    for item in newItems {
+                        self.queueBackgroundMultipart(for: item)
+                    }
+                }
+                return
+            }
+            let now = self.perfNow()
+            for item in newItems {
+                self.tusEnqueuedAtUptime[item.id] = now
+                self.trackLiveComponentEnqueueIfNeeded(item)
+            }
             self.pendingTus.append(contentsOf: newItems)
-            self.maybeStartTusWorkers()
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] tus-enqueue added=\(newItems.count) pending=\(self.pendingTus.count) active_workers=\(self.activeTusWorkers)"
+            )
+            self.maybeStartTusWorkers(reason: "enqueue")
         }
     }
 
-    private func maybeStartTusWorkers() {
-        while activeTusWorkers < maxTusWorkers && !pendingTus.isEmpty {
+    private func recordTusUploadHealth(
+        uploadBytes: Int64,
+        uploadSeconds: TimeInterval,
+        patchRetries: Int,
+        patchTimeouts: Int,
+        stallRecoveries: Int
+    ) {
+        guard uploadSeconds > 0 else { return }
+        let uploadMBps = (Double(max(0, uploadBytes)) / (1024.0 * 1024.0)) / uploadSeconds
+        let uploadMs = max(0, uploadSeconds * 1000.0)
+        tusQueue.sync {
+            tusConcurrencyState.uploadSamples += 1
+            tusConcurrencyState.ewmaUploadMBps = ewma(
+                previous: tusConcurrencyState.ewmaUploadMBps,
+                sample: uploadMBps,
+                alpha: tusHealthEwmaAlpha
+            )
+            tusConcurrencyState.ewmaUploadMs = ewma(
+                previous: tusConcurrencyState.ewmaUploadMs,
+                sample: uploadMs,
+                alpha: tusHealthEwmaAlpha
+            )
+            tusConcurrencyState.ewmaPatchRetriesPerItem = ewma(
+                previous: tusConcurrencyState.ewmaPatchRetriesPerItem,
+                sample: Double(max(0, patchRetries)),
+                alpha: tusHealthEwmaAlpha
+            )
+            tusConcurrencyState.ewmaPatchTimeoutsPerItem = ewma(
+                previous: tusConcurrencyState.ewmaPatchTimeoutsPerItem,
+                sample: Double(max(0, patchTimeouts)),
+                alpha: tusHealthEwmaAlpha
+            )
+            tusConcurrencyState.ewmaStallRecoveriesPerItem = ewma(
+                previous: tusConcurrencyState.ewmaStallRecoveriesPerItem,
+                sample: Double(max(0, stallRecoveries)),
+                alpha: tusHealthEwmaAlpha
+            )
+        }
+    }
+
+    private func recordTusCreateHealth(createSeconds: TimeInterval) {
+        guard createSeconds > 0 else { return }
+        let createMs = max(0, createSeconds * 1000.0)
+        tusQueue.sync {
+            tusConcurrencyState.createSamples += 1
+            tusConcurrencyState.ewmaCreateMs = ewma(
+                previous: tusConcurrencyState.ewmaCreateMs,
+                sample: createMs,
+                alpha: tusHealthEwmaAlpha
+            )
+        }
+    }
+
+    private func preferredTusWorkerCapLocked() -> Int {
+        let processInfo = ProcessInfo.processInfo
+        let thermal = processInfo.thermalState
+        let thermalConstrained = (thermal == .serious || thermal == .critical)
+        if !isNetworkAvailable || isExpensiveNetwork || processInfo.isLowPowerModeEnabled || thermalConstrained {
+            return minTusWorkers
+        }
+        return maxTusWorkers
+    }
+
+    private func thermalStateLabel(_ thermal: ProcessInfo.ThermalState) -> String {
+        switch thermal {
+        case .nominal: return "nominal"
+        case .fair: return "fair"
+        case .serious: return "serious"
+        case .critical: return "critical"
+        @unknown default: return "unknown"
+        }
+    }
+
+    private func maybeStartTusWorkers(reason: String = "unspecified") {
+        if foregroundTusSuspended {
+            tusConcurrencyState.targetWorkers = 0
+            return
+        }
+        var cap = preferredTusWorkerCapLocked()
+        let currentTarget = tusConcurrencyState.targetWorkers
+        let pending = pendingTus.count
+        let now = perfNow()
+        let samples = tusConcurrencyState.uploadSamples
+        let ewmaUploadMBps = tusConcurrencyState.ewmaUploadMBps
+        let ewmaUploadMs = tusConcurrencyState.ewmaUploadMs
+        let createSamples = tusConcurrencyState.createSamples
+        let ewmaCreateMs = tusConcurrencyState.ewmaCreateMs
+        let ewmaPatchRetries = tusConcurrencyState.ewmaPatchRetriesPerItem
+        let ewmaPatchTimeouts = tusConcurrencyState.ewmaPatchTimeoutsPerItem
+        let ewmaStallRecoveries = tusConcurrencyState.ewmaStallRecoveriesPerItem
+        let hasCreateSamples = createSamples >= tusCreateLatencyGuardMinSamples
+        let createLatencySignal = hasCreateSamples &&
+            ewmaCreateMs >= tusCreateLatencyGuardEwmaMsThreshold
+        let createLatencyReleaseSignal = hasCreateSamples &&
+            ewmaCreateMs <= tusCreateLatencyGuardReleaseEwmaMsThreshold
+        var createGuardTransition: String?
+        if !tusConcurrencyState.createLatencyGuardActive {
+            tusConcurrencyState.createLatencyRecoveryStreak = 0
+            if createLatencySignal {
+                tusConcurrencyState.createLatencySignalStreak += 1
+            } else {
+                tusConcurrencyState.createLatencySignalStreak = 0
+            }
+            if tusConcurrencyState.createLatencySignalStreak >= tusCreateLatencyGuardConsecutiveRequired {
+                tusConcurrencyState.createLatencyGuardActive = true
+                tusConcurrencyState.createLatencyGuardHoldUntilUptime = max(
+                    tusConcurrencyState.createLatencyGuardHoldUntilUptime,
+                    now + tusCreateLatencyGuardMinHoldSeconds
+                )
+                createGuardTransition = "enabled"
+            }
+        } else {
+            if createLatencySignal {
+                tusConcurrencyState.createLatencyRecoveryStreak = 0
+            } else if createLatencyReleaseSignal {
+                tusConcurrencyState.createLatencyRecoveryStreak += 1
+            } else {
+                tusConcurrencyState.createLatencyRecoveryStreak = 0
+            }
+            let createGuardHoldActive = now < tusConcurrencyState.createLatencyGuardHoldUntilUptime
+            if !createGuardHoldActive &&
+                tusConcurrencyState.createLatencyRecoveryStreak >= tusCreateLatencyGuardReleaseConsecutiveRequired {
+                tusConcurrencyState.createLatencyGuardActive = false
+                tusConcurrencyState.createLatencySignalStreak = 0
+                tusConcurrencyState.createLatencyRecoveryStreak = 0
+                tusConcurrencyState.createLatencyGuardHoldUntilUptime = 0
+                createGuardTransition = "disabled"
+            }
+        }
+        let createLatencyGuardActive = tusConcurrencyState.createLatencyGuardActive
+        let createGuardHoldMs = perfMs(max(0, tusConcurrencyState.createLatencyGuardHoldUntilUptime - now))
+        if createLatencyGuardActive {
+            cap = min(cap, minTusWorkers)
+        }
+        let hasThroughputSamples = samples >= tusThroughputGuardMinSamples
+        let transportDownSignal = hasThroughputSamples && (
+            ewmaPatchTimeouts >= tusScaleDownTimeoutRateThreshold ||
+            ewmaStallRecoveries >= tusScaleDownStallRateThreshold
+        )
+        let performanceDownSignal = hasThroughputSamples &&
+            (ewmaUploadMBps > 0 && ewmaUploadMBps < tusScaleDownEwmaMBpsThreshold) &&
+            (ewmaUploadMs >= tusScaleDownEwmaUploadMsThreshold)
+        let throughputDownSignal = transportDownSignal
+        let throughputUpSignal = hasThroughputSamples && (
+            ewmaPatchTimeouts <= tusScaleUpTimeoutRateCeiling &&
+            ewmaStallRecoveries <= tusScaleUpStallRateCeiling
+        )
+        if throughputDownSignal {
+            tusConcurrencyState.throughputDownSignalStreak += 1
+            tusConcurrencyState.throughputUpSignalStreak = 0
+        } else if throughputUpSignal {
+            tusConcurrencyState.throughputUpSignalStreak += 1
+            tusConcurrencyState.throughputDownSignalStreak = 0
+        } else {
+            tusConcurrencyState.throughputDownSignalStreak = 0
+            tusConcurrencyState.throughputUpSignalStreak = 0
+        }
+        let downStreakRequired = transportDownSignal
+            ? max(1, tusThroughputGuardDownConsecutiveRequired - 1)
+            : tusThroughputGuardDownConsecutiveRequired
+        let throughputGuardDown = hasThroughputSamples &&
+            tusConcurrencyState.throughputDownSignalStreak >= downStreakRequired
+        let throughputAllowsScaleUp = !hasThroughputSamples ||
+            tusConcurrencyState.throughputUpSignalStreak >= tusThroughputGuardUpConsecutiveRequired
+        var throughputGuardHoldActive = now < tusConcurrencyState.throughputGuardHoldUntilUptime
+        let throughputGuardRecovered = hasThroughputSamples &&
+            !throughputDownSignal &&
+            tusConcurrencyState.throughputUpSignalStreak >= tusThroughputGuardRecoveryUpConsecutiveRequired
+        if throughputGuardHoldActive && throughputGuardRecovered {
+            tusConcurrencyState.throughputGuardHoldUntilUptime = 0
+            throughputGuardHoldActive = false
+        }
+        let cooldownActive = (now - tusConcurrencyState.lastScaleChangeAtUptime) < tusScaleDecisionCooldownSeconds
+        let probeHoldActive = (now - tusConcurrencyState.lastProbeScaleUpAtUptime) < tusProbeHighWorkerHoldSeconds
+        let recentGuardDownscale = tusConcurrencyState.lastThroughputGuardDownscaleAtUptime > 0 &&
+            (now - tusConcurrencyState.lastThroughputGuardDownscaleAtUptime) < tusProbeAfterThroughputGuardCooldownSeconds
+        let probePendingThreshold = recentGuardDownscale
+            ? max(tusProbeUpPendingThreshold, tusProbeUpPendingThresholdAfterGuard)
+            : tusProbeUpPendingThreshold
+        let probeEligible = cap > minTusWorkers &&
+            currentTarget == minTusWorkers &&
+            pending >= probePendingThreshold &&
+            hasThroughputSamples &&
+            !throughputDownSignal &&
+            !recentGuardDownscale &&
+            !throughputGuardHoldActive &&
+            throughputAllowsScaleUp
+        let probeDue = probeEligible &&
+            (now - tusConcurrencyState.lastProbeScaleUpAtUptime) >= tusProbeUpIntervalSeconds &&
+            !cooldownActive
+        if let createGuardTransition {
+            AppLog.info(
+                AppLog.upload,
+                "[PERF] tus-create-guard reason=\(reason) state=\(createGuardTransition) active=\(createLatencyGuardActive ? 1 : 0) create_samples=\(createSamples) create_signal_streak=\(tusConcurrencyState.createLatencySignalStreak) create_recovery_streak=\(tusConcurrencyState.createLatencyRecoveryStreak) ewma_create_ms=\(Int(ewmaCreateMs.rounded())) hold_ms=\(createGuardHoldMs) pending=\(pending) target=\(currentTarget)"
+            )
+        }
+        let nextTarget: Int
+        let decisionReason: String
+        if cap <= minTusWorkers {
+            nextTarget = minTusWorkers
+            decisionReason = createLatencyGuardActive ? "create_latency_guard" : "safety_gate"
+        } else if currentTarget >= cap {
+            if pending <= tusScaleDownPendingThreshold {
+                nextTarget = minTusWorkers
+                decisionReason = "backlog_low"
+            } else if probeHoldActive && throughputGuardDown && !transportDownSignal {
+                nextTarget = cap
+                decisionReason = "probe_hold"
+            } else if throughputGuardDown {
+                nextTarget = minTusWorkers
+                decisionReason = "throughput_guard"
+            } else {
+                nextTarget = cap
+                decisionReason = "hold"
+            }
+        } else {
+            if pending < tusScaleUpPendingThreshold {
+                nextTarget = minTusWorkers
+                decisionReason = "backlog_low"
+            } else if throughputGuardHoldActive {
+                nextTarget = minTusWorkers
+                decisionReason = "guard_hold"
+            } else if probeDue {
+                nextTarget = cap
+                decisionReason = "probe_up"
+            } else if cooldownActive {
+                nextTarget = minTusWorkers
+                decisionReason = "cooldown"
+            } else if !throughputAllowsScaleUp {
+                nextTarget = minTusWorkers
+                decisionReason = hasThroughputSamples ? "throughput_hold" : "warmup_hold"
+            } else {
+                nextTarget = cap
+                decisionReason = "backlog_high"
+            }
+        }
+
+        if nextTarget != currentTarget {
+            tusConcurrencyState.targetWorkers = nextTarget
+            tusConcurrencyState.lastScaleChangeAtUptime = now
+            if decisionReason == "probe_up" {
+                tusConcurrencyState.lastProbeScaleUpAtUptime = now
+            }
+            if decisionReason == "throughput_guard" {
+                tusConcurrencyState.throughputGuardHoldUntilUptime = max(
+                    tusConcurrencyState.throughputGuardHoldUntilUptime,
+                    now + tusThroughputGuardRecoveryHoldSeconds
+                )
+                tusConcurrencyState.lastThroughputGuardDownscaleAtUptime = now
+            } else if nextTarget >= cap {
+                tusConcurrencyState.throughputGuardHoldUntilUptime = 0
+            }
+            perfRecordWorkerScale(target: nextTarget, previous: currentTarget, reason: decisionReason)
+            let processInfo = ProcessInfo.processInfo
+            let guardHoldMs = perfMs(max(0, tusConcurrencyState.throughputGuardHoldUntilUptime - now))
+            let guardHoldActiveForLog = tusConcurrencyState.throughputGuardHoldUntilUptime > now
+            AppLog.info(
+                AppLog.upload,
+                "[PERF] tus-concurrency reason=\(reason) decision=\(decisionReason) target=\(nextTarget) previous=\(currentTarget) active=\(activeTusWorkers) pending=\(pending) samples=\(samples) create_samples=\(createSamples) create_guard=\(createLatencyGuardActive ? 1 : 0) create_signal=\(createLatencySignal ? 1 : 0) create_release_signal=\(createLatencyReleaseSignal ? 1 : 0) create_signal_streak=\(tusConcurrencyState.createLatencySignalStreak) create_recovery_streak=\(tusConcurrencyState.createLatencyRecoveryStreak) create_guard_hold_ms=\(createGuardHoldMs) ewma_create_ms=\(Int(ewmaCreateMs.rounded())) throughput_down_signal=\(throughputDownSignal ? 1 : 0) performance_down_signal=\(performanceDownSignal ? 1 : 0) transport_down_signal=\(transportDownSignal ? 1 : 0) throughput_up_signal=\(throughputUpSignal ? 1 : 0) throughput_down_streak=\(tusConcurrencyState.throughputDownSignalStreak) throughput_up_streak=\(tusConcurrencyState.throughputUpSignalStreak) down_streak_required=\(downStreakRequired) probe_pending_threshold=\(probePendingThreshold) probe_recent_guard_cooldown=\(recentGuardDownscale ? 1 : 0) probe_due=\(probeDue ? 1 : 0) probe_hold=\(probeHoldActive ? 1 : 0) guard_hold=\(guardHoldActiveForLog ? 1 : 0) guard_hold_ms=\(guardHoldMs) ewma_upload_MBps=\(String(format: "%.2f", ewmaUploadMBps)) ewma_upload_ms=\(Int(ewmaUploadMs.rounded())) ewma_patch_retries=\(String(format: "%.2f", ewmaPatchRetries)) ewma_patch_timeouts=\(String(format: "%.2f", ewmaPatchTimeouts)) ewma_stall_recoveries=\(String(format: "%.2f", ewmaStallRecoveries)) network=\(isNetworkAvailable ? 1 : 0) expensive=\(isExpensiveNetwork ? 1 : 0) low_power=\(processInfo.isLowPowerModeEnabled ? 1 : 0) thermal=\(thermalStateLabel(processInfo.thermalState))"
+            )
+        }
+
+        while activeTusWorkers < tusConcurrencyState.targetWorkers && !pendingTus.isEmpty {
             activeTusWorkers += 1
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] tus-worker-start active_workers=\(activeTusWorkers) target_workers=\(tusConcurrencyState.targetWorkers) pending=\(pendingTus.count)"
+            )
             Task.detached { [weak self] in
                 await self?.runTusWorker()
             }
         }
     }
 
-    private func nextTusItem() -> UploadItem? {
-        var item: UploadItem?
+    private func nextTusItem() -> (item: UploadItem, queueWait: TimeInterval?)? {
+        var result: (item: UploadItem, queueWait: TimeInterval?)?
         tusQueue.sync {
-            if !pendingTus.isEmpty { item = pendingTus.removeFirst() }
+            guard !foregroundTusSuspended else { return }
+            guard !pendingTus.isEmpty else { return }
+            let item = pendingTus.removeFirst()
+            let enqueuedAt = tusEnqueuedAtUptime.removeValue(forKey: item.id)
+            let queueWait = enqueuedAt.map { max(0, self.perfNow() - $0) }
+            result = (item: item, queueWait: queueWait)
         }
-        return item
+        return result
     }
 
-    private func finishWorker() {
-        tusQueue.sync { activeTusWorkers = max(0, activeTusWorkers - 1) }
+    private func retireWorkerIfOverTarget() -> Bool {
+        var retired = false
+        var shouldLogSummary = false
+        tusQueue.sync {
+            if activeTusWorkers > tusConcurrencyState.targetWorkers {
+                activeTusWorkers = max(0, activeTusWorkers - 1)
+                retired = true
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] tus-worker-stop reason=scale_down active_workers=\(activeTusWorkers) target_workers=\(tusConcurrencyState.targetWorkers) pending=\(pendingTus.count)"
+                )
+                shouldLogSummary = (activeTusWorkers == 0 && pendingTus.isEmpty)
+            }
+        }
+        if shouldLogSummary {
+            perfLogSummary(reason: "foreground-idle", force: true)
+        }
+        return retired
+    }
+
+    private func finishWorker(reason: String = "idle") {
+        var shouldLogSummary = false
+        tusQueue.sync {
+            activeTusWorkers = max(0, activeTusWorkers - 1)
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] tus-worker-stop reason=\(reason) active_workers=\(activeTusWorkers) target_workers=\(tusConcurrencyState.targetWorkers) pending=\(pendingTus.count)"
+            )
+            shouldLogSummary = (activeTusWorkers == 0 && pendingTus.isEmpty)
+        }
+        if shouldLogSummary {
+            perfLogSummary(reason: "foreground-idle", force: true)
+        }
     }
 
     private func runTusWorker() async {
-        while let item = nextTusItem() {
-            await performTusUpload(item)
+        while true {
+            if retireWorkerIfOverTarget() { return }
+            guard let next = nextTusItem() else {
+                finishWorker(reason: "idle")
+                return
+            }
+            await performTusUpload(next.item, queueWait: next.queueWait)
+            perfLogSummary(reason: "foreground-progress")
+            tusQueue.sync {
+                maybeStartTusWorkers(reason: "post-item")
+            }
         }
-        finishWorker()
     }
 
     func cancelAllForeground() {
@@ -590,6 +1916,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
         tusQueue.sync {
             for item in items { tusCancelFlags[item.id] = true }
             pendingTus.removeAll()
+            tusEnqueuedAtUptime.removeAll(keepingCapacity: true)
+            liveComponentPendingByContentId.removeAll(keepingCapacity: true)
         }
         cancelActiveExports()
         DispatchQueue.main.async {
@@ -605,6 +1933,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
     }
 
     func switchToBackgroundUploads() {
+        setForegroundTusSuspended(true, reason: "scene-background")
         // Cancel foreground uploads and queue background tasks for incomplete items
         cancelAllForeground()
         // Cancel any active Photos export requests (iCloud downloads) to avoid background work
@@ -701,6 +2030,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
     }
 
     private func exportResource(manager: PHAssetResourceManager, resource: PHAssetResource, asset: PHAsset, preCreationTs: Int64, prePixelWidth: Int, prePixelHeight: Int, isLiveComponent: Bool, completion: @escaping ([UploadItem]) -> Void) {
+        let exportStartedAt = perfNow()
         let filename = resource.originalFilename
         let isVideo = resource.type == .video || resource.type == .fullSizeVideo || resource.type == .pairedVideo
         let lower = filename.lowercased()
@@ -773,6 +2103,15 @@ final class HybridUploadManager: NSObject, ObservableObject {
             try? handle.write(contentsOf: data)
         } completionHandler: { error in
             try? handle.close()
+            func logExportPerf(status: String, inputBytes: Int64, outputItems: Int, outputBytes: Int64) {
+                let elapsed = max(0, self.perfNow() - exportStartedAt)
+                let effectiveBytes = max(Int64(0), outputBytes > 0 ? outputBytes : inputBytes)
+                let line = "[PERF] export-item asset=\(asset.localIdentifier) file=\(filename) type=\(isVideo ? "video" : "photo") status=\(status) elapsed_ms=\(self.perfMs(elapsed)) in_bytes=\(max(Int64(0), inputBytes)) out_items=\(outputItems) out_bytes=\(max(Int64(0), outputBytes)) allow_network=\(allowNetwork ? 1 : 0) throughput_MBps=\(self.perfMBps(bytes: effectiveBytes, seconds: max(elapsed, 0.001)))"
+                AppLog.debug(AppLog.export, line)
+                if status != "ok" || elapsed >= 8.0 {
+                    AppLog.info(AppLog.export, line)
+                }
+            }
             // Unregister request id
             self.exportRequestsQueue.async {
                 self.activeExportRequests.removeValue(forKey: key)
@@ -788,6 +2127,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             }
             if let error = error {
                 print("Export error: \(error.localizedDescription)")
+                logExportPerf(status: "error", inputBytes: 0, outputItems: 0, outputBytes: 0)
                 if !allowNetwork && self.isExpensiveNetwork {
                     // Likely in-cloud and network access disallowed by policy
                     DispatchQueue.main.async { ToastManager.shared.show("Skipped iCloud download on cellular (\(isVideo ? "video" : "photo"))") }
@@ -899,11 +2239,16 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 // Ensure UMK is available; if not, prompt unlock via UI (envelope)
                 if !self.ensureUMKAvailableForLocked() {
                     print("[LOCKED] UMK not available even after prompt; skipping locked encryption for \(filename)")
+                    logExportPerf(status: "locked-no-umk", inputBytes: size, outputItems: 0, outputBytes: 0)
                     completion([])
                     return
                 }
                 // Encrypt original (HEIC->JPEG first for images), and produce encrypted thumbnail
-                guard let userId = AuthManager.shared.userId, let umk = E2EEManager.shared.umk, umk.count == 32 else { completion([]); return }
+                guard let userId = AuthManager.shared.userId, let umk = E2EEManager.shared.umk, umk.count == 32 else {
+                    logExportPerf(status: "locked-missing-keys", inputBytes: size, outputItems: 0, outputBytes: 0)
+                    completion([])
+                    return
+                }
 
                 // Prepare plaintext to encrypt
                 var plainURL = destURL
@@ -1068,6 +2413,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 if plainURL != destURL { try? FileManager.default.removeItem(at: plainURL) }
                 // Remove original exported file to avoid duplicate upload
                 try? FileManager.default.removeItem(at: destURL)
+                let totalLockedBytes = lockedBatchItems.reduce(Int64(0)) { $0 + max(Int64(0), $1.totalBytes) }
+                logExportPerf(
+                    status: lockedBatchItems.isEmpty ? "locked-empty" : "ok",
+                    inputBytes: plainSize,
+                    outputItems: lockedBatchItems.count,
+                    outputBytes: totalLockedBytes
+                )
                 completion(lockedBatchItems)
             } else {
                 // Plain upload (unlocked)
@@ -1097,6 +2449,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     tempFileURL: destURL,
                     assetId: self.computeAssetId(fileURL: destURL)
                 )
+                logExportPerf(status: "ok", inputBytes: size, outputItems: 1, outputBytes: item.totalBytes)
                 completion([item])
             }
         }
@@ -1187,6 +2540,36 @@ final class HybridUploadManager: NSObject, ObservableObject {
     }
 
     // MARK: - Image/Video helpers for Locked thumbnails
+    private func imageByRemovingAlphaForJPEG(_ image: CGImage) -> CGImage {
+        switch image.alphaInfo {
+        case .none, .noneSkipFirst, .noneSkipLast:
+            return image
+        default:
+            break
+        }
+
+        let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.noneSkipLast.rawValue).union(.byteOrder32Big)
+        guard let ctx = CGContext(
+            data: nil,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: colorSpace,
+            bitmapInfo: bitmapInfo.rawValue
+        ) else {
+            return image
+        }
+
+        let rect = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        // JPEG has no alpha channel; flatten once to avoid opaque+alpha write warnings.
+        ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+        ctx.fill(rect)
+        ctx.draw(image, in: rect)
+        return ctx.makeImage() ?? image
+    }
+
     private func convertHEICtoJPEG(inputURL: URL, quality: CGFloat) -> (url: URL, width: Int, height: Int)? {
         // Use a transform-aware decode so EXIF/HEIC orientation is respected
         guard let src = CGImageSourceCreateWithURL(inputURL as CFURL, nil) else { return nil }
@@ -1201,12 +2584,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let cgOriented = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+        let jpegReady = imageByRemovingAlphaForJPEG(cgOriented)
         let destURL = uploadTempFileURL(name: UUID().uuidString + ".jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
         let encProps: [CFString: Any] = [kCGImageDestinationLossyCompressionQuality: quality]
-        CGImageDestinationAddImage(dest, cgOriented, encProps as CFDictionary)
+        CGImageDestinationAddImage(dest, jpegReady, encProps as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
-        return (destURL, cgOriented.width, cgOriented.height)
+        return (destURL, jpegReady.width, jpegReady.height)
     }
 
     private func generateImageThumbnail(url: URL, maxDim: Int) -> (url: URL, width: Int, height: Int, size: Int64)? {
@@ -1223,9 +2607,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
             kCGImageSourceCreateThumbnailWithTransform: true
         ]
         guard let thumb = CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary) else { return nil }
+        let jpegReady = imageByRemovingAlphaForJPEG(thumb)
         let destURL = uploadTempFileURL(name: UUID().uuidString + "_thumb.jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dest, thumb, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+        CGImageDestinationAddImage(dest, jpegReady, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
         let sz = (try? FileManager.default.attributesOfItem(atPath: destURL.path)[.size] as? NSNumber)?.int64Value ?? 0
         return (destURL, outW, outH, sz)
@@ -1238,12 +2623,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
         let dur = CMTimeGetSeconds(asset.duration)
         let time = CMTime(seconds: max(0.1, dur / 2.0), preferredTimescale: 600)
         guard let cg = try? gen.copyCGImage(at: time, actualTime: nil) else { return nil }
+        let jpegReady = imageByRemovingAlphaForJPEG(cg)
         let destURL = uploadTempFileURL(name: UUID().uuidString + "_thumb.jpg")
         guard let dest = CGImageDestinationCreateWithURL(destURL as CFURL, UTType.jpeg.identifier as CFString, 1, nil) else { return nil }
-        CGImageDestinationAddImage(dest, cg, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
+        CGImageDestinationAddImage(dest, jpegReady, [kCGImageDestinationLossyCompressionQuality: 0.82] as CFDictionary)
         guard CGImageDestinationFinalize(dest) else { return nil }
         let sz = (try? FileManager.default.attributesOfItem(atPath: destURL.path)[.size] as? NSNumber)?.int64Value ?? 0
-        return (destURL, cg.width, cg.height, sz)
+        return (destURL, jpegReady.width, jpegReady.height, sz)
     }
 
     // MARK: - Metadata logging
@@ -1388,16 +2774,28 @@ final class HybridUploadManager: NSObject, ObservableObject {
         await update(itemID: itemID, status: .uploading)
     }
 
-    private func performTusUpload(_ item: UploadItem) async {
+    private func performTusUpload(_ item: UploadItem, queueWait: TimeInterval?) async {
+        let opStartedAt = perfNow()
+        defer { trackLiveComponentSettledIfNeeded(item) }
         guard let tusClient else { return }
+        let patchTimeoutSeconds = preferredTusPatchTimeoutSeconds()
         if !isNetworkAvailable {
             print("[UPLOAD] Skipping TUS (offline): \(item.filename)")
             await update(itemID: item.id, status: .failed)
             SyncRepository.shared.markFailed(contentId: item.contentId, error: "Offline")
+            perfRecordFailure()
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] tus-failed filename=\(item.filename) reason=offline queue_wait_ms=\(queueWait.map(perfMs) ?? 0) total_ms=\(perfMs(max(0, perfNow() - opStartedAt)))"
+            )
             do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
             return
         }
         print("[UPLOAD] Using TUS for: \(item.filename) size=\(item.totalBytes)")
+        AppLog.debug(
+            AppLog.upload,
+            "[PERF] tus-start filename=\(item.filename) size=\(item.totalBytes) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) pending=\(pendingTusCount()) workers=\(tusQueue.sync { activeTusWorkers }) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded()))"
+        )
         await setUploading(item.id)
         SyncRepository.shared.markUploading(contentId: item.contentId)
 
@@ -1406,12 +2804,27 @@ final class HybridUploadManager: NSObject, ObservableObject {
             if item.isLocked { key += "-" + (item.lockedKind ?? "orig") }
             return key
         }
+        var createSeconds: TimeInterval = 0
+        var headSeconds: TimeInterval = 0
+        var uploadSeconds: TimeInterval = 0
+        var verifySeconds: TimeInterval = 0
+        var resumeOffset: Int64 = 0
+        var usedPersistedResumeURL = false
+        var headSkipped = false
+        var verifyDeferred = false
+        let verifyMode = "fast_deferred"
+        var patchRetries = 0
+        var patchTimeouts = 0
+        var stallRecoveries = 0
+
         do {
             var uploadURL = item.tusURL
+            var createdFreshUploadURL = false
             // Attempt to resume using a persisted TUS URL from previous sessions
             if uploadURL == nil {
                 if let saved = SyncRepository.shared.getTusUploadURL(contentId: tusResumeKey(for: item)), let url = URL(string: saved) {
                     uploadURL = url
+                    usedPersistedResumeURL = true
                     await update(itemID: item.id, tusURL: uploadURL)
                 }
             }
@@ -1447,85 +2860,178 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     print("[UPLOAD] TUS meta filename=\(item.filename) content_id=\(item.contentId) created_at=\(item.creationTs) favorite=\(item.isFavorite ? 1 : 0) caption='\(item.caption ?? "")' description='\(item.longDescription ?? "")' asset_id='\(meta["asset_id"] ?? "")'")
                     if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum { meta["albums"] = albums }
                 }
+                let createStart = perfNow()
                 let created = try await tusClient.create(fileSize: item.totalBytes, filename: item.filename, mimeType: item.mimeType, metadata: meta)
+                createSeconds += max(0, perfNow() - createStart)
                 uploadURL = created.uploadURL
+                createdFreshUploadURL = true
                 await update(itemID: item.id, tusURL: uploadURL)
                 if let u = uploadURL { SyncRepository.shared.setTusUploadURL(contentId: tusResumeKey(for: item), uploadURL: u.absoluteString) }
             }
             guard let uploadURL else { return }
+            var activeUploadURL = uploadURL
             // Resolve current offset
             var offset: Int64 = 0
-            do {
-                offset = try await tusClient.headOffset(uploadURL: uploadURL)
-            } catch {
-                // If HEAD fails (e.g., server GCed the upload), recreate and replace stored URL
-                SyncRepository.shared.deleteTusUploadURL(contentId: tusResumeKey(for: item))
-                var meta: [String: String]
-                if item.isLocked, let assetIdB58 = item.assetIdB58, let kind = item.lockedKind, let lmeta = item.lockedMetadata {
-                    var m: [String: String] = [
-                        "locked": "1",
-                        "crypto_version": "3",
-                        "kind": kind,
-                        "asset_id_b58": assetIdB58,
-                    ]
-                    lmeta.forEach { m[$0.key] = $0.value }
-                    if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum {
-                        m["albums"] = albums
+            if createdFreshUploadURL {
+                offset = 0
+                headSkipped = true
+                perfRecordHeadSkipped()
+            } else {
+                do {
+                    let headStart = perfNow()
+                    offset = try await tusClient.headOffset(uploadURL: uploadURL)
+                    headSeconds += max(0, perfNow() - headStart)
+                    perfRecordHeadPerformed()
+                } catch {
+                    // If HEAD fails (e.g., server GCed the upload), recreate and replace stored URL.
+                    SyncRepository.shared.deleteTusUploadURL(contentId: tusResumeKey(for: item))
+                    var meta: [String: String]
+                    if item.isLocked, let assetIdB58 = item.assetIdB58, let kind = item.lockedKind, let lmeta = item.lockedMetadata {
+                        var m: [String: String] = [
+                            "locked": "1",
+                            "crypto_version": "3",
+                            "kind": kind,
+                            "asset_id_b58": assetIdB58,
+                        ]
+                        lmeta.forEach { m[$0.key] = $0.value }
+                        if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum {
+                            m["albums"] = albums
+                        }
+                        m["content_id"] = item.contentId
+                        meta = m
+                    } else {
+                        meta = [
+                            "content_id": item.contentId,
+                            "media_type": item.isVideo ? "video" : "image",
+                            "created_at": String(item.creationTs),
+                            "favorite": item.isFavorite ? "1" : "0"
+                        ]
+                        if let assetId = item.assetId ?? self.computeAssetId(fileURL: item.tempFileURL) { meta["asset_id"] = assetId }
+                        if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["caption"] = cap }
+                        if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["description"] = des }
+                        if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum { meta["albums"] = albums }
                     }
-                    m["content_id"] = item.contentId
-                    meta = m
-                } else {
-                    meta = [
-                        "content_id": item.contentId,
-                        "media_type": item.isVideo ? "video" : "image",
-                        "created_at": String(item.creationTs),
-                        "favorite": item.isFavorite ? "1" : "0"
-                    ]
-                    if let assetId = item.assetId ?? self.computeAssetId(fileURL: item.tempFileURL) { meta["asset_id"] = assetId }
-                    if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["caption"] = cap }
-                    if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["description"] = des }
-                    if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum { meta["albums"] = albums }
+                    let createStart = perfNow()
+                    let created = try await tusClient.create(fileSize: item.totalBytes, filename: item.filename, mimeType: item.mimeType, metadata: meta)
+                    createSeconds += max(0, perfNow() - createStart)
+                    let newURL = created.uploadURL
+                    activeUploadURL = newURL
+                    await update(itemID: item.id, tusURL: newURL)
+                    SyncRepository.shared.setTusUploadURL(contentId: tusResumeKey(for: item), uploadURL: newURL.absoluteString)
+                    offset = 0
+                    headSkipped = true
+                    perfRecordHeadSkipped()
                 }
-                let created = try await tusClient.create(fileSize: item.totalBytes, filename: item.filename, mimeType: item.mimeType, metadata: meta)
-                let newURL = created.uploadURL
-                await update(itemID: item.id, tusURL: newURL)
-                SyncRepository.shared.setTusUploadURL(contentId: tusResumeKey(for: item), uploadURL: newURL.absoluteString)
-                offset = try await tusClient.headOffset(uploadURL: newURL)
             }
+            resumeOffset = max(0, offset)
             await update(itemID: item.id, sentBytes: offset)
 
-            try await tusClient.upload(fileURL: item.tempFileURL, uploadURL: uploadURL, startOffset: offset, fileSize: item.totalBytes, progress: { [weak self] sent, total in
-                guard let self else { return }
-                if self.shouldPublishProgress(itemID: item.id, sentBytes: sent, totalBytes: total) {
-                    Task { await self.update(itemID: item.id, sentBytes: sent) }
-                }
-            }, isCancelled: { [weak self] in
-                guard let self else { return true }
-                return self.tusQueue.sync { self.tusCancelFlags[item.id] ?? false }
-            })
+            let uploadStart = perfNow()
+            let uploadResult = try await tusClient.upload(
+                fileURL: item.tempFileURL,
+                uploadURL: activeUploadURL,
+                startOffset: offset,
+                fileSize: item.totalBytes,
+                progress: { [weak self] sent, total in
+                    guard let self else { return }
+                    if self.shouldPublishProgress(itemID: item.id, sentBytes: sent, totalBytes: total) {
+                        Task { await self.update(itemID: item.id, sentBytes: sent) }
+                    }
+                },
+                isCancelled: { [weak self] in
+                    guard let self else { return true }
+                    return self.tusQueue.sync { self.tusCancelFlags[item.id] ?? false }
+                },
+                patchTimeoutSeconds: patchTimeoutSeconds,
+                maxStallRecoveries: tusMaxStallRecoveriesPerUpload
+            )
+            uploadSeconds = max(0, perfNow() - uploadStart)
+            patchRetries = uploadResult.patchRetries
+            patchTimeouts = uploadResult.patchTimeouts
+            stallRecoveries = uploadResult.stallRecoveries
+            guard uploadResult.finalOffset >= item.totalBytes else {
+                throw NSError(
+                    domain: "TUS",
+                    code: -1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "Upload incomplete for \(item.filename): offset \(uploadResult.finalOffset) < size \(item.totalBytes)"
+                    ]
+                )
+            }
 
             // Persist final sync state and last-synced locked flag (orig or plain uploads only)
             if item.lockedKind == nil || (item.isLocked && item.lockedKind == "orig") {
                 SyncRepository.shared.setLocked(contentId: item.contentId, locked: item.isLocked)
             }
-            let verified = await markSyncedAfterServerVerification(for: item)
+            let verifyStart = perfNow()
+            let waitForLivePairing = shouldDelayVerificationForLivePairing(for: item)
+            let verifyPolicy: (prefer: Bool, reason: String)
+            if waitForLivePairing {
+                verifyPolicy = (true, "live_pair_pending")
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-live-pair-delay content_id=\(item.contentId) pending_live=\(pendingLiveComponents(forContentId: item.contentId))"
+                )
+            } else {
+                verifyPolicy = shouldPreferDeferredVerificationForForeground()
+            }
+            let verifyResult = await markSyncedAfterServerVerification(
+                for: item,
+                preferDeferred: verifyPolicy.prefer,
+                preferDeferredReason: verifyPolicy.reason,
+                waitForLivePairing: waitForLivePairing
+            )
+            let verified = (verifyResult != .failed)
+            verifyDeferred = (verifyResult == .deferredQueued)
+            verifySeconds = max(0, perfNow() - verifyStart)
             await update(itemID: item.id, status: verified ? .completed : .failed)
             print("[UPLOAD] TUS completed: \(item.filename)")
             SyncRepository.shared.deleteTusUploadURL(contentId: tusResumeKey(for: item))
+            let totalSeconds = max(0, perfNow() - opStartedAt)
+            let uploadedBytesEffective = max(0, item.totalBytes - resumeOffset)
+            let perfLine = "[PERF] tus-done filename=\(item.filename) status=\(verified ? "ok" : "verify_failed") size=\(item.totalBytes) resumed_offset=\(resumeOffset) resumed_url=\(usedPersistedResumeURL ? 1 : 0) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) create_ms=\(perfMs(createSeconds)) head_ms=\(perfMs(headSeconds)) head_skipped=\(headSkipped ? 1 : 0) upload_ms=\(perfMs(uploadSeconds)) verify_ms=\(perfMs(verifySeconds)) verify_mode=\(verifyMode) verify_deferred=\(verifyDeferred ? 1 : 0) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded())) patch_retries=\(patchRetries) patch_timeouts=\(patchTimeouts) stall_recoveries=\(stallRecoveries) total_ms=\(perfMs(totalSeconds)) upload_MBps=\(perfMBps(bytes: uploadedBytesEffective, seconds: max(uploadSeconds, 0.001)))"
+            AppLog.debug(AppLog.upload, perfLine)
+            if uploadSeconds >= perfSlowUploadThresholdSeconds {
+                AppLog.info(AppLog.upload, perfLine)
+            }
+            perfRecordTusTransport(patchRetries: patchRetries, patchTimeouts: patchTimeouts, stallRecoveries: stallRecoveries)
+            recordTusCreateHealth(createSeconds: createSeconds)
+            recordTusUploadHealth(
+                uploadBytes: uploadedBytesEffective,
+                uploadSeconds: uploadSeconds,
+                patchRetries: patchRetries,
+                patchTimeouts: patchTimeouts,
+                stallRecoveries: stallRecoveries
+            )
+            if verified {
+                perfRecordForegroundCompletion(bytes: uploadedBytesEffective, queueWait: queueWait, uploadSeconds: uploadSeconds)
+            } else {
+                perfRecordFailure()
+            }
             // Remove exported temp file on success
             do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
         } catch {
             let cancelled = tusQueue.sync { tusCancelFlags[item.id] ?? false }
+            let totalSeconds = max(0, perfNow() - opStartedAt)
             if cancelled {
                 if isStopForResyncRequested() {
                     await update(itemID: item.id, status: .canceled)
                     SyncRepository.shared.deleteTusUploadURL(contentId: tusResumeKey(for: item))
                     print("[UPLOAD] Foreground upload canceled for ReSync: \(item.filename)")
+                    AppLog.debug(
+                        AppLog.upload,
+                        "[PERF] tus-canceled filename=\(item.filename) reason=resync queue_wait_ms=\(queueWait.map(perfMs) ?? 0) total_ms=\(perfMs(totalSeconds))"
+                    )
                     do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
                 } else {
                     await update(itemID: item.id, status: .backgroundQueued)
                     SyncRepository.shared.markBackgroundQueued(contentId: item.contentId)
                     print("[UPLOAD] Switching to legacy multipart for: \(item.filename)")
+                    AppLog.debug(
+                        AppLog.upload,
+                        "[PERF] tus-canceled filename=\(item.filename) reason=background_switch queue_wait_ms=\(queueWait.map(perfMs) ?? 0) total_ms=\(perfMs(totalSeconds))"
+                    )
                     // Note: original temp file will be removed when we enqueue background multipart
                     // Ensure we actually enqueue a background task for this item (closes race with switchToBackgroundUploads enumeration)
                     queueBackgroundMultipart(for: item)
@@ -1535,6 +3041,11 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 let msg = error.localizedDescription
                 SyncRepository.shared.markFailed(contentId: item.contentId, error: msg)
                 print("[UPLOAD] TUS failed: \(item.filename) error=\(msg)")
+                perfRecordFailure()
+                AppLog.info(
+                    AppLog.upload,
+                    "[PERF] tus-failed filename=\(item.filename) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) create_ms=\(perfMs(createSeconds)) head_ms=\(perfMs(headSeconds)) upload_ms=\(perfMs(uploadSeconds)) patch_retries=\(patchRetries) patch_timeouts=\(patchTimeouts) stall_recoveries=\(stallRecoveries) total_ms=\(perfMs(totalSeconds)) error=\(msg)"
+                )
                 do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
             }
         }
@@ -1543,6 +3054,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
     // MARK: - Background multipart
 
     private func queueBackgroundMultipart(for item: UploadItem) {
+        let enqueueStartedAt = perfNow()
         if isStopForResyncRequested() {
             Task { await update(itemID: item.id, status: .canceled) }
             return
@@ -1554,6 +3066,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             print("[UPLOAD] \(reason)")
             Task { await update(itemID: item.id, status: .failed) }
             SyncRepository.shared.markFailed(contentId: item.contentId, error: reason)
+            perfRecordFailure()
             return
         }
         // Per-item Wi‑Fi only gating
@@ -1564,6 +3077,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 print("[UPLOAD] Skipping background upload due to cellular policy (\(item.isVideo ? "video" : "photo"))")
                 Task { await update(itemID: item.id, status: .failed) }
                 SyncRepository.shared.markFailed(contentId: item.contentId, error: "Cellular policy disallows upload")
+                perfRecordFailure()
                 let typeStr = item.isVideo ? "video" : "photo"
                 DispatchQueue.main.async { ToastManager.shared.show("Background upload skipped: cellular disallowed for \(typeStr)") }
                 // Optionally remove temp file to save space
@@ -1645,7 +3159,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
         // syncMark: "mark" for primary components, "skip" for non-primary components.
         let syncMark = shouldMarkSyncedInRepository(for: item) ? "mark" : "skip"
         let assetIdForDesc = preflightAssetId(for: item) ?? ""
-        task.taskDescription = item.id.uuidString + "|" + bodyURL.lastPathComponent + "|" + boundary + "|0|" + item.contentId + "|" + (item.isVideo ? "video" : "photo") + "|" + syncMark + "|" + assetIdForDesc
+        let taskDescription = item.id.uuidString + "|" + bodyURL.lastPathComponent + "|" + boundary + "|0|" + item.contentId + "|" + (item.isVideo ? "video" : "photo") + "|" + syncMark + "|" + assetIdForDesc
+        task.taskDescription = taskDescription
+        perfRegisterBackgroundTaskStart(taskDescription: taskDescription, bodyName: bodyURL.lastPathComponent)
 
         if #available(iOS 13.0, *) {
             task.countOfBytesClientExpectsToSend = item.totalBytes
@@ -1655,6 +3171,14 @@ final class HybridUploadManager: NSObject, ObservableObject {
         Task { await update(itemID: item.id, status: .backgroundQueued) }
         SyncRepository.shared.markBackgroundQueued(contentId: item.contentId)
         print("[UPLOAD] Using legacy multipart for: \(item.filename) size=\(item.totalBytes) body=\(bodyURL.lastPathComponent)")
+        let bodySize = (try? FileManager.default.attributesOfItem(atPath: bodyURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let buildSeconds = max(0, perfNow() - enqueueStartedAt)
+        let enqueuedWallClock = TimeInterval(item.enqueuedAt)
+        let bgQueueWaitSeconds = max(0, Date().timeIntervalSince1970 - enqueuedWallClock)
+        AppLog.debug(
+            AppLog.upload,
+            "[PERF] bg-enqueue filename=\(item.filename) payload_bytes=\(item.totalBytes) body_bytes=\(bodySize) body_overhead_bytes=\(max(Int64(0), bodySize - item.totalBytes)) build_ms=\(perfMs(buildSeconds)) queue_wait_before_enqueue_ms=\(perfMs(bgQueueWaitSeconds))"
+        )
     }
 
     // MARK: - Helpers
@@ -1839,7 +3363,13 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         let statusCodeStr = statusCode.map(String.init) ?? "(none)"
         let errStr = error?.localizedDescription ?? "(none)"
         let cidDescStr = contentIdFromDesc ?? "(none)"
+        let bodyBytes = (try? FileManager.default.attributesOfItem(atPath: bodyURL.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let attemptDuration = perfConsumeBackgroundAttemptDuration(taskDescription: desc)
         print("[UPLOAD] BG didComplete desc=\(desc) code=\(statusCodeStr) attempt=\(attempt) cidDesc=\(cidDescStr) error=\(errStr)")
+        AppLog.debug(
+            AppLog.upload,
+            "[PERF] bg-attempt-complete body=\(bodyName) attempt=\(attempt) status_code=\(statusCodeStr) err=\(errStr) attempt_ms=\(attemptDuration.map(perfMs) ?? -1) body_bytes=\(bodyBytes)"
+        )
 
         // Delegate callbacks may arrive on a background thread. Ensure all `items` access/mutation
         // happens on the main actor, and keep DB/file work off the main thread to avoid UI jank.
@@ -1856,6 +3386,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 assetIdFromDesc: assetIdFromDesc,
                 maxAttempts: maxAttempts,
                 bodyURL: bodyURL,
+                bodyBytes: bodyBytes,
+                attemptDuration: attemptDuration,
                 statusCode: statusCode,
                 completionError: error
             )
@@ -1875,6 +3407,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         assetIdFromDesc: String?,
         maxAttempts: Int,
         bodyURL: URL,
+        bodyBytes: Int64,
+        attemptDuration: TimeInterval?,
         statusCode: Int?,
         completionError: Error?
     ) async {
@@ -1888,6 +3422,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
 
         if itemIndex == nil && dbContentId == nil {
             print("[UPLOAD] BG completion without identifiable contentId; skipping sync state update")
+            _ = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
             return
         }
 
@@ -1916,6 +3451,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
             }
             return true
         }()
+        let payloadBytes: Int64 = itemIndex.map { items[$0].totalBytes } ?? max(Int64(0), bodyBytes)
+        let attemptMs = attemptDuration.map(perfMs) ?? -1
 
         func setItemStatus(_ status: UploadStatus) {
             if let idx = itemIndex { items[idx].status = status }
@@ -1928,11 +3465,63 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
             }
         }
 
+        func markPendingInDB(_ note: String) {
+            guard let cid = dbContentId else { return }
+            DispatchQueue.global(qos: .utility).async {
+                SyncRepository.shared.markPending(contentId: cid, note: note)
+            }
+        }
+
         func removeFiles(exportedTempURL: URL?) {
             DispatchQueue.global(qos: .utility).async {
                 if let exportedTempURL { try? FileManager.default.removeItem(at: exportedTempURL) }
                 try? FileManager.default.removeItem(at: bodyURL)
             }
+        }
+
+        func isTransientTransportError(_ err: Error) -> Bool {
+            if let urlError = err as? URLError {
+                switch urlError.code {
+                case .timedOut,
+                     .cannotFindHost,
+                     .cannotConnectToHost,
+                     .dnsLookupFailed,
+                     .networkConnectionLost,
+                     .notConnectedToInternet,
+                     .resourceUnavailable:
+                    return true
+                default:
+                    break
+                }
+            } else {
+                let nsErr = err as NSError
+                if nsErr.domain == NSURLErrorDomain {
+                    let code = URLError.Code(rawValue: nsErr.code)
+                    switch code {
+                    case .timedOut,
+                         .cannotFindHost,
+                         .cannotConnectToHost,
+                         .dnsLookupFailed,
+                         .networkConnectionLost,
+                         .notConnectedToInternet,
+                         .resourceUnavailable:
+                        return true
+                    default:
+                        break
+                    }
+                }
+            }
+            let text = err.localizedDescription.lowercased()
+            return text.contains("timed out")
+                || text.contains("timeout")
+                || text.contains("network connection was lost")
+                || text.contains("not connected to the internet")
+                || text.contains("cannot connect to host")
+        }
+
+        func isTransientHTTPStatus(_ code: Int?) -> Bool {
+            guard let code else { return false }
+            return code == 408 || code == 429 || (500...599).contains(code)
         }
 
         // 1) Transport error (e.g., offline). Retry up to N times while preserving the body file.
@@ -1957,14 +3546,41 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                     let cidValue = dbContentId ?? ""
                     let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                     let aidValue = assetIdFromDesc ?? ""
-                    newTask.taskDescription = idStr + "|" + bodyName + "|" + (boundary ?? "") + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                    let boundaryValue = boundary ?? ""
+                    let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                    newTask.taskDescription = newDescription
+                    self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                     newTask.resume()
                 }
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] bg-retry scheduled reason=transport body=\(bodyName) attempt=\(attempt) next_attempt=\(attempt + 1) delay_s=\(String(format: "%.2f", delay)) attempt_ms=\(attemptMs)"
+                )
             } else {
+                if isTransientTransportError(err) {
+                    setItemStatus(.queued)
+                    markPendingInDB("Transient transport error: \(msg)")
+                    let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
+                    removeFiles(exportedTempURL: exportedTempURL)
+                    let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
+                    AppLog.info(
+                        AppLog.upload,
+                        "[PERF] bg-requeue body=\(bodyName) reason=transport_transient attempts=\(attempt + 1) payload_bytes=\(payloadBytes) attempt_ms=\(attemptMs) total_ms=\(total.map(perfMs) ?? -1) error=\(msg)"
+                    )
+                    perfLogSummary(reason: "bg-requeue")
+                    return
+                }
                 setItemStatus(.failed)
                 markFailedInDB(msg)
                 let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
                 removeFiles(exportedTempURL: exportedTempURL)
+                let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
+                perfRecordFailure()
+                AppLog.info(
+                    AppLog.upload,
+                    "[PERF] bg-failed body=\(bodyName) reason=transport attempts=\(attempt + 1) payload_bytes=\(payloadBytes) attempt_ms=\(attemptMs) total_ms=\(total.map(perfMs) ?? -1) error=\(msg)"
+                )
+                perfLogSummary(reason: "bg-failed")
             }
             return
         }
@@ -1972,15 +3588,19 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         // 2) Success (2xx).
         if let code = statusCode, (200..<300).contains(code) {
             let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
+            var verified = true
             if shouldMarkSyncedResolved {
                 if let idx = itemIndex {
                     let completedItem = items[idx]
-                    let verified = await markSyncedAfterServerVerification(for: completedItem)
+                    let verifyResult = await markSyncedAfterServerVerification(for: completedItem)
+                    verified = (verifyResult != .failed)
                     setItemStatus(verified ? .completed : .failed)
                 } else {
                     if let cid = dbContentId {
-                        let _ = await markSyncedAfterServerVerification(contentId: cid, filename: bodyName, assetId: assetIdFromDesc)
+                        let verifyResult = await markSyncedAfterServerVerification(contentId: cid, filename: bodyName, assetId: assetIdFromDesc)
+                        verified = (verifyResult != .failed)
                     } else {
+                        verified = false
                         markFailedInDB("Upload completed but verification could not resolve content id")
                     }
                 }
@@ -1988,6 +3608,17 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 setItemStatus(.completed)
             }
             removeFiles(exportedTempURL: exportedTempURL)
+            let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
+            if verified {
+                perfRecordBackgroundCompletion(bytes: payloadBytes, uploadSeconds: total)
+            } else {
+                perfRecordFailure()
+            }
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] bg-done body=\(bodyName) status=\(verified ? "ok" : "verify_failed") attempt=\(attempt) payload_bytes=\(payloadBytes) attempt_ms=\(attemptMs) total_ms=\(total.map(perfMs) ?? -1) mbps=\(total.map { perfMBps(bytes: payloadBytes, seconds: max($0, 0.001)) } ?? "n/a")"
+            )
+            perfLogSummary(reason: "bg-complete")
             return
         }
 
@@ -2009,7 +3640,9 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 let cidValue = dbContentId ?? ""
                 let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                 let aidValue = assetIdFromDesc ?? ""
-                newTask.taskDescription = idStr + "|" + bodyName + "|" + boundary + "|" + String(nextAttempt) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                let newDescription = idStr + "|" + bodyName + "|" + boundary + "|" + String(nextAttempt) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                newTask.taskDescription = newDescription
+                self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                 newTask.resume()
             }
             if refreshed {
@@ -2020,6 +3653,10 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                     scheduleRetry()
                 }
             }
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] bg-retry scheduled reason=http401 body=\(bodyName) attempt=\(attempt) next_attempt=\(nextAttempt) refreshed=\(refreshed ? 1 : 0) attempt_ms=\(attemptMs)"
+            )
             return
         }
 
@@ -2041,12 +3678,34 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 let cidValue = dbContentId ?? ""
                 let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                 let aidValue = assetIdFromDesc ?? ""
-                newTask.taskDescription = idStr + "|" + bodyName + "|" + (boundary ?? "") + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                let boundaryValue = boundary ?? ""
+                let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                newTask.taskDescription = newDescription
+                self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                 newTask.resume()
             }
             if let cid = dbContentId, let code = statusCode {
                 print("[UPLOAD] BG scheduled retry for HTTP \(code) attempt=\(attempt + 1) content_id=\(cid)")
             }
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] bg-retry scheduled reason=http\(code) body=\(bodyName) attempt=\(attempt) next_attempt=\(attempt + 1) delay_s=\(String(format: "%.2f", delay)) attempt_ms=\(attemptMs)"
+            )
+            return
+        }
+
+        if isTransientHTTPStatus(statusCode) {
+            let errMsg = statusCode.map { "HTTP \($0)" } ?? "HTTP transient"
+            setItemStatus(.queued)
+            markPendingInDB("Transient server error: \(errMsg)")
+            let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
+            removeFiles(exportedTempURL: exportedTempURL)
+            let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
+            AppLog.info(
+                AppLog.upload,
+                "[PERF] bg-requeue body=\(bodyName) reason=http_transient attempts=\(attempt + 1) status=\(statusCode ?? -1) payload_bytes=\(payloadBytes) attempt_ms=\(attemptMs) total_ms=\(total.map(perfMs) ?? -1)"
+            )
+            perfLogSummary(reason: "bg-requeue")
             return
         }
 
@@ -2056,11 +3715,19 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         markFailedInDB(errMsg)
         let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
         removeFiles(exportedTempURL: exportedTempURL)
+        let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
+        perfRecordFailure()
+        AppLog.info(
+            AppLog.upload,
+            "[PERF] bg-failed body=\(bodyName) reason=http attempts=\(attempt + 1) status=\(statusCode ?? -1) payload_bytes=\(payloadBytes) attempt_ms=\(attemptMs) total_ms=\(total.map(perfMs) ?? -1)"
+        )
+        perfLogSummary(reason: "bg-failed")
     }
 
     func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
         // Call the completion handler to let the system know we're done processing background events
         print("[UPLOAD] urlSessionDidFinishEvents: all background events delivered")
+        perfLogSummary(reason: "bg-events-finished", force: true)
         DispatchQueue.main.async { [weak self] in
             self?.bgCompletionHandler?()
             self?.bgCompletionHandler = nil

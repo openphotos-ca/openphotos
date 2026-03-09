@@ -3,8 +3,8 @@ import Foundation
 enum AppLinks {
     // Customize these as needed
     static let website = URL(string: "https://openphotos.ca")
-    static let privacyPolicy = URL(string: "https://openphotos.ca/privacy")
-    static let terms = URL(string: "https://openphotos.ca/terms")
+    static let privacyPolicy = URL(string: "https://openphotos.ca/privacy/index.html")
+    static let terms = URL(string: "https://openphotos.ca/terms/index.html")
     static let github = URL(string: "https://github.com/openphotos-ca/openphotos")
 
     static let supportEmailAddress = "support@openphotos.ca"

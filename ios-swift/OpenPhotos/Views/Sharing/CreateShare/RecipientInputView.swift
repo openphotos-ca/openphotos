@@ -12,8 +12,11 @@ struct RecipientInputView: View {
     @Binding var recipients: [RecipientInput]
 
     @State private var selectedType: RecipientInput.RecipientType = .user
-    @State private var selectedTarget: ShareTarget?
     @State private var showTargetPicker = false
+
+    private var excludedTargetKeys: Set<String> {
+        Set(recipients.map { recipientKey(type: $0.type, identifier: $0.identifier) })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -29,41 +32,23 @@ struct RecipientInputView: View {
             .pickerStyle(.segmented)
 
             // Selection row
-            HStack {
-                // Selection button
-                Button {
-                    showTargetPicker = true
-                } label: {
-                    HStack {
-                        if let target = selectedTarget {
-                            Image(systemName: target.iconName)
-                                .foregroundColor(.secondary)
-                            Text(target.displayName)
-                                .foregroundColor(.primary)
-                        } else {
-                            Text("Select \(selectedType.typeLabel)")
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        Image(systemName: "chevron.down")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color(.systemGray6))
-                    .cornerRadius(8)
+            Button {
+                showTargetPicker = true
+            } label: {
+                HStack {
+                    Text("Select \(selectedType.typeLabel)")
+                        .foregroundColor(.secondary)
+                    Spacer()
+                    Image(systemName: "chevron.down")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
-                .buttonStyle(.plain)
-
-                Button {
-                    addRecipient()
-                } label: {
-                    Image(systemName: "plus.circle.fill")
-                        .font(.title2)
-                }
-                .disabled(selectedTarget == nil)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color(.systemGray6))
+                .cornerRadius(8)
             }
+            .buttonStyle(.plain)
 
             // Recipient chips
             if !recipients.isEmpty {
@@ -82,44 +67,49 @@ struct RecipientInputView: View {
         .sheet(isPresented: $showTargetPicker) {
             ShareTargetPickerSheet(
                 selectedType: selectedType,
+                excludedTargetKeys: excludedTargetKeys,
                 onSelect: { target in
-                    selectedTarget = target
+                    addRecipient(from: target)
                     showTargetPicker = false
                 }
             )
         }
-        .onChange(of: selectedType) { _, _ in
-            // Clear selection when type changes
-            selectedTarget = nil
-        }
     }
 
-    /// Add recipient from selected target
-    private func addRecipient() {
-        guard let target = selectedTarget, let targetId = target.id else { return }
+    /// Add recipient from target selection.
+    private func addRecipient(from target: ShareTarget) {
+        guard
+            let targetId = target.id,
+            let targetType = RecipientInput.RecipientType(rawValue: target.kind)
+        else {
+            return
+        }
+
+        let key = recipientKey(type: targetType, identifier: targetId)
+        guard !excludedTargetKeys.contains(key) else { return }
 
         let recipient = RecipientInput(
-            type: selectedType,
+            type: targetType,
             identifier: targetId,
             displayName: target.displayName
         )
-        if !recipients.contains(where: { $0.identifier == recipient.identifier && $0.type == recipient.type }) {
-            recipients.append(recipient)
-        }
-
-        // Clear selection
-        selectedTarget = nil
+        recipients.append(recipient)
     }
 
     /// Remove recipient
     private func removeRecipient(_ recipient: RecipientInput) {
         recipients.removeAll { $0.id == recipient.id }
     }
+
+    private func recipientKey(type: RecipientInput.RecipientType, identifier: String) -> String {
+        "\(type.rawValue):\(identifier)"
+    }
 }
 
 /// Sheet for selecting a share target (user or group)
 struct ShareTargetPickerSheet: View {
     let selectedType: RecipientInput.RecipientType
+    let excludedTargetKeys: Set<String>
     let onSelect: (ShareTarget) -> Void
 
     @Environment(\.dismiss) private var dismiss
@@ -131,14 +121,27 @@ struct ShareTargetPickerSheet: View {
     private let shareService = ShareService.shared
     private let currentUserId = AuthManager.shared.userId
 
-    var filteredTargets: [ShareTarget] {
-        var filtered = targets.filter { $0.kind == selectedType.rawValue }
-
-        // Exclude current user from the list
-        if selectedType == .user, let currentUserId = currentUserId {
-            filtered = filtered.filter { $0.id != currentUserId }
+    private var candidateTargetsForType: [ShareTarget] {
+        targets.filter { target in
+            guard target.kind == selectedType.rawValue, let targetId = target.id else {
+                return false
+            }
+            if selectedType == .user, let currentUserId = currentUserId, targetId == currentUserId {
+                return false
+            }
+            return true
         }
+    }
 
+    private var selectableTargetsForType: [ShareTarget] {
+        candidateTargetsForType.filter { target in
+            guard let key = targetRecipientKey(target) else { return false }
+            return !excludedTargetKeys.contains(key)
+        }
+    }
+
+    var filteredTargets: [ShareTarget] {
+        let filtered = selectableTargetsForType
         if searchQuery.isEmpty {
             return filtered
         }
@@ -146,6 +149,16 @@ struct ShareTargetPickerSheet: View {
             $0.label.localizedCaseInsensitiveContains(searchQuery) ||
             ($0.email?.localizedCaseInsensitiveContains(searchQuery) ?? false)
         }
+    }
+
+    private var emptyDescription: String {
+        if !searchQuery.isEmpty {
+            return "No \(selectedType.typeLabel.lowercased())s match your search"
+        }
+        if !candidateTargetsForType.isEmpty {
+            return "All available \(selectedType.typeLabel.lowercased())s have already been added"
+        }
+        return "No \(selectedType.typeLabel.lowercased())s available to share with"
     }
 
     var body: some View {
@@ -163,7 +176,7 @@ struct ShareTargetPickerSheet: View {
                     ContentUnavailableView(
                         "No \(selectedType.typeLabel)s",
                         systemImage: selectedType == .user ? "person.slash" : "person.3.slash",
-                        description: Text("No \(selectedType.typeLabel.lowercased())s available to share with")
+                        description: Text(emptyDescription)
                     )
                 } else {
                     List(filteredTargets) { target in
@@ -219,6 +232,16 @@ struct ShareTargetPickerSheet: View {
         }
 
         isLoading = false
+    }
+
+    private func targetRecipientKey(_ target: ShareTarget) -> String? {
+        guard
+            let targetId = target.id,
+            let targetType = RecipientInput.RecipientType(rawValue: target.kind)
+        else {
+            return nil
+        }
+        return "\(targetType.rawValue):\(targetId)"
     }
 }
 

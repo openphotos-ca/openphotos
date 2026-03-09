@@ -10,7 +10,6 @@ import SwiftUI
 /// Sheet for creating a public link
 struct CreatePublicLinkSheet: View {
     @State private var linkName = ""
-    @State private var scopeKind: String = "album"
     @State private var scopeAlbumId: String = ""
     @State private var coverAssetId: String = ""
     @State private var permissions: SharePermissions = .viewer
@@ -38,33 +37,21 @@ struct CreatePublicLinkSheet: View {
 
                 // Scope selection
                 Section {
-                    Picker("Type", selection: $scopeKind) {
-                        Text("Album").tag("album")
-                        Text("Asset").tag("asset")
-                    }
-                    .pickerStyle(.segmented)
-
-                    if scopeKind == "album" {
-                        TextField("Album ID", text: $scopeAlbumId)
-                            .keyboardType(.numberPad)
-                    } else {
-                        TextField("Asset ID", text: $coverAssetId)
-                    }
+                    TextField("Album ID", text: $scopeAlbumId)
+                        .keyboardType(.numberPad)
                 } header: {
                     Text("Scope")
                 } footer: {
-                    Text("Select what to share via this public link")
+                    Text("Public links support album scope.")
                 }
 
                 // Cover asset
-                if scopeKind == "album" {
-                    Section {
-                        TextField("Cover Asset ID (optional)", text: $coverAssetId)
-                    } header: {
-                        Text("Cover Asset")
-                    } footer: {
-                        Text("Asset to use as cover image")
-                    }
+                Section {
+                    TextField("Cover Asset ID (optional)", text: $coverAssetId)
+                } header: {
+                    Text("Cover Asset")
+                } footer: {
+                    Text("Asset to use as cover image")
                 }
 
                 // Permissions
@@ -153,8 +140,7 @@ struct CreatePublicLinkSheet: View {
 
     private var canCreate: Bool {
         let hasValidName = !linkName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-        let hasValidScope = (scopeKind == "album" && !scopeAlbumId.isEmpty) ||
-                           (scopeKind == "asset" && !coverAssetId.isEmpty)
+        let hasValidScope = Int(scopeAlbumId) != nil
         let hasValidPin = !hasPin || pin.count == 8
 
         return hasValidName && hasValidScope && hasValidPin
@@ -170,17 +156,17 @@ struct CreatePublicLinkSheet: View {
 
         do {
             // Generate SMK and VK for E2EE
-            let (smk, vk) = e2eeManager.generatePublicLinkKeys()
+            let (_, vk) = e2eeManager.generatePublicLinkKeys()
 
             // Build request
             let request = CreatePublicLinkRequest(
                 name: linkName,
-                scopeKind: scopeKind,
-                scopeAlbumId: scopeKind == "album" ? Int(scopeAlbumId) : nil,
+                scopeKind: "album",
+                scopeAlbumId: Int(scopeAlbumId),
                 permissions: permissions.rawValue,
                 expiresAt: hasExpiry ? expiryDate?.ISO8601Format() : nil,
                 pin: hasPin ? pin : nil,
-                coverAssetId: coverAssetId.isEmpty ? "" : coverAssetId,
+                coverAssetId: coverAssetId.isEmpty ? "default" : coverAssetId,
                 moderationEnabled: nil
             )
 

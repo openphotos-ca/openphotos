@@ -4,6 +4,12 @@ import Foundation
 // Supports: POST create, HEAD offset, PATCH chunked upload with resume.
 final class TUSClient {
     struct CreateResponse { let uploadURL: URL }
+    struct UploadResult {
+        let finalOffset: Int64
+        let patchRetries: Int
+        let patchTimeouts: Int
+        let stallRecoveries: Int
+    }
 
     private let baseFilesURL: URL
     private let headersProvider: () -> [String: String]
@@ -58,8 +64,9 @@ final class TUSClient {
         throw lastErr ?? tusError("Unknown error")
     }
 
-    private func sendUpload(_ req: URLRequest, body: Data) async throws -> (Data, HTTPURLResponse) {
+    private func sendUpload(_ req: URLRequest, body: Data, retryOnTimeout: Bool) async throws -> (Data, HTTPURLResponse, Int) {
         var attempt = 0
+        var retriesPerformed = 0
         var lastErr: Error?
         while attempt <= maxRetries {
             await AuthManager.shared.refreshIfNeeded()
@@ -70,23 +77,28 @@ final class TUSClient {
                 guard let http = resp as? HTTPURLResponse else { throw tusError("No response") }
                 if http.statusCode == 401 {
                     let refreshed = await AuthManager.shared.forceRefresh()
-                    guard refreshed else { return (data, http) }
+                    guard refreshed else { return (data, http, retriesPerformed) }
                     var retry = req
                     headersProvider().forEach { k, v in retry.setValue(v, forHTTPHeaderField: k) }
                     let (d2, r2) = try await URLSession.shared.upload(for: retry, from: body)
                     guard let h2 = r2 as? HTTPURLResponse else { throw tusError("No response") }
-                    return (d2, h2)
+                    return (d2, h2, retriesPerformed + 1)
                 }
                 if http.statusCode >= 500 && attempt < maxRetries {
                     attempt += 1
+                    retriesPerformed += 1
                     try? await Task.sleep(nanoseconds: backoffNanos(attempt))
                     continue
                 }
-                return (data, http)
+                return (data, http, retriesPerformed)
             } catch {
+                if !retryOnTimeout && isTimeoutError(error) {
+                    throw error
+                }
                 lastErr = error
                 if attempt < maxRetries {
                     attempt += 1
+                    retriesPerformed += 1
                     try? await Task.sleep(nanoseconds: backoffNanos(attempt))
                     continue
                 }
@@ -164,12 +176,25 @@ final class TUSClient {
         return off
     }
 
-    func upload(fileURL: URL, uploadURL: URL, startOffset: Int64, fileSize: Int64, progress: @escaping (Int64, Int64) -> Void, isCancelled: @escaping () -> Bool) async throws {
+    @discardableResult
+    func upload(
+        fileURL: URL,
+        uploadURL: URL,
+        startOffset: Int64,
+        fileSize: Int64,
+        progress: @escaping (Int64, Int64) -> Void,
+        isCancelled: @escaping () -> Bool,
+        patchTimeoutSeconds: TimeInterval = 30,
+        maxStallRecoveries: Int = 1
+    ) async throws -> UploadResult {
         let fh = try FileHandle(forReadingFrom: fileURL)
         defer { try? fh.close() }
 
         var offset = startOffset
         var chunkIndex = max(0, Int(startOffset) / chunkSize)
+        var patchRetriesTotal = 0
+        var patchTimeouts = 0
+        var stallRecoveries = 0
         try fh.seek(toOffset: UInt64(offset))
 
         while offset < fileSize {
@@ -186,15 +211,62 @@ final class TUSClient {
             req.setValue("application/offset+octet-stream", forHTTPHeaderField: "Content-Type")
             req.setValue(String(offset), forHTTPHeaderField: "Upload-Offset")
             req.setValue(String(chunk.count), forHTTPHeaderField: "Content-Length")
+            req.timeoutInterval = patchTimeoutSeconds
             headersProvider().forEach { k, v in req.setValue(v, forHTTPHeaderField: k) }
 
-            let (data, http) = try await sendUpload(req, body: chunk)
+            let data: Data
+            let http: HTTPURLResponse
+            do {
+                let response = try await sendUpload(req, body: chunk, retryOnTimeout: false)
+                data = response.0
+                http = response.1
+                patchRetriesTotal += response.2
+            } catch {
+                if isCancelled() { throw tusError("Cancelled") }
+                if isTimeoutError(error) {
+                    patchTimeouts += 1
+                    if stallRecoveries < maxStallRecoveries {
+                        stallRecoveries += 1
+                        AppLog.info(
+                            AppLog.upload,
+                            "[TUS] PATCH timeout offset=\(offset) chunk=\(chunkIndex) recovering_attempt=\(stallRecoveries)"
+                        )
+                        let serverOffset = try await headOffset(uploadURL: uploadURL)
+                        if serverOffset != offset {
+                            AppLog.debug(
+                                AppLog.upload,
+                                "TUS TIMEOUT RECOVER local=\(offset) -> server=\(serverOffset)"
+                            )
+                        } else {
+                            AppLog.debug(
+                                AppLog.upload,
+                                "TUS TIMEOUT RECOVER retrying same offset=\(offset)"
+                            )
+                        }
+                        offset = serverOffset
+                        // Rewind to the server-authoritative offset before retrying.
+                        // Without this, a timeout can leave the file handle advanced while
+                        // the logical offset is unchanged, producing a false-complete run.
+                        try fh.seek(toOffset: UInt64(offset))
+                        continue
+                    }
+                    AppLog.info(
+                        AppLog.upload,
+                        "[TUS] PATCH timeout offset=\(offset) chunk=\(chunkIndex) recovery_exhausted=1"
+                    )
+                }
+                throw error
+            }
             if http.statusCode == 409 || http.statusCode == 412 {
                 // Offset mismatch; reconcile
                 let serverOffset = try await headOffset(uploadURL: uploadURL)
-                if serverOffset == offset { continue }
-                AppLog.debug(AppLog.upload, "TUS OFFSET CONFLICT local=\(offset) -> server=\(serverOffset)")
+                if serverOffset != offset {
+                    AppLog.debug(AppLog.upload, "TUS OFFSET CONFLICT local=\(offset) -> server=\(serverOffset)")
+                } else {
+                    AppLog.debug(AppLog.upload, "TUS OFFSET CONFLICT retrying same offset=\(offset)")
+                }
                 offset = serverOffset
+                // Always rewind before retrying this chunk.
                 try fh.seek(toOffset: UInt64(offset))
                 continue
             }
@@ -208,7 +280,30 @@ final class TUSClient {
             AppLog.debug(AppLog.upload, "TUS OFFSET -> \(offset)")
             progress(offset, fileSize)
         }
-        if offset >= fileSize { AppLog.debug(AppLog.upload, "TUS COMPLETE size=\(fileSize)") }
+        if offset < fileSize {
+            throw tusError("Upload incomplete (offset=\(offset), size=\(fileSize))")
+        }
+        AppLog.debug(AppLog.upload, "TUS COMPLETE size=\(fileSize)")
+        return UploadResult(
+            finalOffset: offset,
+            patchRetries: patchRetriesTotal,
+            patchTimeouts: patchTimeouts,
+            stallRecoveries: stallRecoveries
+        )
+    }
+
+    private func isTimeoutError(_ error: Error) -> Bool {
+        if let urlError = error as? URLError {
+            return urlError.code == .timedOut
+        }
+        let nsError = error as NSError
+        if nsError.domain == NSURLErrorDomain && nsError.code == NSURLErrorTimedOut {
+            return true
+        }
+        if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+            return isTimeoutError(underlying)
+        }
+        return false
     }
 
     private func tusError(_ message: String) -> NSError {

@@ -10,6 +10,7 @@ struct GalleryView: View {
     @State private var showingActionMenu = false
     @State private var showingUploadsView = false
     @State private var showingLogin = false
+    @State private var showingStopCloudCheckConfirm = false
     @Environment(\.openURL) private var openURL
     // Header show/hide state (collapses rows above the grid when scrolling down)
     @State private var showHeaders: Bool = true
@@ -66,7 +67,18 @@ struct GalleryView: View {
                         onSlideshow: { /* TODO: Implement slideshow */ },
                         onSort: { option in viewModel.sortOption = option },
                         onLayoutChange: { layout in viewModel.layout = layout },
-                        onCloudCheck: { viewModel.startCloudCheck() },
+                        onCloudCheck: {
+                            showingStopCloudCheckConfirm = true
+                        },
+                        onCloudCheckAll: {
+                            viewModel.startCloudCheck(scope: .allPhotos)
+                        },
+                        onCloudCheckCurrentSelection: {
+                            viewModel.startCloudCheck(scope: .currentSelection)
+                        },
+                        onCloudCheckCancel: {
+                            // No-op. Kept to show explicit Cancel row in menu.
+                        },
                         onSelect: {
                             if viewModel.isSelectionMode { viewModel.exitSelectionMode() } else { viewModel.startSelectionMode() }
                         }
@@ -160,18 +172,20 @@ struct GalleryView: View {
         }
         .confirmationDialog("Actions", isPresented: $showingActionMenu) {
             // Sync selected photos to the server (formerly "Send")
-            Button("Sync") {
-                let assets = Array(viewModel.selectedPhotos)
-                if assets.isEmpty { return }
-                if !auth.isAuthenticated {
-                    showingLogin = true
-                    return
+            if !viewModel.selectedPhotos.isEmpty {
+                Button("Sync") {
+                    let assets = Array(viewModel.selectedPhotos)
+                    if assets.isEmpty { return }
+                    if !auth.isAuthenticated {
+                        showingLogin = true
+                        return
+                    }
+                    viewModel.syncSelectedAssets(assets, source: "photos-actions-menu")
+                    showingUploadsView = true
+                    // After performing an action: cancel selection and reload
+                    viewModel.exitSelectionMode()
+                    viewModel.refreshPhotos()
                 }
-                HybridUploadManager.shared.startUpload(assets: assets)
-                showingUploadsView = true
-                // After performing an action: cancel selection and reload
-                viewModel.exitSelectionMode()
-                viewModel.refreshPhotos()
             }
             Button("Select All") {
                 viewModel.selectAllPhotos()
@@ -179,13 +193,18 @@ struct GalleryView: View {
             Button("Deselect All") {
                 viewModel.deselectAll()
             }
-            if !viewModel.selectedPhotos.isEmpty {
-                Button("Share…") { showingSelectedPhotosView = true }
-            }
             Button("Delete", role: .destructive) {
                 showingDeleteAlert = true
             }
             Button("Cancel", role: .cancel) { }
+        }
+        .alert("Stop Cloud Check?", isPresented: $showingStopCloudCheckConfirm) {
+            Button("Stop", role: .destructive) {
+                viewModel.stopCloudCheck()
+            }
+            Button("Continue", role: .cancel) { }
+        } message: {
+            Text("Cloud check is still running. Do you want to stop checking now?")
         }
         .sheet(isPresented: $showingUploadsView) {
             UploadsView()
@@ -430,16 +449,8 @@ struct SelectedPhotosView: View {
                             if !auth.isAuthenticated {
                                 showingLogin = true
                             } else {
-                                HybridUploadManager.shared.startUpload(assets: assets)
+                                viewModel.syncSelectedAssets(assets, source: "photos-selected-view")
                                 showingUploadsView = true
-                            }
-                        }
-                        if !viewModel.selectedPhotos.isEmpty {
-                            Button("Share") {
-                                viewModel.shareSelectedPhotos { images in
-                                    self.shareSheetItems = images
-                                    self.showingShareSheet = !images.isEmpty
-                                }
                             }
                         }
                         Button("Delete", role: .destructive) {
@@ -575,6 +586,9 @@ struct GalleryAppBar: View {
     let onSort: (SortOption) -> Void
     let onLayoutChange: (LayoutOption) -> Void
     let onCloudCheck: () -> Void
+    let onCloudCheckAll: () -> Void
+    let onCloudCheckCurrentSelection: () -> Void
+    let onCloudCheckCancel: () -> Void
     let onSelect: () -> Void
     
     var body: some View {
@@ -609,18 +623,24 @@ struct GalleryAppBar: View {
             
             Spacer()
 
-            Button(action: onCloudCheck) {
-                if isCloudCheckRunning {
+            if isCloudCheckRunning {
+                Button(action: onCloudCheck) {
                     ProgressView()
                         .scaleEffect(0.85)
-                } else {
+                }
+                .accessibilityLabel("Cloud check running. Tap to stop")
+            } else {
+                Menu {
+                    Button("Check all photos", action: onCloudCheckAll)
+                    Button("Check Current Selection", action: onCloudCheckCurrentSelection)
+                    Button("Cancel", action: onCloudCheckCancel)
+                } label: {
                     Image(systemName: "cloud")
                         .font(.title3)
                         .foregroundColor(.primary)
                 }
+                .accessibilityLabel("Check Cloud Backup")
             }
-            .accessibilityLabel("Check Cloud Backup")
-            .disabled(isCloudCheckRunning)
 
             Button(action: onSelect) {
                 Text(isSelectionMode ? "Cancel" : "Select")
@@ -881,10 +901,6 @@ struct EnhancedPhotoGridView: View {
     var topInset: CGFloat = 0
     
     private let spacing: CGFloat = 2
-    @State private var isDragging = false
-    @State private var dragStartAsset: PHAsset?
-    @State private var dragCurrentAsset: PHAsset?
-    @State private var initialSelection: Set<PHAsset> = []
     
     private let columns: [GridItem] = Array(repeating: GridItem(.flexible(minimum: 70, maximum: 250), spacing: 2), count: 4)
     
@@ -900,29 +916,17 @@ struct EnhancedPhotoGridView: View {
                 // Spacer equal to header height so content starts below the overlaid bars
                 Color.clear.frame(height: max(0, topInset))
 
+                let filteredAssets = viewModel.filteredMedia
                 LazyVGrid(columns: columns, spacing: spacing) {
-                ForEach(Array(viewModel.filteredMedia.enumerated()), id: \.element.localIdentifier) { index, asset in
+                ForEach(filteredAssets, id: \.localIdentifier) { asset in
                     let columnsCount: CGFloat = 4
                     let totalSpacing = spacing * (columnsCount - 1) + spacing * 2 // inter-item + outer padding
                     let size = ((UIScreen.main.bounds.width - totalSpacing) / columnsCount).rounded(.down)
-                    let tile = MediaThumbnailView(
+                    MediaThumbnailView(
                         asset: asset,
-                        cellSize: size,
-                        isDragSelecting: isDragging && isInDragRange(asset: asset, index: index)
+                        cellSize: size
                     )
                     .environmentObject(viewModel)
-
-                    Group {
-                        if viewModel.isSelectionMode {
-                            tile.onDragGesture(
-                                onStart: { _ in startDragSelection(asset: asset, index: index) },
-                                onChanged: { _ in updateDragSelection(asset: asset, index: index) },
-                                onEnded: { _ in endDragSelection() }
-                            )
-                        } else {
-                            tile
-                        }
-                    }
                 }
                 }
                 .padding(.horizontal, spacing)
@@ -939,118 +943,16 @@ struct EnhancedPhotoGridView: View {
             onScrollOffsetChange?(y)
         }
     }
-    
-    private func startDragSelection(asset: PHAsset, index: Int) {
-        // Begin drag selection without changing selection yet to avoid
-        // layout shifts interfering with tap recognition.
-        isDragging = true
-        dragStartAsset = asset
-        dragCurrentAsset = asset
-        initialSelection = viewModel.selectedPhotos
-    }
-    
-    private func updateDragSelection(asset: PHAsset, index: Int) {
-        guard isDragging, let startAsset = dragStartAsset else { return }
-        
-        dragCurrentAsset = asset
-        
-        // Get indices of start and current assets
-        guard let startIndex = viewModel.filteredMedia.firstIndex(of: startAsset),
-              let currentIndex = viewModel.filteredMedia.firstIndex(of: asset) else { return }
-        
-        let minIndex = min(startIndex, currentIndex)
-        let maxIndex = max(startIndex, currentIndex)
-        
-        // Update selection based on drag range
-        viewModel.selectedPhotos = initialSelection
-        
-        for i in minIndex...maxIndex {
-            let assetInRange = viewModel.filteredMedia[i]
-            if initialSelection.contains(startAsset) {
-                // If start was selected, remove from selection
-                viewModel.selectedPhotos.remove(assetInRange)
-            } else {
-                // If start was not selected, add to selection
-                viewModel.selectedPhotos.insert(assetInRange)
-            }
-        }
-    }
-    
-    private func endDragSelection() {
-        isDragging = false
-        dragStartAsset = nil
-        dragCurrentAsset = nil
-        initialSelection = []
-    }
-    
-    private func isInDragRange(asset: PHAsset, index: Int) -> Bool {
-        guard isDragging,
-              let startAsset = dragStartAsset,
-              let currentAsset = dragCurrentAsset else { return false }
-        
-        guard let startIndex = viewModel.filteredMedia.firstIndex(of: startAsset),
-              let currentIndex = viewModel.filteredMedia.firstIndex(of: currentAsset) else { return false }
-        
-        let minIndex = min(startIndex, currentIndex)
-        let maxIndex = max(startIndex, currentIndex)
-        
-        return index >= minIndex && index <= maxIndex
-    }
-}
-
-// Custom view modifier for drag gesture
-struct DragGestureModifier: ViewModifier {
-    let onStart: (CGPoint) -> Void
-    let onChanged: (CGPoint) -> Void
-    let onEnded: (CGPoint) -> Void
-    
-    @State private var dragLocation: CGPoint = .zero
-    @State private var didStart = false
-    
-    func body(content: Content) -> some View {
-        content
-            // Use simultaneousGesture so ScrollView can still scroll
-            .simultaneousGesture(
-                DragGesture(minimumDistance: 12)
-                    .onChanged { value in
-                        if !didStart {
-                            didStart = true
-                            onStart(value.location)
-                        }
-                        dragLocation = value.location
-                        onChanged(value.location)
-                    }
-                    .onEnded { value in
-                        onEnded(value.location)
-                        dragLocation = .zero
-                        didStart = false
-                    }
-            )
-    }
-}
-
-extension View {
-    func onDragGesture(
-        onStart: @escaping (CGPoint) -> Void,
-        onChanged: @escaping (CGPoint) -> Void,
-        onEnded: @escaping (CGPoint) -> Void
-    ) -> some View {
-        modifier(DragGestureModifier(
-            onStart: onStart,
-            onChanged: onChanged,
-            onEnded: onEnded
-        ))
-    }
 }
 
 struct MediaThumbnailView: View {
     let asset: PHAsset
     let cellSize: CGFloat
-    var isDragSelecting: Bool = false
     @EnvironmentObject var viewModel: GalleryViewModel
     @State private var thumbnail: UIImage?
     
     var body: some View {
+        let isSelected = viewModel.selectedPhotos.contains(asset)
         ZStack {
             // Background color to ensure consistent cell bounds
             Color(.systemGray5)
@@ -1066,13 +968,6 @@ struct MediaThumbnailView: View {
                 ProgressView().scaleEffect(0.7)
             }
 
-            // Drag selection highlight (does not block taps)
-            if isDragSelecting {
-                Rectangle()
-                    .fill(Color.blue.opacity(0.25))
-                    .frame(width: cellSize, height: cellSize)
-                    .allowsHitTesting(false)
-            }
         }
         .frame(width: cellSize, height: cellSize)
         // Ensure the whole square responds to taps (not just visible content)
@@ -1096,10 +991,10 @@ struct MediaThumbnailView: View {
             if viewModel.isSelectionMode {
                 ZStack {
                     Circle()
-                        .fill(viewModel.selectedPhotos.contains(asset) ? Color.white : Color.black.opacity(0.35))
+                        .fill(isSelected ? Color.white : Color.black.opacity(0.35))
                         .frame(width: 26, height: 26)
-                    Image(systemName: viewModel.selectedPhotos.contains(asset) ? "checkmark.circle.fill" : "circle")
-                        .foregroundColor(viewModel.selectedPhotos.contains(asset) ? .blue : .white)
+                    Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                        .foregroundColor(isSelected ? .blue : .white)
                         .font(.system(size: 18, weight: .semibold))
                 }
                 .padding(6)

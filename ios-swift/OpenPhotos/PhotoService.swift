@@ -160,6 +160,11 @@ extension PhotoService: PHPhotoLibraryChangeObserver {
               let details = changeInstance.changeDetails(for: currentFetch) else {
             return
         }
+
+        let insertedCount = details.insertedIndexes?.count ?? 0
+        let removedCount = details.removedIndexes?.count ?? 0
+        let changedCount = details.changedIndexes?.count ?? 0
+        let shouldTriggerSync = insertedCount > 0 || removedCount > 0 || details.hasMoves
         
         // Hop to main for UI updates
         DispatchQueue.main.async { [weak self] in
@@ -172,9 +177,15 @@ extension PhotoService: PHPhotoLibraryChangeObserver {
                 updated.append(asset)
             }
             self.photos = updated
-            
-            // Trigger sync alongside UI update
-            self.sync()
+
+            print(
+                "[SYNC] photoLibraryDidChange inserted=\(insertedCount) removed=\(removedCount) changed=\(changedCount) moves=\(details.hasMoves ? 1 : 0) trigger_sync=\(shouldTriggerSync ? 1 : 0)"
+            )
+
+            // Avoid rerun storms from metadata-only churn (for example iCloud bookkeeping updates).
+            if shouldTriggerSync {
+                self.sync()
+            }
         }
     }
 }
