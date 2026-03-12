@@ -17,6 +17,8 @@ struct EditShareSheet: View {
     @State private var expiryDate: Date?
     @State private var hasExpiry: Bool
     @State private var includeFaces: Bool
+    @State private var userLabelsById: [String: String] = [:]
+    @State private var groupLabelsById: [Int: String] = [:]
 
     @State private var isUpdating = false
     @State private var isDeleting = false
@@ -25,6 +27,7 @@ struct EditShareSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     private let shareService = ShareService.shared
+    private let teamService = TeamService.shared
 
     init(share: Share) {
         self.share = share
@@ -59,7 +62,7 @@ struct EditShareSheet: View {
                                     Image(systemName: iconForRecipient(recipient))
                                         .font(.caption)
 
-                                    Text(recipient.recipientIdentifier)
+                                    Text(resolvedRecipientLabel(recipient))
                                         .font(.subheadline)
 
                                     Spacer()
@@ -169,12 +172,19 @@ struct EditShareSheet: View {
             }
         }
         .task {
+            await loadRecipientDisplayMaps()
             // Load existing recipients into editable format
-            recipients = share.recipients.map { recipient in
-                RecipientInput(
-                    type: RecipientInput.RecipientType(rawValue: recipient.recipientType.rawValue) ?? .user,
-                    identifier: recipient.recipientIdentifier,
-                    displayName: recipient.displayLabel
+            recipients = share.recipients.compactMap { recipient in
+                guard
+                    let type = RecipientInput.RecipientType(rawValue: recipient.recipientType.rawValue),
+                    let identifier = recipient.recipientApiIdentifier
+                else {
+                    return nil
+                }
+                return RecipientInput(
+                    type: type,
+                    identifier: identifier,
+                    displayName: resolvedRecipientLabel(recipient)
                 )
             }
         }
@@ -184,6 +194,112 @@ struct EditShareSheet: View {
 
     private var canSave: Bool {
         return !shareName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private func loadRecipientDisplayMaps() async {
+        do {
+            let targets = try await shareService.listShareTargets()
+            applyTargetsToLabelMaps(targets)
+        } catch {
+            // Best-effort only; fallback labels still work.
+        }
+
+        // Team endpoints can provide complete user/group labels when available.
+        // Not all roles can access these endpoints, so errors are ignored.
+        do {
+            let users = try await teamService.listUsers()
+            for user in users {
+                userLabelsById[user.user_id] = preferredUserLabel(
+                    label: user.name,
+                    email: user.email,
+                    fallbackId: user.user_id
+                )
+            }
+        } catch {}
+
+        do {
+            let groups = try await teamService.listGroups()
+            for group in groups {
+                let name = group.name.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !name.isEmpty {
+                    groupLabelsById[group.id] = name
+                }
+            }
+        } catch {}
+    }
+
+    private func applyTargetsToLabelMaps(_ targets: [ShareTarget]) {
+        for target in targets {
+            guard let targetId = target.id?.trimmingCharacters(in: .whitespacesAndNewlines), !targetId.isEmpty else {
+                continue
+            }
+            if target.kind == "user" {
+                userLabelsById[targetId] = preferredUserLabel(
+                    label: target.label,
+                    email: target.email,
+                    fallbackId: targetId
+                )
+            } else if target.kind == "group", let gid = Int(targetId) {
+                let label = target.label.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !label.isEmpty {
+                    groupLabelsById[gid] = label
+                }
+            }
+        }
+    }
+
+    private func resolvedRecipientLabel(_ recipient: ShareRecipient) -> String {
+        switch recipient.recipientType {
+        case .user:
+            if let uid = recipient.recipientUserId,
+               let mapped = userLabelsById[uid],
+               !mapped.isEmpty {
+                return mapped
+            }
+            return preferredUserLabel(
+                label: recipient.displayLabel,
+                email: nil,
+                fallbackId: recipient.recipientUserId ?? "User"
+            )
+        case .group:
+            if let gid = recipient.recipientGroupId,
+               let mapped = groupLabelsById[gid],
+               !mapped.isEmpty {
+                return mapped
+            }
+            return recipient.displayLabel
+        case .externalEmail:
+            return recipient.externalEmail ?? recipient.displayLabel
+        }
+    }
+
+    private func preferredUserLabel(label: String?, email: String?, fallbackId: String) -> String {
+        let trimmedLabel = trimToNil(label)
+        let trimmedEmail = trimToNil(email)
+
+        if let label = trimmedLabel, !looksLikeOpaqueUserId(label, fallbackId: fallbackId) {
+            return label
+        }
+        if let email = trimmedEmail {
+            return email
+        }
+        if let label = trimmedLabel {
+            return label
+        }
+        return fallbackId
+    }
+
+    private func looksLikeOpaqueUserId(_ value: String, fallbackId: String) -> Bool {
+        if value == fallbackId { return true }
+        if UUID(uuidString: value) != nil { return true }
+        return false
+    }
+
+    private func trimToNil(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return nil
+        }
+        return raw
     }
 
     private func iconForRecipient(_ recipient: ShareRecipient) -> String {
@@ -209,7 +325,7 @@ struct EditShareSheet: View {
                 // Check if not already in share.recipients
                 let exists = share.recipients.contains { existing in
                     existing.recipientType.rawValue == recipient.type.rawValue &&
-                    existing.recipientIdentifier == recipient.identifier
+                    existing.recipientApiIdentifier == recipient.identifier
                 }
 
                 if !exists {
@@ -219,7 +335,7 @@ struct EditShareSheet: View {
                         email: nil,
                         permissions: nil
                     )
-                    try await shareService.addRecipients(shareId: share.id, recipients: [recipientInput])
+                    _ = try await shareService.addRecipients(shareId: share.id, recipients: [recipientInput])
                 }
             }
 

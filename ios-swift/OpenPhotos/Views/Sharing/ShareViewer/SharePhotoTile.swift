@@ -66,28 +66,36 @@ struct SharePhotoTile: View {
                 } else if showControls {
                     HStack(spacing: 12) {
                         if canComment {
-                            Image(systemName: latestComment != nil ? "bubble.left.fill" : "bubble.left")
-                                .foregroundColor(.white)
-                                .font(.system(size: 20))
-                                .shadow(color: .black.opacity(0.5), radius: 2)
-                                .onTapGesture { onCommentTap() }
+                            Button(action: onCommentTap) {
+                                Image(systemName: latestComment != nil ? "bubble.left.fill" : "bubble.left")
+                                    .foregroundColor(.white)
+                                    .font(.system(size: 20))
+                                    .shadow(color: .black.opacity(0.5), radius: 2)
+                            }
+                            .buttonStyle(.plain)
+                            .padding(4)
+                            .contentShape(Rectangle())
                         }
 
                         if canLike {
-                            HStack(spacing: 4) {
-                                Image(systemName: (likeCount?.likedByMe ?? false) ? "heart.fill" : "heart")
-                                    .foregroundColor((likeCount?.likedByMe ?? false) ? .red : .white)
-                                    .font(.system(size: 20))
-                                    .shadow(color: .black.opacity(0.5), radius: 2)
-
-                                if let count = likeCount?.count, count > 0 {
-                                    Text("\(count)")
-                                        .foregroundColor(.white)
-                                        .font(.caption)
+                            Button(action: onLikeTap) {
+                                HStack(spacing: 4) {
+                                    Image(systemName: (likeCount?.likedByMe ?? false) ? "heart.fill" : "heart")
+                                        .foregroundColor((likeCount?.likedByMe ?? false) ? .red : .white)
+                                        .font(.system(size: 20))
                                         .shadow(color: .black.opacity(0.5), radius: 2)
+
+                                    if let count = likeCount?.count, count > 0 {
+                                        Text("\(count)")
+                                            .foregroundColor(.white)
+                                            .font(.caption)
+                                            .shadow(color: .black.opacity(0.5), radius: 2)
+                                    }
                                 }
                             }
-                            .onTapGesture { onLikeTap() }
+                            .buttonStyle(.plain)
+                            .padding(4)
+                            .contentShape(Rectangle())
                         }
                     }
                 }

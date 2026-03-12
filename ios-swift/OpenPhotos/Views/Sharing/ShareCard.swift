@@ -78,7 +78,7 @@ struct ShareCard: View {
                         .font(.caption)
                         .foregroundColor(.secondary)
                 } else {
-                    Text("From \(share.ownerUserId)")
+                    Text("From \(share.ownerDisplayLabel)")
                         .font(.caption)
                         .foregroundColor(.secondary)
                         .lineLimit(1)

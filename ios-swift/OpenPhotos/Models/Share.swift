@@ -15,6 +15,8 @@ struct Share: Identifiable, Codable, Hashable {
     let id: String
     let ownerOrgId: Int
     let ownerUserId: String
+    let ownerDisplayName: String?
+    let ownerEmail: String?
     let objectKind: ObjectKind
     let objectId: String
     let defaultPermissions: Int
@@ -39,10 +41,48 @@ struct Share: Identifiable, Codable, Hashable {
         case revoked
     }
 
+    init(
+        id: String,
+        ownerOrgId: Int,
+        ownerUserId: String,
+        ownerDisplayName: String? = nil,
+        ownerEmail: String? = nil,
+        objectKind: ObjectKind,
+        objectId: String,
+        defaultPermissions: Int,
+        expiresAt: Date?,
+        status: Status,
+        createdAt: Date,
+        updatedAt: Date,
+        name: String,
+        includeFaces: Bool,
+        includeSubtree: Bool,
+        recipients: [ShareRecipient]
+    ) {
+        self.id = id
+        self.ownerOrgId = ownerOrgId
+        self.ownerUserId = ownerUserId
+        self.ownerDisplayName = ownerDisplayName
+        self.ownerEmail = ownerEmail
+        self.objectKind = objectKind
+        self.objectId = objectId
+        self.defaultPermissions = defaultPermissions
+        self.expiresAt = expiresAt
+        self.status = status
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+        self.name = name
+        self.includeFaces = includeFaces
+        self.includeSubtree = includeSubtree
+        self.recipients = recipients
+    }
+
     enum CodingKeys: String, CodingKey {
         case id
         case ownerOrgId = "owner_org_id"
         case ownerUserId = "owner_user_id"
+        case ownerDisplayName = "owner_display_name"
+        case ownerEmail = "owner_email"
         case objectKind = "object_kind"
         case objectId = "object_id"
         case defaultPermissions = "default_permissions"
@@ -65,6 +105,17 @@ struct Share: Identifiable, Codable, Hashable {
     /// Check if current user is owner
     func isOwner(userId: String) -> Bool {
         return ownerUserId == userId
+    }
+
+    /// Best available owner label for "From ..." UI.
+    var ownerDisplayLabel: String {
+        if let name = ownerDisplayName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let email = ownerEmail?.trimmingCharacters(in: .whitespacesAndNewlines), !email.isEmpty {
+            return email
+        }
+        return ownerUserId
     }
 }
 
@@ -121,6 +172,21 @@ struct ShareRecipient: Identifiable, Codable, Hashable {
     /// Get recipient identifier (for backwards compatibility with UI code)
     var recipientIdentifier: String {
         return displayLabel
+    }
+
+    /// Raw recipient identifier used by mutation APIs.
+    var recipientApiIdentifier: String? {
+        switch recipientType {
+        case .user:
+            return recipientUserId
+        case .group:
+            if let gid = recipientGroupId {
+                return String(gid)
+            }
+            return nil
+        case .externalEmail:
+            return externalEmail
+        }
     }
 }
 

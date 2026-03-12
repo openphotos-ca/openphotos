@@ -98,59 +98,27 @@ struct SharePhotoGrid: View {
                 commentAssetId = assetId
             },
             size: cellSide,
-            showControls: false,
+            showControls: true,
             metadata: viewModel.assetMetadata[assetId]
         )
-        .overlay(alignment: .bottomTrailing) {
-            HStack(spacing: 12) {
-                if viewModel.hasPermission(SharePermissions.comment.rawValue) {
-                    Image(systemName: (viewModel.latestComments[assetId] ?? nil) != nil ? "bubble.left.fill" : "bubble.left")
-                        .foregroundColor(.white)
-                        .font(.system(size: 20))
-                        .shadow(color: .black.opacity(0.5), radius: 2)
-                        .onTapGesture { commentAssetId = assetId }
-                }
-
-                if viewModel.hasPermission(SharePermissions.like.rawValue) {
-                    HStack(spacing: 4) {
-                        Image(systemName: (viewModel.likeCounts[assetId]?.likedByMe ?? false) ? "heart.fill" : "heart")
-                            .foregroundColor((viewModel.likeCounts[assetId]?.likedByMe ?? false) ? .red : .white)
-                            .font(.system(size: 20))
-                            .shadow(color: .black.opacity(0.5), radius: 2)
-
-                        if let count = viewModel.likeCounts[assetId]?.count, count > 0 {
-                            Text("\(count)")
-                                .foregroundColor(.white)
-                                .font(.caption)
-                                .shadow(color: .black.opacity(0.5), radius: 2)
-                        }
-                    }
-                    .onTapGesture {
-                        Task { await viewModel.toggleLike(assetId: assetId) }
-                    }
-                }
-            }
-            .padding(.bottom, 8)
-            .padding(.trailing, 8)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
-        }
-        .onTapGesture {
-            if viewModel.isSelectionMode {
-                viewModel.toggleAssetSelection(assetId)
-            } else {
-                // Check if it's a video
-                if viewModel.assetMetadata[assetId]?.isVideo == true {
-                    selectedVideoAssetId = assetId
-                } else {
-                    selectedAssetId = assetId
-                }
-            }
-        }
+        .contentShape(Rectangle())
+        .clipped()
         .onAppear {
             let index = viewModel.assetIds.firstIndex(of: assetId) ?? 0
             if index == viewModel.assetIds.count - 10 {
                 Task {
                     await viewModel.loadNextPageIfNeeded()
+                }
+            }
+        }
+        .onTapGesture {
+            if viewModel.isSelectionMode {
+                viewModel.toggleAssetSelection(assetId)
+            } else {
+                if viewModel.assetMetadata[assetId]?.isVideo == true {
+                    selectedVideoAssetId = assetId
+                } else {
+                    selectedAssetId = assetId
                 }
             }
         }
