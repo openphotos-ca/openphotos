@@ -45,6 +45,17 @@ function dayKeyOf(ts: number) {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
+function formatDuration(ms?: number) {
+  if (!ms || ms <= 0) return '';
+  const total = Math.floor(ms / 1000);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  if (h > 0) return `${h}:${pad(m)}:${pad(s)}`;
+  return `${m}:${pad(s)}`;
+}
+
 function buildGroupsFromPhotos(photos: Photo[]): DayGroup[] {
   const byDay = new Map<string, DayGroup>();
   for (const p of photos) {
@@ -124,6 +135,16 @@ function TimelinePhoto({
         title={photo.filename}
         className="absolute inset-0 w-full h-full object-cover"
       />
+      {photo.is_video && (
+        <>
+          <div className="absolute top-2 left-2 bg-black bg-opacity-70 rounded-full p-1">
+            <Play className="w-3 h-3 text-white" fill="white" />
+          </div>
+          <div className="absolute bottom-2 right-2 bg-black bg-opacity-70 text-white text-xs px-1.5 py-0.5 rounded">
+            {formatDuration(photo.duration_ms)}
+          </div>
+        </>
+      )}
       {photo.is_live_photo && hover && (
         <div className="absolute top-2 left-2 bg-black/70 rounded-full p-1 text-white">
           <Play className="w-3 h-3" />
