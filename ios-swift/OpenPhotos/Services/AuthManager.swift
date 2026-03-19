@@ -32,6 +32,7 @@ final class AuthManager: ObservableObject {
     @Published private(set) var refreshToken: String?
     @Published private(set) var expiresAt: Date?
     @Published private(set) var userId: String?
+    @Published private(set) var userName: String?
     @Published private(set) var userEmail: String?
     @Published private(set) var isAuthenticated: Bool = false
     var isDemoUser: Bool { (userEmail ?? "").lowercased() == Self.demoEmail }
@@ -44,7 +45,7 @@ final class AuthManager: ObservableObject {
     @Published var syncScope: SyncScope = .all
     @Published var syncIncludeUnassigned: Bool = false
     @Published var syncUnassignedLocked: Bool = false
-    @Published var autoStartSyncOnOpen: Bool = false
+    @Published var autoStartSyncOnOpen: Bool = true
     @Published var autoStartWifiOnly: Bool = true
     @Published var autoRetryBgMinutes: Int = 5
     @Published private(set) var syncEnabledAfterManualStart: Bool = false
@@ -61,6 +62,7 @@ final class AuthManager: ObservableObject {
     private let credentialOrgIdAccount = "organization_id"
     private let credentialServerAccount = "server_url"
     private let userIdDefaultsKey = "auth.userId"
+    private let userNameDefaultsKey = "auth.userName"
     private let userEmailDefaultsKey = "auth.userEmail"
     private let serverURLDefaultsKey = "server.baseURL"
     private let serverSchemeDefaultsKey = "server.scheme"
@@ -115,11 +117,13 @@ final class AuthManager: ObservableObject {
             keychain.remove(service: tokenService, account: expiresAccount)
             clearLoginCredentials()
             defaults.removeObject(forKey: userIdDefaultsKey)
+            defaults.removeObject(forKey: userNameDefaultsKey)
             defaults.removeObject(forKey: userEmailDefaultsKey)
             token = nil
             refreshToken = nil
             expiresAt = nil
             userId = nil
+            userName = nil
             userEmail = nil
             isAuthenticated = false
         }
@@ -139,6 +143,7 @@ final class AuthManager: ObservableObject {
         }
         // Load user_id (from previous session if available)
         self.userId = UserDefaults.standard.string(forKey: userIdDefaultsKey)
+        self.userName = UserDefaults.standard.string(forKey: userNameDefaultsKey)
         self.userEmail = UserDefaults.standard.string(forKey: userEmailDefaultsKey)
         if self.userEmail == nil, let saved = loadSavedCredentials() {
             self.userEmail = saved.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
@@ -159,7 +164,7 @@ final class AuthManager: ObservableObject {
         let unassignedLocked = UserDefaults.standard.object(forKey: "sync.unassignedLocked") as? Bool
         self.syncUnassignedLocked = unassignedLocked ?? false
         let autoStart = UserDefaults.standard.object(forKey: "sync.autoStartOnOpen") as? Bool
-        self.autoStartSyncOnOpen = autoStart ?? false
+        self.autoStartSyncOnOpen = autoStart ?? true
         let autoWifi = UserDefaults.standard.object(forKey: "sync.autoStartWifiOnly") as? Bool
         self.autoStartWifiOnly = autoWifi ?? true
         // Background auto-retry threshold (minutes)
@@ -266,6 +271,16 @@ final class AuthManager: ObservableObject {
             UserDefaults.standard.set(normalized, forKey: userEmailDefaultsKey)
         } else {
             UserDefaults.standard.removeObject(forKey: userEmailDefaultsKey)
+        }
+    }
+
+    private func saveUserName(_ name: String?) {
+        let normalized = Self.normalizeUserName(name)
+        self.userName = normalized
+        if let normalized, !normalized.isEmpty {
+            UserDefaults.standard.set(normalized, forKey: userNameDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: userNameDefaultsKey)
         }
     }
 
@@ -395,6 +410,9 @@ final class AuthManager: ObservableObject {
     }
     private struct LoginUser: Decodable {
         let user_id: String?
+        let name: String?
+        let display_name: String?
+        let user_name: String?
         let email: String?
     }
     private struct LoginResponse: Decodable {
@@ -478,6 +496,19 @@ final class AuthManager: ObservableObject {
             }
             return false
         }
+    }
+
+    private static func normalizeUserName(_ name: String?) -> String? {
+        guard let trimmed = name?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return nil
+        }
+        return trimmed
+    }
+
+    private static func resolvedUserName(from user: LoginUser?) -> String? {
+        normalizeUserName(user?.name)
+            ?? normalizeUserName(user?.display_name)
+            ?? normalizeUserName(user?.user_name)
     }
 
     private func requestRefresh(
@@ -584,6 +615,7 @@ final class AuthManager: ObservableObject {
         await MainActor.run {
             self.saveTokens(token: decoded.token, refresh: decoded.refresh_token, expiresIn: decoded.expires_in)
             self.saveUserId(decoded.user?.user_id)
+            self.saveUserName(Self.resolvedUserName(from: decoded.user))
             self.saveUserEmail(decoded.user?.email ?? email)
             self.saveLoginCredentials(email: email, password: password, organizationId: organizationId)
         }
@@ -619,6 +651,7 @@ final class AuthManager: ObservableObject {
         await MainActor.run {
             self.saveTokens(token: decoded.token, refresh: decoded.refresh_token, expiresIn: decoded.expires_in)
             self.saveUserId(decoded.user?.user_id)
+            self.saveUserName(Self.resolvedUserName(from: decoded.user))
             self.saveUserEmail(decoded.user?.email ?? email)
             self.saveLoginCredentials(email: email, password: password, organizationId: nil)
         }
@@ -704,6 +737,7 @@ final class AuthManager: ObservableObject {
         await MainActor.run {
             self.saveTokens(token: token, refresh: refresh, expiresIn: expiresIn)
             self.saveUserId(uid)
+            self.saveUserName(name)
             self.saveUserEmail(email)
             self.saveLoginCredentials(email: email, password: password, organizationId: nil)
         }
@@ -720,6 +754,7 @@ final class AuthManager: ObservableObject {
         keychain.remove(service: tokenService, account: expiresAccount)
         clearLoginCredentials()
         saveUserId(nil)
+        saveUserName(nil)
         saveUserEmail(nil)
         clearSyncEnabledAfterManualStart()
     }

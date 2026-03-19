@@ -2612,16 +2612,14 @@ pub(crate) async fn index_single_photo_for_user(
     let bytes = std::fs::read(image_path)?;
     let content_hash = blake3::hash(&bytes).to_hex().to_string();
     let backup_id = crate::photos::backup_id::from_bytes(&bytes, user_id)?;
-    let asset_id: String = if let Some(forced) = forced_asset_id
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        forced.to_string()
-    } else if let Some(existing) = &existing_asset_id {
-        existing.clone()
-    } else {
-        crate::photos::asset_id::from_bytes(&bytes, user_id)?
-    };
+    let asset_id: String =
+        if let Some(forced) = forced_asset_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            forced.to_string()
+        } else if let Some(existing) = &existing_asset_id {
+            existing.clone()
+        } else {
+            crate::photos::asset_id::from_bytes(&bytes, user_id)?
+        };
     let content_changed = existing_hash.as_deref() != Some(&content_hash);
 
     fn looks_like_image(ext: &str, bytes: &[u8]) -> bool {
@@ -3793,16 +3791,14 @@ pub(crate) async fn index_video_for_user(
     let bytes = std::fs::read(video_path)?;
     let content_hash = blake3::hash(&bytes).to_hex().to_string();
     let backup_id = crate::photos::backup_id::from_bytes(&bytes, user_id)?;
-    let asset_id: String = if let Some(forced) = forced_asset_id
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        forced.to_string()
-    } else if let Some(existing) = &existing_asset_id {
-        existing.clone()
-    } else {
-        crate::photos::asset_id::from_bytes(&bytes, user_id)?
-    };
+    let asset_id: String =
+        if let Some(forced) = forced_asset_id.map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            forced.to_string()
+        } else if let Some(existing) = &existing_asset_id {
+            existing.clone()
+        } else {
+            crate::photos::asset_id::from_bytes(&bytes, user_id)?
+        };
     let content_changed = existing_hash.as_deref() != Some(&content_hash);
 
     // Probe video metadata (dimensions/duration)

@@ -149,8 +149,9 @@ struct ServerFullScreenViewer: View {
                     }
                 }
 
-                // Bottom overlay: video controls (if video)
-                if isVideo { videoControls }
+                // Bottom overlay: keep custom controls for regular videos only.
+                // Live Photos use the compact top-left "Live + Play" control.
+                if isVideo && !isLive { videoControls }
 
                 // Modal progress overlay for long-running saves (especially large videos).
                 if isSaving { savingOverlay }
@@ -336,9 +337,18 @@ struct ServerFullScreenViewer: View {
     }
 
     private var liveBadge: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             Circle().stroke(Color.white, lineWidth: 2).frame(width: 12, height: 12)
             Text("Live").foregroundColor(.white).font(.footnote).bold()
+            Button(action: { playLiveFromBadge() }) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(width: 22, height: 22)
+                    .background(Color.white.opacity(0.14))
+                    .clipShape(Circle())
+            }
+            .buttonStyle(.plain)
         }
         .padding(6)
         .background(Color.black.opacity(0.5)).clipShape(Capsule())
@@ -705,6 +715,21 @@ struct ServerFullScreenViewer: View {
         }
         isVideoPaused = false
         videoTime = 0
+    }
+
+    private func playLiveFromBadge() {
+        guard isLive else { return }
+        if livePlaybackEnded {
+            replay()
+            return
+        }
+        if let p = player {
+            isVideoBuffering = true
+            p.play()
+            isVideoPaused = false
+            return
+        }
+        Task { await prepareVideo() }
     }
     private func seek(to t: Double) { guard let p = player else { return }; p.seek(to: CMTime(seconds: t, preferredTimescale: 600)) }
 
@@ -1139,11 +1164,14 @@ struct ServerFullScreenViewer: View {
         }
 
         // Fallback to streaming (non-live or failures)
-        let path = (isLive && !(current.is_video)) ? "/api/live/\(enc)" : "/api/images/\(enc)"
+        let path = (isLive && !(current.is_video)) ? "/api/live/\(enc)?compat=1" : "/api/images/\(enc)"
         let url = AuthorizedHTTPClient.shared.buildURL(path: path)
         let headers = AuthManager.shared.authHeader()
         // Use the documented AVURLAsset option key as a string to keep compatibility across SDKs.
-        let opts: [String: Any] = ["AVURLAssetHTTPHeaderFieldsKey": headers]
+        let opts: [String: Any] = [
+            "AVURLAssetHTTPHeaderFieldsKey": headers,
+            AVURLAssetPreferPreciseDurationAndTimingKey: false
+        ]
         let asset = AVURLAsset(url: url, options: opts)
         let item = AVPlayerItem(asset: asset)
         // Buffering policy:
@@ -1151,6 +1179,7 @@ struct ServerFullScreenViewer: View {
         //   increased startup latency and made playback look “stuck on the first frame”.
         // - Use a small, bitrate-aware buffer window to start quickly while still reducing stalls.
         let forwardBufferSeconds: Double = {
+            if isLive { return 0.15 }
             guard let size = current.size, let ms = current.duration_ms, size > 0, ms > 0 else {
                 return 2
             }
@@ -1163,7 +1192,11 @@ struct ServerFullScreenViewer: View {
             return 3
         }()
         item.preferredForwardBufferDuration = forwardBufferSeconds
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         let p = AVPlayer(playerItem: item)
+        if isLive {
+            p.automaticallyWaitsToMinimizeStalling = false
+        }
         await MainActor.run {
             guard viewerIsActive && videoLoadToken == token else { return }
             stopPlayback()

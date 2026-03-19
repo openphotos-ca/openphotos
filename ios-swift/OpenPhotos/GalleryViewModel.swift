@@ -732,6 +732,40 @@ class GalleryViewModel: ObservableObject {
             )
             .store(in: &cancellables)
     }
+
+    func addSelectedPhotosToAlbum(albumId: Int64, completion: ((Bool) -> Void)? = nil) {
+        let selectedAssets = Array(selectedPhotos)
+        guard !selectedAssets.isEmpty else {
+            Task { @MainActor in
+                ToastManager.shared.show("No photos selected")
+            }
+            completion?(false)
+            return
+        }
+
+        let assetIds = selectedAssets.map { $0.localIdentifier }
+        let albumName = AlbumService.shared.getAllAlbums().first(where: { $0.id == albumId })?.name ?? "album"
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let ok = AlbumService.shared.addPhotosToAlbum(albumId: albumId, assetIds: assetIds)
+            if ok {
+                AlbumService.shared.refreshSystemAlbumMemberships()
+                self?.loadDbAlbums()
+            }
+
+            DispatchQueue.main.async {
+                let itemWord = assetIds.count == 1 ? "item" : "items"
+                if ok {
+                    self?.exitSelectionMode()
+                    self?.refreshPhotos()
+                    ToastManager.shared.show("Added \(assetIds.count) \(itemWord) to \(albumName)")
+                } else {
+                    ToastManager.shared.show("Failed to add to \(albumName)")
+                }
+                completion?(ok)
+            }
+        }
+    }
     
     func shareSelectedPhotos(completion: @escaping ([UIImage]) -> Void) {
         // Convert PHAssets to UIImages for sharing

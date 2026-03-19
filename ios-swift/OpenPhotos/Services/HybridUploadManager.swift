@@ -108,9 +108,14 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private var lastProgressByItem: [UUID: (lastAt: TimeInterval, lastBytes: Int64)] = [:]
     private let progressMinIntervalSeconds: TimeInterval = 0.25
     private let progressMinByteDelta: Int64 = 512 * 1024
-    // Stop flag used when user requests a foreground restart (ReSync while syncing).
+    // Stop mode for foreground sync cancellation.
     private let runControlQueue = DispatchQueue(label: "hybrid.upload.run.control")
-    private var stopForResyncRequested: Bool = false
+    private enum StopMode {
+        case none
+        case pause
+        case resync
+    }
+    private var stopMode: StopMode = .none
 
     // Deferred server verification (batched, single utility task).
     private let deferredVerifyStateQueue = DispatchQueue(label: "hybrid.upload.verify.state")
@@ -374,13 +379,17 @@ final class HybridUploadManager: NSObject, ObservableObject {
         }
     }
 
-    private func perfStartRun(totalAssets: Int) {
-        let now = perfNow()
+    private func clearDeferredVerificationWork() {
         deferredVerifyStateQueue.sync {
             deferredVerifyLoopTask?.cancel()
             deferredVerifyLoopTask = nil
             deferredVerifyEntriesByContentId.removeAll(keepingCapacity: true)
         }
+    }
+
+    private func perfStartRun(totalAssets: Int) {
+        let now = perfNow()
+        clearDeferredVerificationWork()
         verifyDecisionQueue.sync {
             verifyImmediateMissStreak = 0
             verifyPolicyBypassCount = 0
@@ -665,12 +674,20 @@ final class HybridUploadManager: NSObject, ObservableObject {
         }
     }
 
-    private func setStopForResyncRequested(_ requested: Bool) {
-        runControlQueue.sync { stopForResyncRequested = requested }
+    private func setStopMode(_ mode: StopMode) {
+        runControlQueue.sync { stopMode = mode }
+    }
+
+    private func currentStopMode() -> StopMode {
+        runControlQueue.sync { stopMode }
+    }
+
+    private func isStopRequested() -> Bool {
+        currentStopMode() != .none
     }
 
     private func isStopForResyncRequested() -> Bool {
-        runControlQueue.sync { stopForResyncRequested }
+        currentStopMode() == .resync
     }
 
     private func shouldPublishProgress(itemID: UUID, sentBytes: Int64, totalBytes: Int64) -> Bool {
@@ -816,7 +833,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
     }
 
     private func continueProcessBatchWhenBacklogAllows(assets: [PHAsset], startIndex: Int, waitStartedAt: TimeInterval? = nil) {
-        if isStopForResyncRequested() || isForegroundTusSuspended() { return }
+        if isStopRequested() || isForegroundTusSuspended() { return }
         let pending = pendingTusCount()
         if pending >= maxPendingTusBeforeNextExportBatch {
             print("[SYNC-UPLOAD] Backpressure: pendingTus=\(pending) >= \(maxPendingTusBeforeNextExportBatch); waiting to export next batch")
@@ -944,7 +961,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
     func startUpload(assets: [PHAsset]) {
         // New run begins; clear any previous stop request.
-        setStopForResyncRequested(false)
+        setStopMode(.none)
         setForegroundTusSuspended(false, reason: "sync-start")
         perfStartRun(totalAssets: assets.count)
         // Ensure token freshness before kicking off uploads
@@ -969,8 +986,31 @@ final class HybridUploadManager: NSObject, ObservableObject {
         processBatch(assets: effectiveAssets, startIndex: 0)
     }
 
+    func stopCurrentSync() {
+        setStopMode(.pause)
+        clearDeferredVerificationWork()
+        tusQueue.sync {
+            for item in items { tusCancelFlags[item.id] = true }
+            pendingTus.removeAll()
+            tusEnqueuedAtUptime.removeAll(keepingCapacity: true)
+            liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+        }
+        cancelActiveExports()
+        DispatchQueue.main.async {
+            for idx in self.items.indices {
+                switch self.items[idx].status {
+                case .queued, .exporting, .uploading:
+                    self.items[idx].status = .queued
+                    SyncRepository.shared.markPending(contentId: self.items[idx].contentId, note: "Sync paused")
+                default:
+                    break
+                }
+            }
+        }
+    }
+
     private func processBatch(assets: [PHAsset], startIndex: Int) {
-        if isStopForResyncRequested() || isForegroundTusSuspended() {
+        if isStopRequested() || isForegroundTusSuspended() {
             print("[SYNC-UPLOAD] stop requested; aborting remaining batches")
             return
         }
@@ -991,7 +1031,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         let exportStart = batchStart
         exportAssetsToTempFiles(assets: slice) { [weak self] exported in
             guard let self else { return }
-            if self.isStopForResyncRequested() || self.isForegroundTusSuspended() { return }
+            if self.isStopRequested() || self.isForegroundTusSuspended() { return }
             let exportElapsed = max(0, self.perfNow() - exportStart)
             let exportedBytes = exported.reduce(Int64(0)) { $0 + max(0, $1.totalBytes) }
             AppLog.debug(
@@ -1000,7 +1040,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             )
             let preflightStart = self.perfNow()
             self.preflightFilterAlreadyBackedUp(exported) { uploadable in
-                if self.isStopForResyncRequested() || self.isForegroundTusSuspended() { return }
+                if self.isStopRequested() || self.isForegroundTusSuspended() { return }
                 let preflightElapsed = max(0, self.perfNow() - preflightStart)
                 let batchElapsed = max(0, self.perfNow() - batchStart)
                 let skipped = max(0, exported.count - uploadable.count)
@@ -1912,7 +1952,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
     // Stop current foreground sync work so a fresh ReSync pass can restart immediately.
     // This intentionally does not queue background uploads for canceled foreground items.
     func stopForResync() {
-        setStopForResyncRequested(true)
+        setStopMode(.resync)
+        clearDeferredVerificationWork()
         tusQueue.sync {
             for item in items { tusCancelFlags[item.id] = true }
             pendingTus.removeAll()
@@ -3015,13 +3056,23 @@ final class HybridUploadManager: NSObject, ObservableObject {
             let cancelled = tusQueue.sync { tusCancelFlags[item.id] ?? false }
             let totalSeconds = max(0, perfNow() - opStartedAt)
             if cancelled {
-                if isStopForResyncRequested() {
+                let stopMode = currentStopMode()
+                if stopMode == .resync {
                     await update(itemID: item.id, status: .canceled)
                     SyncRepository.shared.deleteTusUploadURL(contentId: tusResumeKey(for: item))
                     print("[UPLOAD] Foreground upload canceled for ReSync: \(item.filename)")
                     AppLog.debug(
                         AppLog.upload,
                         "[PERF] tus-canceled filename=\(item.filename) reason=resync queue_wait_ms=\(queueWait.map(perfMs) ?? 0) total_ms=\(perfMs(totalSeconds))"
+                    )
+                    do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
+                } else if stopMode == .pause {
+                    await update(itemID: item.id, status: .queued)
+                    SyncRepository.shared.markPending(contentId: item.contentId, note: "Sync paused")
+                    print("[UPLOAD] Foreground upload paused: \(item.filename)")
+                    AppLog.debug(
+                        AppLog.upload,
+                        "[PERF] tus-canceled filename=\(item.filename) reason=user_pause queue_wait_ms=\(queueWait.map(perfMs) ?? 0) total_ms=\(perfMs(totalSeconds))"
                     )
                     do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
                 } else {
@@ -3055,8 +3106,14 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
     private func queueBackgroundMultipart(for item: UploadItem) {
         let enqueueStartedAt = perfNow()
-        if isStopForResyncRequested() {
+        let stopMode = currentStopMode()
+        if stopMode == .resync {
             Task { await update(itemID: item.id, status: .canceled) }
+            return
+        }
+        if stopMode == .pause {
+            Task { await update(itemID: item.id, status: .queued) }
+            SyncRepository.shared.markPending(contentId: item.contentId, note: "Sync paused")
             return
         }
         // Recreate session if needed

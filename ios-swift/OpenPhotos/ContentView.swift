@@ -18,7 +18,7 @@ struct ContentView: View {
                         .environmentObject(auth)
                         .environmentObject(unlockCtl)
                         .tabItem {
-                            Image(systemName: "house")
+                            Image(systemName: "cloud")
                             Text("Cloud")
                         }
                         .tag(0)
@@ -28,13 +28,13 @@ struct ContentView: View {
                         .environmentObject(galleryViewModel)
                         .tabItem {
                             Image(systemName: "photo.on.rectangle.angled")
-                            Text("Photos")
+                            Text("Local")
                         }
                         .tag(1)
                     
                     SyncView()
                         .tabItem {
-                            Image(systemName: "arrow.clockwise.icloud")
+                            Image(systemName: "arrow.up.circle")
                             Text("Sync")
                         }
                         .tag(2)
@@ -105,16 +105,8 @@ struct SyncView: View {
                 
                 Section("Sync") {
                     HStack(spacing: 10) {
-                        Picker("Scope", selection: Binding(
-                            get: { auth.syncScope },
-                            set: { auth.setSyncScope($0) }
-                        )) {
-                            Text("All Photos").tag(AuthManager.SyncScope.all)
-                            Text("Selected Albums").tag(AuthManager.SyncScope.selectedAlbums)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(maxWidth: .infinity)
-                        .disabled(isDemoReadOnly)
+                        syncScopeControl
+                            .frame(maxWidth: .infinity)
 
                         if auth.syncScope == .selectedAlbums {
                             Button {
@@ -173,8 +165,16 @@ struct SyncView: View {
                 }
 
                 Section("Actions") {
-                    centeredActionButton(isSyncing ? "Syncing..." : "Sync Now", disabled: isSyncing || isDemoReadOnly) {
-                        SyncService.shared.syncNow(forceRetryFailed: true, userInitiated: true)
+                    centeredActionButton(
+                        isSyncing ? "Stop Syncing" : "Sync Now",
+                        disabled: isDemoReadOnly,
+                        tint: isSyncing ? .red : .accentColor
+                    ) {
+                        if isSyncing {
+                            SyncService.shared.stopCurrentSync()
+                        } else {
+                            SyncService.shared.syncNow(forceRetryFailed: true, userInitiated: true)
+                        }
                         isSyncing = HybridUploadManager.shared.isSyncBusy()
                     }
 
@@ -234,7 +234,12 @@ struct SyncView: View {
         }
     }
 
-    private func centeredActionButton(_ title: String, disabled: Bool = false, action: @escaping () -> Void) -> some View {
+    private func centeredActionButton(
+        _ title: String,
+        disabled: Bool = false,
+        tint: Color = .accentColor,
+        action: @escaping () -> Void
+    ) -> some View {
         GeometryReader { proxy in
             HStack {
                 Spacer(minLength: 0)
@@ -244,12 +249,47 @@ struct SyncView: View {
                         .multilineTextAlignment(.center)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(tint)
                 .frame(width: proxy.size.width * 0.9)
                 .disabled(disabled)
                 Spacer(minLength: 0)
             }
         }
         .frame(height: 44)
+    }
+
+    private var syncScopeControl: some View {
+        HStack(spacing: 0) {
+            syncScopeButton("All Photos", scope: .all)
+            syncScopeButton("Selected Albums", scope: .selectedAlbums)
+        }
+        .padding(4)
+        .background(Color(uiColor: .systemGray5))
+        .clipShape(Capsule())
+        .disabled(isDemoReadOnly)
+        .opacity(isDemoReadOnly ? 0.6 : 1.0)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("Sync scope")
+    }
+
+    private func syncScopeButton(_ title: String, scope: AuthManager.SyncScope) -> some View {
+        let isSelected = auth.syncScope == scope
+        return Button {
+            auth.setSyncScope(scope)
+        } label: {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .lineLimit(1)
+                .minimumScaleFactor(0.85)
+                .foregroundColor(isSelected ? .white : .primary)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 8)
+                .background(isSelected ? Color(uiColor: .systemGreen) : Color.clear)
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -275,6 +315,25 @@ struct SettingsView: View {
     @State private var usageImages: Int64 = 0
     @State private var usageVideos: Int64 = 0
     private var isDemoReadOnly: Bool { auth.isDemoUser }
+    private var accountName: String {
+        if let name = auth.userName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return name
+        }
+        if let email = auth.userEmail?.trimmingCharacters(in: .whitespacesAndNewlines),
+           let prefix = email.split(separator: "@").first,
+           !prefix.isEmpty {
+            return String(prefix)
+        }
+        return "-"
+    }
+    private var accountEmail: String {
+        let email = auth.userEmail?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return email.isEmpty ? "-" : email
+    }
+    private var accountServerURL: String {
+        let url = auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        return url.isEmpty ? "-" : url
+    }
 
     var body: some View {
         NavigationStack {
@@ -323,32 +382,33 @@ struct SettingsView: View {
                     .disabled(isDemoReadOnly)
                 }
                 Section("Account") {
+                    HStack {
+                        Text("Name")
+                        Spacer()
+                        Text(accountName)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    HStack {
+                        Text("Email")
+                        Spacer()
+                        Text(accountEmail)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    HStack(alignment: .top) {
+                        Text("Server URL")
+                        Spacer()
+                        Text(accountServerURL)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.trailing)
+                            .lineLimit(2)
+                            .truncationMode(.middle)
+                    }
                     NavigationLink(destination: ChangePasswordView().environmentObject(auth)) {
                         Text("Change Password")
                     }
                     .disabled(isDemoReadOnly)
-                }
-                Section("Server") {
-                    HStack {
-                        Text("Server URL")
-                        Spacer()
-                        if let url = URL(string: auth.serverURL) {
-                            Link(auth.serverURL, destination: url)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        } else {
-                            Text(auth.serverURL)
-                                .foregroundColor(.secondary)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
-                    }
-                    Button {
-                        Clipboard.copy(auth.serverURL)
-                        ToastManager.shared.show("Server URL copied")
-                    } label: {
-                        Text("Copy Server URL")
-                    }
                 }
 
                 Section("About") {
@@ -371,15 +431,22 @@ struct SettingsView: View {
                         Link("GitHub", destination: url)
                     }
                     if let url = AppLinks.supportEmail {
-                        Button {
-                            openURL(url)
-                        } label: {
-                            HStack {
+                        HStack {
+                            Button {
+                                openURL(url)
+                            } label: {
                                 Text("Support Email")
-                                Spacer()
-                                Text(AppLinks.supportEmailAddress)
-                                    .foregroundColor(.secondary)
                             }
+                            .buttonStyle(.plain)
+                            Spacer()
+                            Button {
+                                Clipboard.copy(AppLinks.supportEmailAddress)
+                                ToastManager.shared.show("Support email copied")
+                            } label: {
+                                Image(systemName: "doc.on.doc")
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Copy support email")
                         }
                     }
                 }

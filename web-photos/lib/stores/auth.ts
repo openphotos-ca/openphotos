@@ -3,6 +3,32 @@ import { persist } from 'zustand/middleware';
 import { logger } from '@/lib/logger';
 import { resolveApiBaseUrl } from '@/lib/api/base';
 
+function authCookieAttrs(): string[] {
+  const attrs = [
+    'path=/',
+    `max-age=${7 * 24 * 60 * 60}`,
+    'samesite=strict',
+  ];
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    attrs.push('secure');
+  }
+  return attrs;
+}
+
+function setAuthCookie(token: string) {
+  if (typeof document === 'undefined') return;
+  document.cookie = `auth-token=${token}; ${authCookieAttrs().join('; ')}`;
+}
+
+function clearAuthCookie() {
+  if (typeof document === 'undefined') return;
+  const attrs = ['path=/', 'expires=Thu, 01 Jan 1970 00:00:01 GMT'];
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+    attrs.push('secure');
+  }
+  document.cookie = `auth-token=; ${attrs.join('; ')}`;
+}
+
 export interface User {
   id: number;
   user_id: string;
@@ -44,15 +70,7 @@ export const useAuthStore = create<AuthState>()(
         });
         // Set cookie for middleware (avoid `secure` on http during dev)
         if (typeof document !== 'undefined') {
-          const attrs = [
-            'path=/',
-            `max-age=${7 * 24 * 60 * 60}`,
-            'samesite=strict',
-          ];
-          if (window.location.protocol === 'https:') {
-            attrs.push('secure');
-          }
-          document.cookie = `auth-token=${token}; ${attrs.join('; ')}`;
+          setAuthCookie(token);
           logger.debug('[AUTH STORE] Set auth cookie');
         }
         
@@ -76,6 +94,15 @@ export const useAuthStore = create<AuthState>()(
           user: user === undefined ? state.user : user,
           isAuthenticated: !!token,
         }));
+        if (typeof document !== 'undefined') {
+          if (token) {
+            setAuthCookie(token);
+            logger.debug('[AUTH STORE] Refreshed auth cookie from updateToken');
+          } else {
+            clearAuthCookie();
+            logger.debug('[AUTH STORE] Cleared auth cookie from updateToken');
+          }
+        }
       },
 
       logout: () => {
@@ -96,11 +123,7 @@ export const useAuthStore = create<AuthState>()(
         }
         // Clear cookie
         if (typeof document !== 'undefined') {
-          const attrs = ['path=/', 'expires=Thu, 01 Jan 1970 00:00:01 GMT'];
-          if (window.location.protocol === 'https:') {
-            attrs.push('secure');
-          }
-          document.cookie = `auth-token=; ${attrs.join('; ')}`;
+          clearAuthCookie();
           logger.debug('[AUTH STORE] Cleared auth cookie');
         }
         // Clear proactive refresh timer
@@ -126,6 +149,16 @@ export const useAuthStore = create<AuthState>()(
       },
 
       setHydrated: () => {
+        const token = get().token;
+        if (typeof document !== 'undefined') {
+          if (token) {
+            setAuthCookie(token);
+            logger.debug('[AUTH STORE] Synced auth cookie during hydration');
+          } else {
+            clearAuthCookie();
+            logger.debug('[AUTH STORE] Cleared auth cookie during hydration');
+          }
+        }
         logger.debug('[AUTH STORE] Hydration completed');
         set({ hasHydrated: true });
       },

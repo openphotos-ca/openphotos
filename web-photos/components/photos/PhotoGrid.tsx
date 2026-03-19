@@ -6,6 +6,7 @@ import { FixedSizeGrid as Grid } from 'react-window';
 import { useInView } from 'react-intersection-observer';
 import { Play, Check } from 'lucide-react';
 import { AuthenticatedImage } from '@/components/ui/AuthenticatedImage';
+import { getLivePhotoVideoUrl } from '@/lib/livePhoto';
 
 import { Photo } from '@/lib/types/photo';
 import { photosApi } from '@/lib/api/photos';
@@ -44,6 +45,10 @@ function PhotoCard({
   const [isHovered, setIsHovered] = useState(false);
   const [imageError, setImageError] = useState(false);
   const [videoRef, setVideoRef] = useState<HTMLVideoElement | null>(null);
+  const liveVideoUrl = useMemo(
+    () => getLivePhotoVideoUrl(photo.asset_id, { preferCompat: true }),
+    [photo.asset_id],
+  );
 
   const handleMouseEnter = useCallback(() => {
     setIsHovered(true);
@@ -136,13 +141,14 @@ function PhotoCard({
           loop
           playsInline
           autoPlay
-          onLoadedData={() => {
-            if (videoRef) {
-              videoRef.play().catch(() => {});
-            }
+          onLoadedData={(e) => {
+            e.currentTarget.play().catch(() => {});
           }}
-          preload="none"
-          src={`/api/live/${encodeURIComponent(photo.asset_id)}`}
+          onCanPlay={(e) => {
+            e.currentTarget.play().catch(() => {});
+          }}
+          preload="metadata"
+          src={liveVideoUrl}
         />
       )}
 

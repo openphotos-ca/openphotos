@@ -61,6 +61,10 @@ final class SyncService: NSObject {
         scheduleSync(reason: "library_change", forceRetryFailed: false)
     }
 
+    func stopCurrentSync() {
+        uploader.stopCurrentSync()
+    }
+
     // Manual trigger from Settings → Sync Now (bypass backoff for failed items).
     // Non-user-initiated callers are blocked until user has explicitly started sync once.
     func syncNow(forceRetryFailed: Bool = true, userInitiated: Bool = false) {

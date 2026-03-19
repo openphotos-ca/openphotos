@@ -860,7 +860,12 @@ pub(crate) async fn ingest_finished_upload(
     if replace_requested {
         let target_from_meta = meta_get(
             &metadata,
-            &["asset_id_b58", "replace_asset_id", "replace_asset_id_b58", "asset_id"],
+            &[
+                "asset_id_b58",
+                "replace_asset_id",
+                "replace_asset_id_b58",
+                "asset_id",
+            ],
         );
         let target_from_filename = metadata
             .as_ref()

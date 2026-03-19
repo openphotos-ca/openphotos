@@ -12,6 +12,19 @@ class AlbumService {
     // MARK: - Album CRUD Operations
     
     func createAlbum(name: String, description: String? = nil, parentId: Int64? = nil, isLive: Bool = false, liveCriteria: String? = nil) -> Album? {
+        let normalizedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedName.isEmpty else { return nil }
+
+        // Keep local app albums aligned with iPhone system albums.
+        // Live/smart albums are app-defined and do not map to PHAssetCollection.
+        var createdSystemAlbumLocalId: String? = nil
+        if !isLive {
+            guard let localId = createSystemAlbum(named: normalizedName) else {
+                return nil
+            }
+            createdSystemAlbumLocalId = localId
+        }
+
         let now = Int64(Date().timeIntervalSince1970)
         
         db.beginTransaction()
@@ -26,7 +39,7 @@ class AlbumService {
         """
         
         let parameters: [Any] = [
-            name,
+            normalizedName,
             description ?? NSNull(),
             parentId ?? NSNull(),
             position,
@@ -38,6 +51,9 @@ class AlbumService {
         
         guard db.executeQuery(query, parameters: parameters) else {
             db.rollbackTransaction()
+            if let localId = createdSystemAlbumLocalId {
+                _ = deleteSystemAlbum(localIdentifier: localId)
+            }
             return nil
         }
         
@@ -46,6 +62,9 @@ class AlbumService {
         // Update closure table
         if !updateClosureTableForNewAlbum(albumId: albumId, parentId: parentId) {
             db.rollbackTransaction()
+            if let localId = createdSystemAlbumLocalId {
+                _ = deleteSystemAlbum(localIdentifier: localId)
+            }
             return nil
         }
         
@@ -53,7 +72,7 @@ class AlbumService {
         
         return Album(
             id: albumId,
-            name: name,
+            name: normalizedName,
             description: description,
             parentId: parentId,
             position: position,
@@ -89,6 +108,8 @@ class AlbumService {
     }
     
     func deleteAlbum(albumId: Int64) -> Bool {
+        let targetAlbum = getAlbumById(albumId)
+
         db.beginTransaction()
         
         // Get all descendants
@@ -119,6 +140,14 @@ class AlbumService {
         if !db.executeQuery(albumQuery) {
             db.rollbackTransaction()
             return false
+        }
+
+        // Keep iPhone system albums aligned for normal (non-live) albums.
+        if let album = targetAlbum, !album.isLive {
+            if !deleteSystemAlbums(named: album.name) {
+                db.rollbackTransaction()
+                return false
+            }
         }
         
         db.commitTransaction()
@@ -180,7 +209,7 @@ class AlbumService {
     
     // MARK: - Album Photos
     
-    func addPhotosToAlbum(albumId: Int64, assetIds: [String]) -> Bool {
+    func addPhotosToAlbum(albumId: Int64, assetIds: [String], syncSystemAlbum: Bool = true) -> Bool {
         db.beginTransaction()
         
         for assetId in assetIds {
@@ -193,6 +222,17 @@ class AlbumService {
             if !db.executeQuery(query, parameters: [albumId, assetId, photoId, now]) {
                 db.rollbackTransaction()
                 return false
+            }
+        }
+
+        // Keep iPhone system album membership aligned for local Photos-tab assignments.
+        if syncSystemAlbum {
+            let targetAlbum = getAlbumById(albumId)
+            if let album = targetAlbum, !album.isLive {
+                if !addAssetsToSystemAlbum(albumName: album.name, assetIds: assetIds) {
+                    db.rollbackTransaction()
+                    return false
+                }
             }
         }
         
@@ -376,7 +416,7 @@ class AlbumService {
                 var ids: [String] = []
                 ids.reserveCapacity(assets.count)
                 assets.enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
-                _ = self.addPhotosToAlbum(albumId: albumId, assetIds: ids)
+                _ = self.addPhotosToAlbum(albumId: albumId, assetIds: ids, syncSystemAlbum: false)
                 _ = self.db.executeQuery("UPDATE albums SET updated_at = ? WHERE id = ?", parameters: [now, albumId])
                 updated += 1
             } else {
@@ -394,7 +434,7 @@ class AlbumService {
                     var ids: [String] = []
                     ids.reserveCapacity(assets.count)
                     assets.enumerateObjects { asset, _, _ in ids.append(asset.localIdentifier) }
-                    _ = self.addPhotosToAlbum(albumId: newId, assetIds: ids)
+                    _ = self.addPhotosToAlbum(albumId: newId, assetIds: ids, syncSystemAlbum: false)
                     created += 1
                 }
             }
@@ -447,7 +487,7 @@ class AlbumService {
         let assets = PHAsset.fetchAssets(in: collection, options: nil)
         var photoCount = 0
         assets.enumerateObjects { asset, _, _ in
-            if self.addPhotosToAlbum(albumId: albumId, assetIds: [asset.localIdentifier]) {
+            if self.addPhotosToAlbum(albumId: albumId, assetIds: [asset.localIdentifier], syncSystemAlbum: false) {
                 photoCount += 1
             }
         }
@@ -456,6 +496,101 @@ class AlbumService {
     }
     
     // MARK: - Helper Methods
+
+    private func getAlbumById(_ albumId: Int64) -> Album? {
+        let query = """
+            SELECT a.*,
+                   (SELECT COUNT(*) FROM album_photos WHERE album_id = a.id) as photo_count,
+                   (SELECT MAX(depth) FROM album_closure WHERE descendant_id = a.id) as depth
+            FROM albums a
+            WHERE a.id = ?
+            LIMIT 1
+        """
+        return db.executeSelect(query, parameters: [albumId]) { statement in
+            self.albumFromStatement(statement)
+        }.first
+    }
+
+    private func createSystemAlbum(named name: String) -> String? {
+        var createdLocalIdentifier: String?
+        let ok = performPhotoLibraryChangesSync {
+            let req = PHAssetCollectionChangeRequest.creationRequestForAssetCollection(withTitle: name)
+            createdLocalIdentifier = req.placeholderForCreatedAssetCollection.localIdentifier
+        }
+        return ok ? createdLocalIdentifier : nil
+    }
+
+    private func deleteSystemAlbums(named name: String) -> Bool {
+        guard let collection = fetchUserAlbums(named: name).first else { return true }
+        return performPhotoLibraryChangesSync {
+            PHAssetCollectionChangeRequest.deleteAssetCollections([collection] as NSArray)
+        }
+    }
+
+    private func deleteSystemAlbum(localIdentifier: String) -> Bool {
+        let fetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [localIdentifier], options: nil)
+        guard fetch.count > 0 else { return true }
+        var collections: [PHAssetCollection] = []
+        fetch.enumerateObjects { col, _, _ in collections.append(col) }
+        guard !collections.isEmpty else { return true }
+        return performPhotoLibraryChangesSync {
+            PHAssetCollectionChangeRequest.deleteAssetCollections(collections as NSArray)
+        }
+    }
+
+    private func fetchUserAlbums(named name: String) -> [PHAssetCollection] {
+        let fetch = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .albumRegular, options: nil)
+        var out: [PHAssetCollection] = []
+        fetch.enumerateObjects { collection, _, _ in
+            if collection.localizedTitle == name {
+                out.append(collection)
+            }
+        }
+        return out
+    }
+
+    private func addAssetsToSystemAlbum(albumName: String, assetIds: [String]) -> Bool {
+        guard !assetIds.isEmpty else { return true }
+
+        var collection = fetchUserAlbums(named: albumName).first
+        if collection == nil {
+            if let newLocalId = createSystemAlbum(named: albumName) {
+                collection = fetchUserAlbums(named: albumName).first
+                if collection == nil {
+                    let fetch = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [newLocalId], options: nil)
+                    var found: PHAssetCollection?
+                    fetch.enumerateObjects { c, _, stop in
+                        found = c
+                        stop.pointee = true
+                    }
+                    collection = found
+                }
+            }
+        }
+        guard let targetCollection = collection else { return false }
+
+        let assetsFetch = PHAsset.fetchAssets(withLocalIdentifiers: assetIds, options: nil)
+        guard assetsFetch.count > 0 else { return true }
+
+        return performPhotoLibraryChangesSync {
+            guard let request = PHAssetCollectionChangeRequest(for: targetCollection) else { return }
+            request.addAssets(assetsFetch)
+        }
+    }
+
+    private func performPhotoLibraryChangesSync(_ changes: @escaping () -> Void) -> Bool {
+        let semaphore = DispatchSemaphore(value: 0)
+        var success = false
+
+        PHPhotoLibrary.shared().performChanges(changes) { ok, _ in
+            success = ok
+            semaphore.signal()
+        }
+
+        // Avoid indefinite blocking if PhotoKit callback stalls.
+        let waitResult = semaphore.wait(timeout: .now() + 15)
+        return waitResult == .success && success
+    }
     
     private func getNextPosition(parentId: Int64?) -> Int {
         let query: String

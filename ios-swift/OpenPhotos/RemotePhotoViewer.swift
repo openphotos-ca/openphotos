@@ -115,13 +115,19 @@ struct RemotePhotoViewerView: View {
         }
         // Stream via AVURLAsset with auth headers (images endpoint supports Range for videos)
         let encId = assetId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? assetId
-        let urlStr = isLive ? "/api/live/" + encId : "/api/images/" + encId
+        let urlStr = isLive ? "/api/live/" + encId + "?compat=1" : "/api/images/" + encId
         let url = AuthorizedHTTPClient.shared.buildURL(path: urlStr)
         let headers = AuthManager.shared.authHeader()
-        let options = ["AVURLAssetHTTPHeaderFieldsKey": headers]
+        let options: [String: Any] = [
+            "AVURLAssetHTTPHeaderFieldsKey": headers,
+            AVURLAssetPreferPreciseDurationAndTimingKey: false
+        ]
         let asset = AVURLAsset(url: url, options: options)
         let item = AVPlayerItem(asset: asset)
+        item.preferredForwardBufferDuration = isLive ? 0.15 : 2.0
+        item.canUseNetworkResourcesForLiveStreamingWhilePaused = true
         let player = AVPlayer(playerItem: item)
+        if isLive { player.automaticallyWaitsToMinimizeStalling = false }
         await MainActor.run { self.player = player }
     }
 }

@@ -221,9 +221,84 @@ fn looks_like_declared_image(content_type: &str, bytes: &[u8]) -> bool {
     true
 }
 
+fn infer_live_video_content_type(path: &StdPath) -> &'static str {
+    let ext_lc = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    // Try ISO BMFF brand sniff first so stale/misnamed caches still get the right MIME.
+    if let Ok(bytes) = std::fs::read(path) {
+        if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" {
+            let major_brand = &bytes[8..12];
+            if major_brand == b"qt  " {
+                return "video/quicktime";
+            }
+            if bytes.len() >= 64 {
+                let end = bytes.len().min(64);
+                if bytes[8..end].windows(4).any(|w| w == b"qt  ") {
+                    return "video/quicktime";
+                }
+            }
+            return "video/mp4";
+        }
+    }
+
+    // Fallback by extension.
+    match ext_lc.as_str() {
+        "mov" | "qt" => "video/quicktime",
+        _ => "video/mp4",
+    }
+}
+
 fn is_apple_core_media_user_agent(ua: &str) -> bool {
     // AVPlayer / AVURLAsset requests originate from AppleCoreMedia and include Range headers.
     ua.contains("AppleCoreMedia")
+}
+
+fn is_chromium_user_agent(ua: &str) -> bool {
+    let lc = ua.to_ascii_lowercase();
+    // Chrome/Chromium/Edge (Chromium). Exclude Opera which may report Chrome too.
+    (lc.contains("chrome/") || lc.contains("chromium") || lc.contains("edg/"))
+        && !lc.contains("opr/")
+}
+
+fn is_firefox_user_agent(ua: &str) -> bool {
+    ua.to_ascii_lowercase().contains("firefox/")
+}
+
+fn request_has_live_compat(query: Option<&str>) -> bool {
+    let Some(query) = query else {
+        return false;
+    };
+    query.split('&').any(|kv| {
+        let mut parts = kv.splitn(2, '=');
+        let key = parts.next().unwrap_or_default();
+        if key != "compat" {
+            return false;
+        }
+        let value = parts.next().unwrap_or_default().to_ascii_lowercase();
+        value.is_empty() || value == "1" || value == "true" || value == "yes" || value == "on"
+    })
+}
+
+fn add_live_response_headers<B>(
+    resp: &mut axum::http::Response<B>,
+    source: &'static str,
+    compat: bool,
+) {
+    let hv = axum::http::HeaderValue::from_static(source);
+    resp.headers_mut()
+        .insert(axum::http::HeaderName::from_static("x-live-source"), hv);
+    resp.headers_mut().insert(
+        axum::http::HeaderName::from_static("x-live-compat"),
+        if compat {
+            axum::http::HeaderValue::from_static("1")
+        } else {
+            axum::http::HeaderValue::from_static("0")
+        },
+    );
 }
 
 fn is_ios_supported_container_ext(ext_lc: &str) -> bool {
@@ -3630,7 +3705,12 @@ pub async fn serve_image(
                         break;
                     }
                     Err(err) => {
-                        failure_notes.push(format!("{}: {} ({})", source, candidate.display(), err));
+                        failure_notes.push(format!(
+                            "{}: {} ({})",
+                            source,
+                            candidate.display(),
+                            err
+                        ));
                     }
                 }
             }
@@ -3655,10 +3735,7 @@ pub async fn serve_image(
                 axum::http::HeaderValue::from_static("application/octet-stream"),
             );
             if let Ok(hv) = axum::http::HeaderValue::from_str(locked_source) {
-                headers_map.insert(
-                    header::HeaderName::from_static("x-locked-source"),
-                    hv,
-                );
+                headers_map.insert(header::HeaderName::from_static("x-locked-source"), hv);
             }
             return Ok((headers_map, bytes).into_response());
         }
@@ -4339,9 +4416,43 @@ pub async fn serve_live_video(
     Path(asset_id): Path<String>,
     request: Request,
 ) -> Result<axum::response::Response, AppError> {
+    let query = request.uri().query().map(|q| q.to_string());
+    let compat_requested = request_has_live_compat(query.as_deref());
+    let range_header = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let user_agent = request
+        .headers()
+        .get(header::USER_AGENT)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let is_chromium_ua = user_agent
+        .as_deref()
+        .map(is_chromium_user_agent)
+        .unwrap_or(false);
+    let is_firefox_ua = user_agent
+        .as_deref()
+        .map(is_firefox_user_agent)
+        .unwrap_or(false);
+    let prefer_stream_proxy = compat_requested || is_chromium_ua || is_firefox_ua;
+
     // Get authenticated user
     let headers = request.headers();
     let user = get_user_from_headers(headers, &state.auth_service).await?;
+    info!(
+        "[LIVE] request asset_id={} user={} range={:?} ua={:?} query={:?} compat_requested={} chromium_ua={} firefox_ua={} prefer_stream_proxy={}",
+        asset_id,
+        user.user_id,
+        range_header,
+        user_agent,
+        query,
+        compat_requested,
+        is_chromium_ua,
+        is_firefox_ua,
+        prefer_stream_proxy
+    );
 
     // If locked, do not serve live video via this endpoint
     {
@@ -4355,6 +4466,11 @@ pub async fn serve_live_video(
             {
                 let locked: bool = row.get(0);
                 if locked {
+                    info!(
+                        "[LIVE] denied locked asset asset_id={} user={}",
+                        asset_id,
+                        user.user_id
+                    );
                     return Ok((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"LOCKED_ASSET"}))).into_response());
                 }
             }
@@ -4364,6 +4480,11 @@ pub async fn serve_live_video(
             if let Ok(mut stmt) = conn.prepare("SELECT COALESCE(locked, FALSE) FROM photos WHERE organization_id = ? AND asset_id = ? LIMIT 1") {
                 if let Ok(locked) = stmt.query_row(duckdb::params![user.organization_id, &asset_id], |row| row.get::<_, bool>(0)) {
                     if locked {
+                        info!(
+                            "[LIVE] denied locked asset asset_id={} user={}",
+                            asset_id,
+                            user.user_id
+                        );
                         return Ok((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error":"LOCKED_ASSET"}))).into_response());
                     }
                 }
@@ -4374,34 +4495,139 @@ pub async fn serve_live_video(
     let live_mov_cache = state.live_video_mov_path_for(&user.user_id, &asset_id);
     let live_mp4_cache = state.live_video_path_for(&user.user_id, &asset_id);
     if live_mov_cache.exists() {
-        // Stream MOV directly with range support
-        let mut resp = ServeFile::new(live_mov_cache.clone())
+        // Stream cached live component with detected MIME (supports stale misnamed cache files).
+        let mut serve_path = live_mov_cache.clone();
+        let mut content_type = infer_live_video_content_type(&serve_path);
+        let mut live_source = "cache_raw";
+        if prefer_stream_proxy {
+            match ensure_ios_stream_mp4_proxy(state.as_ref(), &user.user_id, &asset_id, &serve_path)
+                .await
+            {
+                Ok(proxy_path) => {
+                    info!(
+                        "[LIVE] stream proxy hit asset_id={} user={} source={} proxy={}",
+                        asset_id,
+                        user.user_id,
+                        serve_path.display(),
+                        proxy_path.display()
+                    );
+                    serve_path = proxy_path;
+                    content_type = "video/mp4";
+                    live_source = "stream_proxy";
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[LIVE] stream proxy failed asset_id={} user={} source={} err={}",
+                        asset_id,
+                        user.user_id,
+                        serve_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+        info!(
+            "[LIVE] cache hit asset_id={} user={} path={} content_type={}",
+            asset_id,
+            user.user_id,
+            serve_path.display(),
+            content_type
+        );
+        let mut resp = ServeFile::new(serve_path.clone())
             .oneshot(request)
             .await
             .unwrap();
         resp.headers_mut().insert(
             header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("video/quicktime"),
+            axum::http::HeaderValue::from_static(content_type),
         );
         resp.headers_mut().insert(
             header::ACCEPT_RANGES,
             axum::http::HeaderValue::from_static("bytes"),
+        );
+        add_live_response_headers(&mut resp, live_source, compat_requested);
+        let status = resp.status();
+        let content_range = resp
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+        let content_len = resp
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+        info!(
+            "[LIVE] response asset_id={} user={} status={} content_range={:?} content_length={:?}",
+            asset_id, user.user_id, status, content_range, content_len
         );
         return Ok(resp.into_response());
     }
     if live_mp4_cache.exists() {
-        // Stream MP4 with range support
-        let mut resp = ServeFile::new(live_mp4_cache.clone())
+        let mut serve_path = live_mp4_cache.clone();
+        let mut content_type = infer_live_video_content_type(&serve_path);
+        let mut live_source = "cache_raw";
+        if prefer_stream_proxy {
+            match ensure_ios_stream_mp4_proxy(state.as_ref(), &user.user_id, &asset_id, &serve_path)
+                .await
+            {
+                Ok(proxy_path) => {
+                    info!(
+                        "[LIVE] stream proxy hit asset_id={} user={} source={} proxy={}",
+                        asset_id,
+                        user.user_id,
+                        serve_path.display(),
+                        proxy_path.display()
+                    );
+                    serve_path = proxy_path;
+                    content_type = "video/mp4";
+                    live_source = "stream_proxy";
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "[LIVE] stream proxy failed asset_id={} user={} source={} err={}",
+                        asset_id,
+                        user.user_id,
+                        serve_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+        info!(
+            "[LIVE] cache hit asset_id={} user={} path={} content_type={}",
+            asset_id,
+            user.user_id,
+            serve_path.display(),
+            content_type
+        );
+        let mut resp = ServeFile::new(serve_path.clone())
             .oneshot(request)
             .await
             .unwrap();
         resp.headers_mut().insert(
             header::CONTENT_TYPE,
-            axum::http::HeaderValue::from_static("video/mp4"),
+            axum::http::HeaderValue::from_static(content_type),
         );
         resp.headers_mut().insert(
             header::ACCEPT_RANGES,
             axum::http::HeaderValue::from_static("bytes"),
+        );
+        add_live_response_headers(&mut resp, live_source, compat_requested);
+        let status = resp.status();
+        let content_range = resp
+            .headers()
+            .get(header::CONTENT_RANGE)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+        let content_len = resp
+            .headers()
+            .get(header::CONTENT_LENGTH)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.to_string());
+        info!(
+            "[LIVE] response asset_id={} user={} status={} content_range={:?} content_length={:?}",
+            asset_id, user.user_id, status, content_range, content_len
         );
         return Ok(resp.into_response());
     }
@@ -4434,52 +4660,172 @@ pub async fn serve_live_video(
     };
 
     if !is_live {
+        info!(
+            "[LIVE] rejected non-live asset asset_id={} user={} path={} live_video_path_present={}",
+            asset_id,
+            user.user_id,
+            photo_path,
+            live_src_path.is_some()
+        );
         return Err(AppError(anyhow::anyhow!("Not a live photo")));
     }
 
-    // Prefer DB live_video_path; else infer .mov beside original
-    let mov_candidate = if let Some(p) = live_src_path {
+    // Prefer DB live_video_path; else infer sidecar beside original photo path.
+    let live_src_candidate = if let Some(p) = live_src_path {
         std::path::PathBuf::from(p)
     } else {
         let p = std::path::Path::new(&photo_path);
         let base = p.with_extension("");
-        let mov = base.with_extension("mov");
-        if mov.exists() {
-            mov
+        let mp4 = base.with_extension("mp4");
+        if mp4.exists() {
+            mp4
         } else {
-            let mov_upper = base.with_extension("MOV");
-            mov_upper
+            let mp4_upper = base.with_extension("MP4");
+            if mp4_upper.exists() {
+                mp4_upper
+            } else {
+                let mov = base.with_extension("mov");
+                if mov.exists() {
+                    mov
+                } else {
+                    base.with_extension("MOV")
+                }
+            }
         }
     };
 
-    if !mov_candidate.exists() {
+    if !live_src_candidate.exists() {
+        info!(
+            "[LIVE] source missing asset_id={} user={} source={}",
+            asset_id,
+            user.user_id,
+            live_src_candidate.display()
+        );
         return Err(AppError(anyhow::anyhow!("Live video source not found")));
     }
 
+    if prefer_stream_proxy {
+        match ensure_ios_stream_mp4_proxy(
+            state.as_ref(),
+            &user.user_id,
+            &asset_id,
+            &live_src_candidate,
+        )
+        .await
+        {
+            Ok(proxy_path) => {
+                info!(
+                    "[LIVE] stream proxy generated asset_id={} user={} source={} proxy={}",
+                    asset_id,
+                    user.user_id,
+                    live_src_candidate.display(),
+                    proxy_path.display()
+                );
+                let mut resp = ServeFile::new(proxy_path).oneshot(request).await.unwrap();
+                resp.headers_mut().insert(
+                    header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("video/mp4"),
+                );
+                resp.headers_mut().insert(
+                    header::ACCEPT_RANGES,
+                    axum::http::HeaderValue::from_static("bytes"),
+                );
+                add_live_response_headers(&mut resp, "stream_proxy", compat_requested);
+                let status = resp.status();
+                let content_range = resp
+                    .headers()
+                    .get(header::CONTENT_RANGE)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string());
+                let content_len = resp
+                    .headers()
+                    .get(header::CONTENT_LENGTH)
+                    .and_then(|h| h.to_str().ok())
+                    .map(|s| s.to_string());
+                info!(
+                    "[LIVE] response asset_id={} user={} status={} content_range={:?} content_length={:?}",
+                    asset_id,
+                    user.user_id,
+                    status,
+                    content_range,
+                    content_len
+                );
+                return Ok(resp.into_response());
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "[LIVE] stream proxy generation failed asset_id={} user={} source={} err={}",
+                    asset_id,
+                    user.user_id,
+                    live_src_candidate.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    let content_type = infer_live_video_content_type(&live_src_candidate);
+    let target_cache = if content_type == "video/mp4" {
+        live_mp4_cache.clone()
+    } else {
+        live_mov_cache.clone()
+    };
+    info!(
+        "[LIVE] source selected asset_id={} user={} source={} target_cache={} content_type={}",
+        asset_id,
+        user.user_id,
+        live_src_candidate.display(),
+        target_cache.display(),
+        content_type
+    );
+
     // Ensure target dir
-    if let Some(parent) = live_mov_cache.parent() {
+    if let Some(parent) = target_cache.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    // Copy MOV directly (no transcode) for immediate playback
-    if let Err(e) = std::fs::copy(&mov_candidate, &live_mov_cache) {
+    if let Err(e) = std::fs::copy(&live_src_candidate, &target_cache) {
+        error!(
+            "[LIVE] cache copy failed asset_id={} user={} source={} target={} err={}",
+            asset_id,
+            user.user_id,
+            live_src_candidate.display(),
+            target_cache.display(),
+            e
+        );
         return Err(AppError(anyhow::anyhow!(
             "Failed to copy live video: {}",
             e
         )));
     }
 
-    // Stream the cached MOV with range support
-    let mut resp = ServeFile::new(live_mov_cache.clone())
-        .oneshot(request)
-        .await
-        .unwrap();
+    let mut resp = ServeFile::new(target_cache).oneshot(request).await.unwrap();
     resp.headers_mut().insert(
         header::CONTENT_TYPE,
-        axum::http::HeaderValue::from_static("video/quicktime"),
+        axum::http::HeaderValue::from_static(content_type),
     );
     resp.headers_mut().insert(
         header::ACCEPT_RANGES,
         axum::http::HeaderValue::from_static("bytes"),
+    );
+    add_live_response_headers(&mut resp, "cache_raw", compat_requested);
+    info!(
+        "[LIVE] served asset_id={} user={} content_type={}",
+        asset_id, user.user_id, content_type
+    );
+    let status = resp.status();
+    let content_range = resp
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    let content_len = resp
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_string());
+    info!(
+        "[LIVE] response asset_id={} user={} status={} content_range={:?} content_length={:?}",
+        asset_id, user.user_id, status, content_range, content_len
     );
     Ok(resp.into_response())
 }

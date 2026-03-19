@@ -10,6 +10,8 @@ struct GalleryView: View {
     @State private var showingActionMenu = false
     @State private var showingUploadsView = false
     @State private var showingLogin = false
+    @State private var showingAddToAlbumPicker = false
+    @State private var addToAlbumSelectedId: Int64? = nil
     @State private var showingStopCloudCheckConfirm = false
     @Environment(\.openURL) private var openURL
     // Header show/hide state (collapses rows above the grid when scrolling down)
@@ -186,6 +188,10 @@ struct GalleryView: View {
                     viewModel.exitSelectionMode()
                     viewModel.refreshPhotos()
                 }
+                Button("Add to Album") {
+                    addToAlbumSelectedId = nil
+                    showingAddToAlbumPicker = true
+                }
             }
             Button("Select All") {
                 viewModel.selectAllPhotos()
@@ -211,6 +217,17 @@ struct GalleryView: View {
         }
         .sheet(isPresented: $showingLogin) {
             LoginView().environmentObject(auth)
+        }
+        .sheet(isPresented: $showingAddToAlbumPicker) {
+            AlbumTreeView(
+                isPresented: $showingAddToAlbumPicker,
+                selectedAlbumId: $addToAlbumSelectedId,
+                pickerOnly: true,
+                onAlbumSelected: { albumId in
+                    viewModel.addSelectedPhotosToAlbum(albumId: albumId)
+                }
+            )
+            .environmentObject(viewModel)
         }
         .onAppear {
             if !didInitialLoad {
@@ -424,6 +441,8 @@ struct SelectedPhotosView: View {
     @State private var showingDeleteAlert = false
     @State private var showingUploadsView = false
     @State private var showingLogin = false
+    @State private var showingAddToAlbumPicker = false
+    @State private var addToAlbumSelectedId: Int64? = nil
     @State private var showingShareSheet = false
     @State private var shareSheetItems: [Any] = []
     
@@ -453,6 +472,10 @@ struct SelectedPhotosView: View {
                                 showingUploadsView = true
                             }
                         }
+                        Button("Add to Album") {
+                            addToAlbumSelectedId = nil
+                            showingAddToAlbumPicker = true
+                        }
                         Button("Delete", role: .destructive) {
                             showingDeleteAlert = true
                         }
@@ -472,6 +495,21 @@ struct SelectedPhotosView: View {
         }
         .sheet(isPresented: $showingLogin) {
             LoginView().environmentObject(auth)
+        }
+        .sheet(isPresented: $showingAddToAlbumPicker) {
+            AlbumTreeView(
+                isPresented: $showingAddToAlbumPicker,
+                selectedAlbumId: $addToAlbumSelectedId,
+                pickerOnly: true,
+                onAlbumSelected: { albumId in
+                    viewModel.addSelectedPhotosToAlbum(albumId: albumId) { ok in
+                        if ok {
+                            dismiss()
+                        }
+                    }
+                }
+            )
+            .environmentObject(viewModel)
         }
         .sheet(isPresented: $showingShareSheet) {
             ShareSheet(items: shareSheetItems)

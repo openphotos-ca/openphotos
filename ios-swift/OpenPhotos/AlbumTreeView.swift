@@ -10,7 +10,6 @@ struct AlbumTreeView: View {
     @State private var expandedAlbums: Set<Int64> = []
     @State private var isCreatingAlbum: Bool = false
     @State private var showAddSheet: Bool = false
-    @State private var addParentId: Int64? = nil
     @State private var showDeleteAlert: Bool = false
     @State private var pendingDeleteId: Int64? = nil
     @State private var pendingDeleteName: String = ""
@@ -18,14 +17,17 @@ struct AlbumTreeView: View {
     let onAlbumSelected: ((Int64) -> Void)?
     let onAlbumsChanged: (() -> Void)?
     let onAlbumCreated: ((Int64) -> Void)?
+    let pickerOnly: Bool
     
     init(isPresented: Binding<Bool>, 
          selectedAlbumId: Binding<Int64?>,
+         pickerOnly: Bool = false,
          onAlbumSelected: ((Int64) -> Void)? = nil,
          onAlbumsChanged: (() -> Void)? = nil,
          onAlbumCreated: ((Int64) -> Void)? = nil) {
         self._isPresented = isPresented
         self._selectedAlbumId = selectedAlbumId
+        self.pickerOnly = pickerOnly
         self.onAlbumSelected = onAlbumSelected
         self.onAlbumsChanged = onAlbumsChanged
         self.onAlbumCreated = onAlbumCreated
@@ -37,17 +39,40 @@ struct AlbumTreeView: View {
                 // Album tree
                 ScrollView {
                     VStack(alignment: .leading, spacing: 2) {
+                        // Root row with add button (iOS Photos does not support nested album creation)
+                        HStack(spacing: 12) {
+                            Image(systemName: "house.fill")
+                                .foregroundColor(.blue)
+                                .frame(width: 24, height: 24)
+                                .padding(.leading, 12)
+                            Text("Root")
+                                .font(.system(size: 15))
+                                .foregroundColor(.primary)
+                            Spacer()
+                            if !pickerOnly {
+                                Button {
+                                    newAlbumName = ""
+                                    showAddSheet = true
+                                } label: {
+                                    Image(systemName: "plus.circle.fill")
+                                        .font(.system(size: 22, weight: .semibold))
+                                        .foregroundColor(.accentColor)
+                                }
+                                .buttonStyle(PlainButtonStyle())
+                                .padding(.trailing, 12)
+                            }
+                        }
+                        .padding(.vertical, 8)
+
+                        Divider()
+
                         ForEach(albumTree, id: \.id) { node in
                             AlbumTreeRow(
                                 node: node,
                                 selectedAlbumId: $selectedAlbumId,
                                 expandedAlbums: $expandedAlbums,
                                 onSelect: selectAlbum,
-                                onAddChild: { parentId in
-                                    addParentId = parentId
-                                    newAlbumName = ""
-                                    showAddSheet = true
-                                },
+                                pickerOnly: pickerOnly,
                                 onDelete: { albumId, name in
                                     pendingDeleteId = albumId
                                     pendingDeleteName = name
@@ -112,10 +137,10 @@ struct AlbumTreeView: View {
                         .buttonStyle(BorderedButtonStyle())
                     Spacer()
                     Button("Create") {
-                        createNewAlbumUnder(addParentId)
+                        createNewAlbum()
                     }
                     .buttonStyle(BorderedProminentButtonStyle())
-                    .disabled(newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .disabled(newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || isCreatingAlbum)
                 }
                 .padding()
             }
@@ -124,21 +149,27 @@ struct AlbumTreeView: View {
         // Delete confirmation
         .alert("Delete \(pendingDeleteName)?", isPresented: $showDeleteAlert) {
             Button("Delete", role: .destructive) {
-                if let id = pendingDeleteId {
-                    _ = AlbumService.shared.deleteAlbum(albumId: id)
-                    loadAlbumTree()
-                    if selectedAlbumId == id { selectedAlbumId = nil }
-                    onAlbumsChanged?()
-                }
+                let id = pendingDeleteId
                 pendingDeleteId = nil
                 pendingDeleteName = ""
+                guard let deleteId = id else { return }
+                let shouldClearSelection = (selectedAlbumId == deleteId)
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let ok = AlbumService.shared.deleteAlbum(albumId: deleteId)
+                    DispatchQueue.main.async {
+                        guard ok else { return }
+                        loadAlbumTree()
+                        if shouldClearSelection { selectedAlbumId = nil }
+                        onAlbumsChanged?()
+                    }
+                }
             }
             Button("Cancel", role: .cancel) {
                 pendingDeleteId = nil
                 pendingDeleteName = ""
             }
         } message: {
-            Text("This removes the album and its sub‑albums. Photos are not deleted.")
+            Text("This removes the album from OpenPhotos and deletes the iPhone system album too. Photos are not deleted.")
         }
     }
     
@@ -158,20 +189,25 @@ struct AlbumTreeView: View {
         }
     }
     
-    private func createNewAlbumUnder(_ parentId: Int64?) {
+    private func createNewAlbum() {
         let name = newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty else { return }
+        guard !isCreatingAlbum else { return }
         isCreatingAlbum = true
-        if let album = AlbumService.shared.createAlbum(name: name, description: nil, parentId: parentId) {
-            showAddSheet = false
-            newAlbumName = ""
-            loadAlbumTree()
-            if let pid = album.parentId { expandedAlbums.insert(pid) }
-            selectedAlbumId = album.id
-            onAlbumsChanged?()
-            onAlbumCreated?(album.id)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let created = AlbumService.shared.createAlbum(name: name, description: nil, parentId: nil)
+            DispatchQueue.main.async {
+                defer { isCreatingAlbum = false }
+                guard let album = created else { return }
+                showAddSheet = false
+                newAlbumName = ""
+                loadAlbumTree()
+                if let pid = album.parentId { expandedAlbums.insert(pid) }
+                selectedAlbumId = album.id
+                onAlbumsChanged?()
+                onAlbumCreated?(album.id)
+            }
         }
-        isCreatingAlbum = false
     }
     
     private func selectAlbum(_ albumId: Int64) {
@@ -184,7 +220,7 @@ struct AlbumTreeRow: View {
     @Binding var selectedAlbumId: Int64?
     @Binding var expandedAlbums: Set<Int64>
     let onSelect: (Int64) -> Void
-    let onAddChild: (Int64) -> Void
+    let pickerOnly: Bool
     let onDelete: (Int64, String) -> Void
     
     private var isExpanded: Bool {
@@ -245,19 +281,8 @@ struct AlbumTreeRow: View {
                     
                     Spacer()
                     // Trailing actions when selected
-                    if selectedAlbumId == node.id {
+                    if !pickerOnly && selectedAlbumId == node.id {
                         HStack(spacing: 10) {
-                            // Add child (disabled for live albums)
-                            Button {
-                                onAddChild(node.id)
-                            } label: {
-                                Image(systemName: "plus.circle.fill")
-                                    .font(.system(size: 20, weight: .semibold))
-                            }
-                            .buttonStyle(PlainButtonStyle())
-                            .disabled(node.album.isLive)
-                            .opacity(node.album.isLive ? 0.4 : 1.0)
-                            
                             // Delete album (allowed for live albums)
                             Button {
                                 onDelete(node.id, node.album.name)
@@ -290,7 +315,7 @@ struct AlbumTreeRow: View {
                             selectedAlbumId: $selectedAlbumId,
                             expandedAlbums: $expandedAlbums,
                             onSelect: onSelect,
-                            onAddChild: onAddChild,
+                            pickerOnly: pickerOnly,
                             onDelete: onDelete
                         )
                     }

@@ -585,7 +585,10 @@ impl AuthService {
                     .ok()
             });
 
-        conn.execute("DELETE FROM sessions WHERE token_hash = ?", params![&token_hash])?;
+        conn.execute(
+            "DELETE FROM sessions WHERE token_hash = ?",
+            params![&token_hash],
+        )?;
 
         if let Some(user_id) = internal_user_id {
             let _ = conn.execute(
