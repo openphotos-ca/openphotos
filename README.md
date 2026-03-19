@@ -23,6 +23,8 @@ For the mobile app, use `https://demo.openphotos.ca` for the Server Endpoint URL
 
 - Rust server binaries: `openphotos` + TUS sidecar `rustus`
 - Static web app: `web-photos`
+- Android app source: `android-java`
+- Android release helper: `scripts/build_android_installer.sh`
 
 ## Download Models (Before Build)
 
@@ -82,6 +84,48 @@ Build outputs:
 Build output:
 
 - `web-photos/out`
+
+## Build Android App
+
+The exported source includes the Android project under `android-java`.
+
+Before building, make sure the Android SDK is discoverable either by:
+
+- setting `ANDROID_HOME` or `ANDROID_SDK_ROOT`, or
+- creating `android-java/local.properties` with `sdk.dir=/absolute/path/to/Android/sdk`
+
+The export intentionally does not include `android-java/local.properties` because that file is machine-specific.
+
+Build a debug APK:
+
+```bash
+cd android-java
+./gradlew :app:assembleDebug
+```
+
+Build output:
+
+- `android-java/app/build/outputs/apk/debug/app-debug.apk`
+
+Optional release APK helper:
+
+```bash
+scripts/build_android_installer.sh
+```
+
+The helper tries `ANDROID_HOME` / `ANDROID_SDK_ROOT` first, then common Android SDK install locations, and writes `android-java/local.properties` automatically when needed.
+It always produces an installable signed release APK.
+If `ANDROID_KEYSTORE_*` env vars are not provided, it auto-generates and reuses:
+
+```bash
+android-java/.openphotos-signing/openphotos-auto-release.jks
+```
+
+Back up that keystore file. Future app updates must use the same signing key.
+
+Build output:
+
+- `dist/android-packages/openphotos-android-release.apk`
 
 ## Start Servers (macOS, Linux, Windows)
 
