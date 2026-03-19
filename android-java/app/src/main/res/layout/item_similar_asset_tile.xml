@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:padding="4dp">
+
+    <ImageView
+        android:id="@+id/img_asset"
+        android:layout_width="match_parent"
+        android:layout_height="110dp"
+        android:background="@color/app_placeholder"
+        android:scaleType="centerCrop" />
+
+    <TextView
+        android:id="@+id/tv_check"
+        android:layout_width="22dp"
+        android:layout_height="22dp"
+        android:layout_gravity="top|start"
+        android:layout_margin="8dp"
+        android:background="@drawable/bg_manage_faces_check_badge"
+        android:gravity="center"
+        android:text="✓"
+        android:textColor="@color/colorOnPrimary"
+        android:textSize="11sp"
+        android:textStyle="bold"
+        android:visibility="gone" />
+</FrameLayout>

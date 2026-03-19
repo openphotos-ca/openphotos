@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8"?>
+<navigation xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/nav_graph"
+    app:startDestination="@id/localFragment">
+
+    <fragment
+        android:id="@+id/localFragment"
+        android:name="ca.openphotos.android.ui.LocalPhotosFragment"
+        android:label="Photos" />
+
+    <fragment
+        android:id="@+id/serverHostFragment"
+        android:name="ca.openphotos.android.ui.ServerHostFragment"
+        android:label="Photos" >
+        <argument android:name="initialTab" android:defaultValue="0" app:argType="integer" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/serverLoginFragment"
+        android:name="ca.openphotos.android.ui.ServerLoginFragment"
+        android:label="Login" />
+
+    <fragment
+        android:id="@+id/settingsFragment"
+        android:name="ca.openphotos.android.ui.SettingsFragment"
+        android:label="Settings" />
+
+    <fragment
+        android:id="@+id/securitySettingsFragment"
+        android:name="ca.openphotos.android.ui.SecuritySettingsFragment"
+        android:label="Security" />
+
+    <fragment
+        android:id="@+id/changePasswordFragment"
+        android:name="ca.openphotos.android.ui.ChangePasswordFragment"
+        android:label="Change Password" />
+
+    <fragment
+        android:id="@+id/syncFragment"
+        android:name="ca.openphotos.android.ui.SyncFragment"
+        android:label="Sync" />
+
+    <fragment
+        android:id="@+id/syncAlbumsFragment"
+        android:name="ca.openphotos.android.ui.SyncAlbumsFragment"
+        android:label="Selected Albums" />
+
+    <fragment
+        android:id="@+id/uploadsFragment"
+        android:name="ca.openphotos.android.ui.UploadsFragment"
+        android:label="Uploads" />
+
+    <fragment
+        android:id="@+id/backgroundTasksFragment"
+        android:name="ca.openphotos.android.ui.BackgroundTasksFragment"
+        android:label="Background Tasks" />
+
+    <fragment
+        android:id="@+id/viewerFragment"
+        android:name="ca.openphotos.android.ui.ViewerFragment"
+        android:label="Viewer">
+        <argument android:name="uri" android:defaultValue="" app:argType="string" />
+        <argument android:name="isServer" android:defaultValue="false" app:argType="boolean" />
+        <argument android:name="assetId" android:defaultValue="" app:argType="string" />
+    </fragment>
+
+    <fragment
+        android:id="@+id/albumDetailFragment"
+        android:name="ca.openphotos.android.ui.AlbumDetailFragment"
+        android:label="Album" >
+        <argument android:name="album_id" android:defaultValue="0" app:argType="integer" />
+    </fragment>
+
+</navigation>

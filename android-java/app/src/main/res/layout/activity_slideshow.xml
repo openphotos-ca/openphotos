@@ -1,0 +1,149 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Full-screen slideshow activity layout with crossfade transitions.
+  - Black background for immersive viewing
+  - Dual ImageView layers for smooth crossfade animation
+  - Top control bar with close, counter, and speed control
+  - Auto-hide controls for clean presentation
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="#000000"
+    android:fitsSystemWindows="false">
+
+    <!-- Current image layer (base layer) -->
+    <ImageView
+        android:id="@+id/image_current"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:contentDescription="Current photo" />
+
+    <!-- Next image layer (for crossfade transitions) -->
+    <ImageView
+        android:id="@+id/image_next"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:scaleType="fitCenter"
+        android:alpha="0"
+        android:contentDescription="Next photo" />
+
+    <!-- Loading indicator (shown while images are loading) -->
+    <ProgressBar
+        android:id="@+id/progress"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:indeterminateTint="#FFFFFF"
+        android:visibility="gone" />
+
+    <!-- Top control bar (auto-hides after 3 seconds) -->
+    <LinearLayout
+        android:id="@+id/control_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:orientation="vertical"
+        android:background="@android:color/transparent"
+        android:paddingTop="48dp"
+        android:paddingBottom="12dp"
+        android:elevation="10dp">
+
+        <!-- Top row: close, counter, speed -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingLeft="16dp"
+            android:paddingRight="16dp">
+
+            <!-- Close button -->
+            <ImageButton
+                android:id="@+id/btn_close"
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:background="?attr/selectableItemBackgroundBorderless"
+                android:src="@android:drawable/ic_menu_close_clear_cancel"
+                android:tint="#FFFFFF"
+                android:contentDescription="Close slideshow" />
+
+            <!-- Spacer -->
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <!-- Photo counter (e.g., "5 / 243") -->
+            <TextView
+                android:id="@+id/text_counter"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:paddingLeft="14dp"
+                android:paddingRight="14dp"
+                android:paddingTop="6dp"
+                android:paddingBottom="6dp"
+                android:background="@drawable/rounded_background_dark"
+                android:textColor="#FFFFFF"
+                android:textSize="14sp"
+                android:fontFamily="sans-serif-medium"
+                android:text="1 / 1"
+                android:gravity="center" />
+
+            <!-- Spacer -->
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <!-- Speed control button (3s/5s/10s) -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_speed"
+                style="@style/Widget.MaterialComponents.Button"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:minWidth="56dp"
+                android:text="5s"
+                android:textSize="14sp"
+                android:textColor="#FFFFFF"
+                android:backgroundTint="#4D6699FF"
+                android:elevation="2dp"
+                android:stateListAnimator="@null"
+                android:contentDescription="Change slide duration" />
+        </LinearLayout>
+
+        <!-- Play/pause indicator -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center_horizontal"
+            android:layout_marginTop="8dp"
+            android:orientation="horizontal"
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp"
+            android:paddingTop="4dp"
+            android:paddingBottom="4dp"
+            android:background="@drawable/rounded_background_dark"
+            android:gravity="center_vertical">
+
+            <ImageView
+                android:id="@+id/icon_play_pause"
+                android:layout_width="14dp"
+                android:layout_height="14dp"
+                android:src="@android:drawable/ic_media_play"
+                android:tint="#FFFFFF"
+                android:contentDescription="Playback status" />
+
+            <TextView
+                android:id="@+id/text_status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginLeft="6dp"
+                android:textColor="#FFFFFF"
+                android:textSize="12sp"
+                android:text="Playing" />
+        </LinearLayout>
+    </LinearLayout>
+</FrameLayout>

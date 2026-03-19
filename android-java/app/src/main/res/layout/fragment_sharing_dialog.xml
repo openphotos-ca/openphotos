@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/app_surface"
+    android:paddingTop="10dp"
+    android:paddingBottom="6dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="6dp"
+        android:paddingBottom="6dp">
+
+        <ImageButton
+            android:id="@+id/btn_close"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/bg_icon_circle_light"
+            android:contentDescription="Close"
+            android:padding="8dp"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:tint="@color/app_text_primary" />
+
+        <TextView
+            android:id="@+id/tv_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:text="Sharing"
+            android:textColor="@color/app_text_primary"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <ImageButton
+            android:id="@+id/btn_add"
+            android:layout_width="44dp"
+            android:layout_height="44dp"
+            android:background="@drawable/bg_icon_circle_light"
+            android:contentDescription="Add"
+            android:padding="8dp"
+            android:src="@android:drawable/ic_input_add"
+            android:tint="@color/app_text_primary" />
+    </LinearLayout>
+
+    <com.google.android.material.tabs.TabLayout
+        android:id="@+id/sharing_tabs"
+        android:layout_width="match_parent"
+        android:layout_height="40dp"
+        android:layout_marginStart="16dp"
+        android:layout_marginEnd="16dp"
+        android:background="@drawable/bg_segmented_tabs"
+        app:tabGravity="fill"
+        app:tabIndicator="@drawable/bg_segmented_tab_indicator"
+        app:tabIndicatorFullWidth="true"
+        app:tabIndicatorHeight="0dp"
+        app:tabInlineLabel="true"
+        app:tabMode="fixed"
+        app:tabPaddingEnd="2dp"
+        app:tabPaddingStart="2dp"
+        app:tabRippleColor="@android:color/transparent"
+        app:tabSelectedTextColor="@color/app_text_primary"
+        app:tabTextColor="@color/app_text_secondary" />
+
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/sharing_pager"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:layout_marginTop="4dp" />
+
+</LinearLayout>

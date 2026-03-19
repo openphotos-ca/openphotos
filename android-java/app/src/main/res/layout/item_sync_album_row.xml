@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/row_root"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:gravity="center_vertical"
+    android:minHeight="48dp"
+    android:orientation="horizontal"
+    android:paddingStart="6dp"
+    android:paddingTop="2dp"
+    android:paddingEnd="4dp"
+    android:paddingBottom="2dp">
+
+    <ImageButton
+        android:id="@+id/btn_row_expand"
+        android:layout_width="28dp"
+        android:layout_height="28dp"
+        android:background="@android:color/transparent"
+        android:contentDescription="Expand"
+        android:padding="4dp"
+        android:src="@android:drawable/arrow_down_float"
+        android:tint="@color/app_lock_inactive" />
+
+    <TextView
+        android:id="@+id/tv_row_name"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:ellipsize="end"
+        android:maxLines="1"
+        android:text="Folder"
+        android:textColor="@color/app_text_primary"
+        android:textSize="15sp" />
+
+    <ImageButton
+        android:id="@+id/btn_row_lock"
+        android:layout_width="34dp"
+        android:layout_height="34dp"
+        android:layout_marginEnd="2dp"
+        android:background="@android:color/transparent"
+        android:contentDescription="Toggle lock"
+        android:padding="6dp"
+        android:src="@android:drawable/ic_lock_lock"
+        android:tint="@color/app_lock_inactive" />
+
+    <com.google.android.material.switchmaterial.SwitchMaterial
+        android:id="@+id/sw_row_sync"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content" />
+
+    <ImageButton
+        android:id="@+id/btn_row_more"
+        android:layout_width="30dp"
+        android:layout_height="30dp"
+        android:background="@android:color/transparent"
+        android:contentDescription="More"
+        android:padding="4dp"
+        android:src="@android:drawable/ic_menu_more"
+        android:tint="@color/app_lock_inactive" />
+
+</LinearLayout>

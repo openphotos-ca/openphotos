@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:layout_margin="2dp">
+
+    <ImageView
+        android:id="@+id/image"
+        android:layout_width="match_parent"
+        android:layout_height="160dp"
+        android:scaleType="centerCrop"
+        android:background="@color/app_placeholder"
+        android:transitionName="hero_image"/>
+
+    <TextView
+        android:id="@+id/label"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_margin="6dp"
+        android:background="#66000000"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        android:padding="4dp"
+        android:text=""/>
+
+    <TextView
+        android:id="@+id/badge_locked"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="LOCKED"
+        android:background="#803700B3"
+        android:textColor="#FFFFFF"
+        android:textSize="10sp"
+        android:padding="4dp"
+        android:layout_gravity="top|end"
+        android:layout_margin="6dp"
+        android:visibility="gone"/>
+
+    <TextView
+        android:id="@+id/badge_rating"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="★"
+        android:textColor="#FFFFFF"
+        android:textSize="12sp"
+        android:padding="4dp"
+        android:background="#66000000"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="6dp"
+        android:visibility="gone"/>
+
+    <LinearLayout
+        android:id="@+id/rating_overlay"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:paddingTop="4dp"
+        android:paddingBottom="4dp"
+        android:background="#66000000"
+        android:visibility="gone">
+        <TextView android:id="@+id/star_1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textColor="#FFFFFFFF" android:textSize="18sp" android:padding="2dp"/>
+        <TextView android:id="@+id/star_2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textColor="#FFFFFFFF" android:textSize="18sp" android:padding="2dp"/>
+        <TextView android:id="@+id/star_3" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textColor="#FFFFFFFF" android:textSize="18sp" android:padding="2dp"/>
+        <TextView android:id="@+id/star_4" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textColor="#FFFFFFFF" android:textSize="18sp" android:padding="2dp"/>
+        <TextView android:id="@+id/star_5" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textColor="#FFFFFFFF" android:textSize="18sp" android:padding="2dp"/>
+    </LinearLayout>
+
+    <ImageView
+        android:id="@+id/badge_selected"
+        android:layout_width="24dp"
+        android:layout_height="24dp"
+        android:layout_gravity="top|start"
+        android:layout_margin="6dp"
+        android:background="@color/app_selection_bg"
+        android:padding="4dp"
+        android:src="@android:drawable/checkbox_on_background"
+        android:visibility="gone"/>
+
+    <ImageView
+        android:id="@+id/badge_cloud"
+        android:layout_width="18dp"
+        android:layout_height="18dp"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="8dp"
+        android:layout_marginEnd="8dp"
+        android:alpha="0.98"
+        android:src="@drawable/ic_cloud_backed"
+        android:visibility="gone" />
+
+    <TextView
+        android:id="@+id/badge_duration"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|start"
+        android:layout_margin="6dp"
+        android:background="#66000000"
+        android:paddingStart="5dp"
+        android:paddingTop="2dp"
+        android:paddingEnd="5dp"
+        android:paddingBottom="2dp"
+        android:text="0:00"
+        android:textColor="#FFFFFF"
+        android:textSize="11sp"
+        android:visibility="gone" />
+
+</FrameLayout>

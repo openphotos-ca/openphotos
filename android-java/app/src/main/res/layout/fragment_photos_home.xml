@@ -1,0 +1,431 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/app_background">
+
+    <!-- Content: SwipeRefresh + RecyclerView. PaddingTop is controlled in code to match header height when shown. -->
+    <androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+        android:id="@+id/swipe"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/grid"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false"
+            android:paddingLeft="12dp"
+            android:paddingRight="12dp"
+            android:paddingBottom="12dp"/>
+    </androidx.swiperefreshlayout.widget.SwipeRefreshLayout>
+
+    <!-- Empty/Error helper (overlay) -->
+    <TextView
+        android:id="@+id/empty"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:padding="24dp"
+        android:text="No items"
+        android:gravity="center"
+        android:textColor="@color/app_text_secondary"
+        android:visibility="gone"/>
+
+    <!-- Overlay header container holding all rows above the grid. Translated in/out on scroll. -->
+    <LinearLayout
+        android:id="@+id/photos_header_container"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@color/app_surface"
+        android:elevation="4dp">
+
+        <!-- Row 2: Actions bar (no title) -->
+        <LinearLayout
+            android:id="@+id/row_actions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:paddingStart="12dp"
+            android:paddingEnd="12dp"
+            android:paddingTop="1dp"
+            android:paddingBottom="0dp"
+            android:gravity="center_vertical">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_search"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Search"
+                app:icon="@android:drawable/ic_menu_search"
+                app:iconTint="@color/app_text_primary"/>
+
+            <!-- Inline search field (hidden by default). Single line, expands to fill space. -->
+            <EditText
+                android:id="@+id/search_field"
+                android:layout_width="0dp"
+                android:layout_height="36dp"
+                android:layout_weight="1"
+                android:layout_marginStart="8dp"
+                android:hint="Search photos"
+                android:maxLength="255"
+                android:singleLine="true"
+                android:maxLines="1"
+                android:ellipsize="end"
+                android:includeFontPadding="false"
+                android:paddingTop="4dp"
+                android:paddingBottom="4dp"
+                android:background="@android:color/transparent"
+                android:imeOptions="actionSearch"
+                android:textColor="@color/app_text_primary"
+                android:textColorHint="@color/app_text_secondary"
+                android:visibility="gone"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_sort"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Sort"
+                app:icon="@android:drawable/ic_menu_sort_by_size"
+                app:iconTint="@color/app_text_primary"/>
+
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/toggle_view_mode"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="8dp"
+                android:layout_marginEnd="8dp"
+                android:layout_weight="1"
+                app:singleSelection="true"
+                app:selectionRequired="true">
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_grid"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:contentDescription="Grid"
+                    app:icon="@android:drawable/ic_menu_gallery"
+                    app:iconTint="@color/app_text_primary"
+                    app:iconPadding="0dp"
+                    app:iconGravity="textStart"/>
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/btn_timeline"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:contentDescription="Timeline"
+                    app:icon="@android:drawable/ic_menu_agenda"
+                    app:iconTint="@color/app_text_primary"
+                    app:iconPadding="0dp"
+                    app:iconGravity="textStart"/>
+            </com.google.android.material.button.MaterialButtonToggleGroup>
+
+            <!-- Submit button (magnifier icon) at far right -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_search_submit"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_gravity="end"
+                android:contentDescription="Submit search"
+                android:visibility="gone"
+                app:icon="@android:drawable/ic_menu_search"
+                app:iconTint="@color/app_text_primary"/>
+
+            <View
+                android:id="@+id/spacer_actions"
+                android:layout_width="4dp"
+                android:layout_height="1dp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_select"
+                style="@style/Widget.Material3.Button.TextButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Select"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_more"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="More"
+                app:icon="@drawable/ic_more_vert_24"
+                app:iconTint="@color/app_text_primary"/>
+        </LinearLayout>
+
+        <!-- Row 3: Filters + Album chips (scrollable) -->
+        <LinearLayout
+            android:id="@+id/row_filters_albums"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
+            android:gravity="center_vertical">
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_filter"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Filter"
+                app:icon="@drawable/ic_filter_ios"
+                app:iconTint="@color/app_text_primary"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_albums"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Albums"
+                app:icon="@drawable/ic_tree_ios"
+                app:iconTint="@color/app_text_primary"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_favorites"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Favorites"
+                app:icon="@drawable/ic_favorite_ios"
+                app:iconTint="@color/app_error"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_locked"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:contentDescription="Locked"
+                app:icon="@android:drawable/ic_lock_idle_lock"
+                app:iconTint="@color/app_text_primary"/>
+
+            <HorizontalScrollView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:paddingStart="4dp">
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/albums_chips"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </HorizontalScrollView>
+        </LinearLayout>
+
+        <!-- Active Filter Row: applied chips with clear-all -->
+        <RelativeLayout
+            android:id="@+id/row_active_filters"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            android:paddingTop="0dp"
+            android:paddingBottom="0dp"
+            android:visibility="gone">
+
+            <HorizontalScrollView
+                android:id="@+id/active_filter_scroll"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_toStartOf="@+id/btn_clear_all_filters"
+                android:scrollbars="none">
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/active_filter_chips"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingEnd="48dp"/>
+            </HorizontalScrollView>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_clear_all_filters"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="40dp"
+                android:layout_height="40dp"
+                android:layout_alignParentEnd="true"
+                android:layout_centerVertical="true"
+                android:contentDescription="Clear all filters"
+                app:icon="@android:drawable/ic_menu_close_clear_cancel"/>
+        </RelativeLayout>
+
+        <!-- Row 4: Media segments All | Photos | Videos | Trash (+ reload). -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="1dp"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp">
+
+            <HorizontalScrollView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:fillViewport="false"
+                android:scrollbars="none">
+
+                <com.google.android.material.chip.ChipGroup
+                    android:id="@+id/chips_segments"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:paddingTop="0dp"
+                    android:paddingBottom="0dp"
+                    app:singleSelection="true"
+                    app:singleLine="true">
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chip_all"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="30dp"
+                        android:text="All"
+                        android:textSize="13sp"
+                        android:checked="true"
+                        app:checkedIconVisible="false"
+                        app:ensureMinTouchTargetSize="false"
+                        app:chipMinHeight="30dp"
+                        app:chipStartPadding="8dp"
+                        app:chipEndPadding="8dp"/>
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chip_photos"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="30dp"
+                        android:text="Photos"
+                        android:textSize="13sp"
+                        app:checkedIconVisible="false"
+                        app:ensureMinTouchTargetSize="false"
+                        app:chipMinHeight="30dp"
+                        app:chipStartPadding="8dp"
+                        app:chipEndPadding="8dp"/>
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chip_videos"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="30dp"
+                        android:text="Videos"
+                        android:textSize="13sp"
+                        app:checkedIconVisible="false"
+                        app:ensureMinTouchTargetSize="false"
+                        app:chipMinHeight="30dp"
+                        app:chipStartPadding="8dp"
+                        app:chipEndPadding="8dp"/>
+                    <com.google.android.material.chip.Chip
+                        android:id="@+id/chip_trash"
+                        style="@style/Widget.Material3.Chip.Filter"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:minHeight="30dp"
+                        android:text="Trash"
+                        android:textSize="13sp"
+                        app:closeIconVisible="false"
+                        app:closeIcon="@android:drawable/ic_menu_close_clear_cancel"
+                        app:checkedIconVisible="false"
+                        app:ensureMinTouchTargetSize="false"
+                        app:chipMinHeight="30dp"
+                        app:chipStartPadding="8dp"
+                        app:chipEndPadding="8dp"/>
+                </com.google.android.material.chip.ChipGroup>
+            </HorizontalScrollView>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_segments_reload"
+                style="@style/Widget.Material3.Button.IconButton"
+                android:layout_width="36dp"
+                android:layout_height="36dp"
+                android:contentDescription="Reload"
+                app:icon="@drawable/ic_refresh_24"
+                app:iconSize="20dp"
+                app:iconTint="@color/app_text_primary"/>
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- Floating "Years" pill (phones). Controlled from code. -->
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/btn_years"
+        style="@style/Widget.Material3.Button.TextButton"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|end"
+        android:layout_margin="16dp"
+        android:text="Years"
+        android:textAllCaps="false"
+        android:textColor="@color/app_text_primary"
+        android:paddingLeft="12dp"
+        android:paddingRight="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        app:cornerRadius="20dp"
+        android:backgroundTint="@color/app_surface"
+        android:elevation="4dp"
+        android:visibility="gone"/>
+
+    <!-- Right-side year rail (tablets, sw600dp+). Populated dynamically. -->
+    <LinearLayout
+        android:id="@+id/year_rail"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top|end"
+        android:layout_marginTop="100dp"
+        android:layout_marginEnd="8dp"
+        android:orientation="vertical"
+        android:background="@android:color/transparent"
+        android:visibility="gone"/>
+
+    <!-- Selection bar shown while in selection mode (above bottom tab bar in activity). -->
+    <LinearLayout
+        android:id="@+id/selection_bottom_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="@color/app_surface"
+        android:elevation="8dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:visibility="gone">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_select_all"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Select All" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_deselect_all"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Deselect All" />
+
+        <View
+            android:layout_width="0dp"
+            android:layout_height="0dp"
+            android:layout_weight="1" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_selection_actions"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Actions"
+            android:visibility="gone" />
+    </LinearLayout>
+
+</FrameLayout>

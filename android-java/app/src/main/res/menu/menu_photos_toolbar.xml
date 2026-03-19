@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+    <item
+        android:id="@+id/action_search"
+        android:title="Search"
+        android:icon="@android:drawable/ic_menu_search"
+        app:showAsAction="ifRoom"/>
+    <item
+        android:id="@+id/action_uploads"
+        android:title="Uploads"
+        android:icon="@android:drawable/stat_sys_upload"
+        app:showAsAction="ifRoom"/>
+    <item
+        android:id="@+id/action_grid"
+        android:title="Grid"
+        android:icon="@android:drawable/ic_menu_gallery"
+        app:showAsAction="ifRoom"/>
+    <item
+        android:id="@+id/action_select"
+        android:title="Select"
+        android:icon="@android:drawable/ic_menu_agenda"
+        app:showAsAction="ifRoom"/>
+</menu>
+

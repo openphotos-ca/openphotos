@@ -1,0 +1,3 @@
+rootProject.name = 'OpenPhotosAndroid'
+include ':app'
+

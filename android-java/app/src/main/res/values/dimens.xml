@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="spacing_8">8dp</dimen>
+    <dimen name="spacing_12">12dp</dimen>
+    <dimen name="spacing_16">16dp</dimen>
+    <dimen name="spacing_24">24dp</dimen>
+    <dimen name="grid_card_radius">12dp</dimen>
+    <dimen name="grid_badge_padding">4dp</dimen>
+    <dimen name="bottom_nav_min_height">56dp</dimen>
+    <dimen name="bottom_nav_icon_size">22dp</dimen>
+    <dimen name="bottom_nav_item_padding_top">10dp</dimen>
+    <!-- Base indent for album tree depth (multiplied by depth) -->
+    <dimen name="album_tree_indent_base">20dp</dimen>
+</resources>

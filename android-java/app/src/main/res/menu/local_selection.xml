@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<menu xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:id="@+id/action_upload"
+        android:title="Upload"
+        android:icon="@android:drawable/ic_menu_upload"
+        android:showAsAction="always" />
+    <item android:id="@+id/action_upload_locked"
+        android:title="Upload Locked"
+        android:icon="@android:drawable/ic_lock_lock"
+        android:showAsAction="always" />
+</menu>
+

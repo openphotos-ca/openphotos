@@ -1,0 +1,160 @@
+plugins {
+    id 'com.android.application'
+    id 'kotlin-android'
+    id 'kotlin-kapt'
+}
+
+def envOrNull = { String name ->
+    def value = System.getenv(name)
+    if (value == null) {
+        return null
+    }
+    value = value.trim()
+    return value.isEmpty() ? null : value
+}
+
+def releaseSigningVars = [
+    ANDROID_KEYSTORE_PATH    : envOrNull('ANDROID_KEYSTORE_PATH'),
+    ANDROID_KEYSTORE_PASSWORD: envOrNull('ANDROID_KEYSTORE_PASSWORD'),
+    ANDROID_KEY_ALIAS        : envOrNull('ANDROID_KEY_ALIAS'),
+    ANDROID_KEY_PASSWORD     : envOrNull('ANDROID_KEY_PASSWORD'),
+]
+
+def missingReleaseSigningVars = releaseSigningVars.findAll { entry -> entry.value == null }.keySet().toList()
+def releaseKeystoreFile = releaseSigningVars.ANDROID_KEYSTORE_PATH != null ? file(releaseSigningVars.ANDROID_KEYSTORE_PATH) : null
+
+android {
+    namespace 'ca.openphotos.android'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'ca.openphotos.android'
+        minSdk 30
+        targetSdk 34
+        versionCode 3
+        versionName '0.3.0'
+
+        testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
+    }
+
+    signingConfigs {
+        release {
+            if (releaseKeystoreFile != null) {
+                storeFile releaseKeystoreFile
+            }
+            storePassword releaseSigningVars.ANDROID_KEYSTORE_PASSWORD
+            keyAlias releaseSigningVars.ANDROID_KEY_ALIAS
+            keyPassword releaseSigningVars.ANDROID_KEY_PASSWORD
+        }
+    }
+
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            minifyEnabled false
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = '17'
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    // Use ViewPager2 1.1.0 for compatibility with latest Fragment libs
+    implementation 'androidx.viewpager2:viewpager2:1.1.0'
+
+    // Networking
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'com.squareup.moshi:moshi:1.15.1'
+    kapt 'com.squareup.moshi:moshi-kotlin-codegen:1.15.1'
+
+    // TUS client (Java) via JitPack
+    implementation 'com.github.tus:tus-java-client:0.4.3'
+
+    // Room
+    implementation 'androidx.room:room-runtime:2.6.1'
+    kapt 'androidx.room:room-compiler:2.6.1'
+    implementation 'androidx.room:room-ktx:2.6.1'
+
+    // WorkManager
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+
+    // Lifecycle (ViewModel + LiveData)
+    implementation 'androidx.lifecycle:lifecycle-viewmodel:2.8.6'
+    implementation 'androidx.lifecycle:lifecycle-livedata:2.8.6'
+    implementation 'androidx.lifecycle:lifecycle-runtime:2.8.6'
+
+    // Navigation
+    implementation 'androidx.navigation:navigation-fragment:2.8.3'
+    implementation 'androidx.navigation:navigation-ui:2.8.3'
+
+    // SwipeRefresh
+    implementation 'androidx.swiperefreshlayout:swiperefreshlayout:1.1.0'
+
+    // Glide
+    implementation 'com.github.bumptech.glide:glide:4.16.0'
+    kapt 'com.github.bumptech.glide:compiler:4.16.0'
+
+    // PhotoView (zoom/pan/double-tap) via JitPack
+    implementation 'com.github.chrisbanes:PhotoView:2.3.0'
+
+    // ExoPlayer for video playback controls
+    implementation 'com.google.android.exoplayer:exoplayer:2.19.1'
+
+    // Security + Biometrics
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    implementation 'androidx.biometric:biometric:1.2.0-alpha05'
+
+    // EXIF / metadata helpers
+    implementation 'androidx.exifinterface:exifinterface:1.3.7'
+
+    // libsodium (Argon2id) — placeholder dependency; wire JNI at integration time
+    implementation 'com.goterl:lazysodium-android:5.1.0@aar'
+    implementation 'net.java.dev.jna:jna:5.13.0@aar'
+
+    // JSON
+    implementation 'com.google.code.gson:gson:2.11.0'
+
+    // BouncyCastle for Argon2id (Java implementation)
+    implementation 'org.bouncycastle:bcprov-jdk15to18:1.78.1'
+
+    testImplementation 'junit:junit:4.13.2'
+    androidTestImplementation 'androidx.test.ext:junit:1.2.1'
+    androidTestImplementation 'androidx.test.espresso:espresso-core:3.6.1'
+}
+
+gradle.taskGraph.whenReady { taskGraph ->
+    boolean isReleaseBuildRequested = taskGraph.allTasks.any { task ->
+        task.path.toLowerCase().contains('release')
+    }
+    if (!isReleaseBuildRequested) {
+        return
+    }
+
+    if (!missingReleaseSigningVars.isEmpty()) {
+        throw new GradleException(
+            "Missing required Android release signing environment variables: " +
+                missingReleaseSigningVars.join(', ') +
+                ". Set ANDROID_KEYSTORE_PATH, ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS, and ANDROID_KEY_PASSWORD."
+        )
+    }
+
+    if (releaseKeystoreFile == null || !releaseKeystoreFile.exists()) {
+        throw new GradleException(
+            "ANDROID_KEYSTORE_PATH does not point to an existing keystore file: " +
+                releaseSigningVars.ANDROID_KEYSTORE_PATH
+        )
+    }
+}

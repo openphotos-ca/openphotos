@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/pager"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="44dp" />
+
+    <com.google.android.exoplayer2.ui.PlayerView
+        android:id="@+id/player_view"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:layout_marginTop="44dp"
+        android:visibility="gone"
+        android:background="#FF000000"
+        android:keepScreenOn="true" />
+
+    <!-- Place top bar AFTER pager so it sits on top and receives touches -->
+    <LinearLayout
+        android:id="@+id/top_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:padding="4dp"
+        android:layout_gravity="top"
+        android:elevation="8dp"
+        android:background="#66000000">
+        <ImageButton
+            android:id="@+id/btn_close"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:layout_marginEnd="6dp"
+            android:background="@android:color/transparent"
+            android:src="@android:drawable/ic_menu_close_clear_cancel"
+            android:tint="#FFFFFF"
+            android:contentDescription="Close"/>
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:maxLines="1"
+            android:ellipsize="end"
+            android:text=""/>
+        <ImageButton
+            android:id="@+id/btn_more"
+            android:layout_width="36dp"
+            android:layout_height="36dp"
+            android:src="@drawable/ic_more_vert_24"
+            android:tint="#FFFFFF"
+            android:background="@android:color/transparent"
+            android:contentDescription="More"/>
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/info"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_margin="16dp"
+        android:textColor="#FFFFFF"
+        android:background="#66000000"
+        android:padding="8dp"
+        android:text=""
+        android:visibility="gone"/>
+
+    <!-- Video controls overlay (shown when current item is a video) -->
+    <LinearLayout
+        android:id="@+id/video_controls"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:padding="12dp"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:background="#66000000"
+        android:visibility="gone">
+        <ImageButton
+            android:id="@+id/btn_play_pause"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@android:color/transparent"
+            android:src="@android:drawable/ic_media_play"
+            android:contentDescription="Play/Pause"/>
+        <ImageButton
+            android:id="@+id/btn_mute"
+            android:layout_width="40dp"
+            android:layout_height="40dp"
+            android:background="@android:color/transparent"
+            android:src="@android:drawable/ic_lock_silent_mode"
+            android:contentDescription="Mute"/>
+        <SeekBar
+            android:id="@+id/seek"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"/>
+    </LinearLayout>
+
+    <!-- Live badge (visible when is_live_photo and not playing) -->
+    <ImageButton
+        android:id="@+id/live_badge"
+        android:layout_width="34dp"
+        android:layout_height="34dp"
+        android:layout_marginStart="12dp"
+        android:layout_marginTop="56dp"
+        android:background="@android:color/transparent"
+        android:src="@drawable/ic_play_outline_24"
+        android:contentDescription="Play Live"
+        android:layout_gravity="top|start"
+        android:elevation="12dp"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone"/>
+
+</FrameLayout>

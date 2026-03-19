@@ -1,0 +1,185 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:orientation="vertical"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?android:colorBackground">
+
+    <!-- App bar: Clear all (left), centered title, Done (right) -->
+    <RelativeLayout
+        android:id="@+id/appbar"
+        android:layout_width="match_parent"
+        android:layout_height="56dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
+        android:gravity="center_vertical">
+
+        <TextView
+            android:id="@+id/btn_clear_all"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Clear all"
+            android:textStyle="bold"
+            android:textColor="@color/app_accent"
+            android:layout_alignParentStart="true"/>
+
+        <TextView
+            android:id="@+id/title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Filters"
+            android:textStyle="bold"
+            android:textSize="18sp"
+            android:layout_centerInParent="true"/>
+
+        <TextView
+            android:id="@+id/btn_done"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Done"
+            android:textStyle="bold"
+            android:textColor="@color/app_accent"
+            android:layout_alignParentEnd="true"/>
+    </RelativeLayout>
+
+    <ScrollView
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1">
+        <LinearLayout
+            android:orientation="vertical"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="12dp">
+
+            <!-- Faces section header -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Faces"
+                    android:textStyle="bold"/>
+                <TextView
+                    android:id="@+id/btn_manage_faces"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Manage"
+                    android:textColor="@color/app_accent"/>
+            </LinearLayout>
+
+            <!-- Faces grid container: height is set in code to show 3 rows -->
+            <androidx.recyclerview.widget.RecyclerView
+                android:id="@+id/faces_grid"
+                android:layout_width="match_parent"
+                android:layout_height="300dp"
+                android:layout_marginTop="8dp"
+                android:overScrollMode="never"/>
+
+            <!-- Time Range header -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginTop="16dp">
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Time Range"
+                    android:textStyle="bold"/>
+                <TextView
+                    android:id="@+id/btn_clear_dates"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Clear dates"
+                    android:textColor="@color/app_accent"/>
+            </LinearLayout>
+
+            <!-- Start/End pickers as rows -->
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:layout_marginTop="8dp">
+                <LinearLayout
+                    android:orientation="horizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:background="@android:color/transparent">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Start"/>
+                    <TextView android:id="@+id/date_start" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="" android:padding="6dp" android:background="@android:color/transparent" android:textStyle="bold"/>
+                </LinearLayout>
+                <LinearLayout
+                    android:orientation="horizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:background="@android:color/transparent">
+                    <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="End"/>
+                    <TextView android:id="@+id/date_end" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="" android:padding="6dp" android:background="@android:color/transparent" android:textStyle="bold"/>
+                </LinearLayout>
+            </LinearLayout>
+
+            <!-- Type -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Type" android:textStyle="bold" android:layout_marginTop="16dp"/>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Screenshots"/>
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/toggle_screenshots"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="Live Photos"/>
+                <com.google.android.material.switchmaterial.SwitchMaterial
+                    android:id="@+id/toggle_live"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" />
+            </LinearLayout>
+
+            <!-- Rating -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Rating" android:textStyle="bold" android:layout_marginTop="16dp"/>
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical">
+                <TextView android:id="@+id/star1" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textSize="20sp" android:textColor="@color/app_error" android:padding="6dp"/>
+                <TextView android:id="@+id/star2" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textSize="20sp" android:textColor="@color/app_error" android:padding="6dp"/>
+                <TextView android:id="@+id/star3" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textSize="20sp" android:textColor="@color/app_error" android:padding="6dp"/>
+                <TextView android:id="@+id/star4" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textSize="20sp" android:textColor="@color/app_error" android:padding="6dp"/>
+                <TextView android:id="@+id/star5" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="☆" android:textSize="20sp" android:textColor="@color/app_error" android:padding="6dp"/>
+                <TextView android:id="@+id/btn_clear_rating" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Clear" android:textColor="@color/app_text_secondary" android:paddingStart="12dp"/>
+            </LinearLayout>
+
+            <!-- Location (UI only) -->
+            <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Location" android:textStyle="bold" android:layout_marginTop="16dp"/>
+            <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical">
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Country"/>
+                <Spinner android:id="@+id/sp_country" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="Province/State" android:layout_marginTop="8dp"/>
+                <EditText android:id="@+id/et_region" android:layout_width="match_parent" android:layout_height="wrap_content" android:hint="Any"/>
+                <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="City" android:layout_marginTop="8dp"/>
+                <Spinner android:id="@+id/sp_city" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+            </LinearLayout>
+
+        </LinearLayout>
+    </ScrollView>
+
+</LinearLayout>

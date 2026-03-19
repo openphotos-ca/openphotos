@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Outlined pine tree icon (stacked triangle outlines + trunk outline). -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.0"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M12,4 L4,18 H20 Z"/>
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="0.9"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M12,8 L6,16 H18 Z"/>
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="0.8"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M12,6 L8.5,12 H15.5 Z"/>
+    <path
+        android:fillColor="@android:color/transparent"
+        android:strokeColor="#FF000000"
+        android:strokeWidth="1.0"
+        android:strokeLineJoin="round"
+        android:strokeLineCap="round"
+        android:pathData="M10.5,18 H13.5 V22 H10.5 Z"/>
+  </vector>
