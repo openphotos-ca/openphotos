@@ -69,11 +69,27 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private let tusProbeUpPendingThreshold: Int = 18
     private let tusProbeUpIntervalSeconds: TimeInterval = 75.0
     private let tusProbeHighWorkerHoldSeconds: TimeInterval = 35.0
+    // Tunnel uploads have been reliable below the ~350-400 KiB range in logs;
+    // keep foreground PATCH bodies comfortably under that ceiling.
+    private let foregroundTusChunkSizeBytes: Int = 256 * 1024
+    private let foregroundTusMediumChunkSizeBytes: Int = 512 * 1024
+    private let foregroundTusLargeChunkSizeBytes: Int = 1024 * 1024
+    private let foregroundTusAdaptiveMediumMaxChunkSizeBytes: Int = 1024 * 1024
+    private let foregroundTusAdaptiveLargeMaxChunkSizeBytes: Int = 2 * 1024 * 1024
+    private let foregroundTusMediumChunkThresholdBytes: Int64 = 24 * 1024 * 1024
+    // Promote 100 MB+ uploads into the larger adaptive profile so tunnel uploads
+    // spend less time paying per-PATCH overhead. The TUS client can still shrink
+    // chunks after a timeout if Cloudflare becomes unstable.
+    private let foregroundTusLargeChunkThresholdBytes: Int64 = 100 * 1024 * 1024
     private let tusPatchTimeoutSeconds: TimeInterval = 30.0
     private let tusPatchTimeoutDegradedSeconds: TimeInterval = 40.0
     private let tusPatchTimeoutPoorLinkSeconds: TimeInterval = 45.0
+    private let tusPatchTimeoutMediumUploadSeconds: TimeInterval = 60.0
+    private let tusPatchTimeoutLargeUploadSeconds: TimeInterval = 90.0
     private let tusPatchAdaptiveMinSamples: Int = 6
     private let tusMaxStallRecoveriesPerUpload: Int = 1
+    private let tusMediumUploadStallRecoveries: Int = 3
+    private let tusLargeUploadStallRecoveries: Int = 6
     private var tusConcurrencyState = TusConcurrencyState()
     // Limit export concurrency to avoid too many open files
     private let exportSemaphore = DispatchSemaphore(value: 3)
@@ -197,6 +213,14 @@ final class HybridUploadManager: NSObject, ObservableObject {
         case immediateOk
         case deferredQueued
         case failed
+    }
+
+    private struct TusUploadProfile {
+        let initialChunkSize: Int
+        let minimumChunkSize: Int
+        let maximumChunkSize: Int
+        let patchTimeoutSeconds: TimeInterval
+        let maxStallRecoveries: Int
     }
 
     private struct UploadPerfRunState {
@@ -345,6 +369,44 @@ final class HybridUploadManager: NSObject, ObservableObject {
             }
             return tusPatchTimeoutSeconds
         }
+    }
+
+    private func tusUploadProfile(for item: UploadItem) -> TusUploadProfile {
+        let baseTimeout = preferredTusPatchTimeoutSeconds()
+        guard !isExpensiveNetwork else {
+            return TusUploadProfile(
+                initialChunkSize: foregroundTusChunkSizeBytes,
+                minimumChunkSize: foregroundTusChunkSizeBytes,
+                maximumChunkSize: foregroundTusChunkSizeBytes,
+                patchTimeoutSeconds: baseTimeout,
+                maxStallRecoveries: tusMaxStallRecoveriesPerUpload
+            )
+        }
+        if item.totalBytes >= foregroundTusLargeChunkThresholdBytes {
+            return TusUploadProfile(
+                initialChunkSize: foregroundTusLargeChunkSizeBytes,
+                minimumChunkSize: foregroundTusChunkSizeBytes,
+                maximumChunkSize: foregroundTusAdaptiveLargeMaxChunkSizeBytes,
+                patchTimeoutSeconds: max(baseTimeout, tusPatchTimeoutLargeUploadSeconds),
+                maxStallRecoveries: tusLargeUploadStallRecoveries
+            )
+        }
+        if item.totalBytes >= foregroundTusMediumChunkThresholdBytes {
+            return TusUploadProfile(
+                initialChunkSize: foregroundTusMediumChunkSizeBytes,
+                minimumChunkSize: foregroundTusChunkSizeBytes,
+                maximumChunkSize: foregroundTusAdaptiveMediumMaxChunkSizeBytes,
+                patchTimeoutSeconds: max(baseTimeout, tusPatchTimeoutMediumUploadSeconds),
+                maxStallRecoveries: tusMediumUploadStallRecoveries
+            )
+        }
+        return TusUploadProfile(
+            initialChunkSize: foregroundTusChunkSizeBytes,
+            minimumChunkSize: foregroundTusChunkSizeBytes,
+            maximumChunkSize: foregroundTusChunkSizeBytes,
+            patchTimeoutSeconds: baseTimeout,
+            maxStallRecoveries: tusMaxStallRecoveriesPerUpload
+        )
     }
 
     private func pendingLiveComponents(forContentId contentId: String) -> Int {
@@ -970,7 +1032,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         guard let filesURL = URL(string: auth.serverURL + "/files") else { return }
         tusClient = TUSClient(baseURL: filesURL, headersProvider: { [weak self] in
             self?.auth.authHeader() ?? [:]
-        }, chunkSize: 9 * 1024 * 1024)
+        }, chunkSize: foregroundTusChunkSizeBytes)
 
         let effectiveAssets: [PHAsset] = AuthManager.shared.syncPhotosOnly
             ? assets.filter { $0.mediaType != .video }
@@ -2819,7 +2881,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
         let opStartedAt = perfNow()
         defer { trackLiveComponentSettledIfNeeded(item) }
         guard let tusClient else { return }
-        let patchTimeoutSeconds = preferredTusPatchTimeoutSeconds()
+        let uploadProfile = tusUploadProfile(for: item)
+        let patchTimeoutSeconds = uploadProfile.patchTimeoutSeconds
         if !isNetworkAvailable {
             print("[UPLOAD] Skipping TUS (offline): \(item.filename)")
             await update(itemID: item.id, status: .failed)
@@ -2835,7 +2898,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         print("[UPLOAD] Using TUS for: \(item.filename) size=\(item.totalBytes)")
         AppLog.debug(
             AppLog.upload,
-            "[PERF] tus-start filename=\(item.filename) size=\(item.totalBytes) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) pending=\(pendingTusCount()) workers=\(tusQueue.sync { activeTusWorkers }) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded()))"
+            "[PERF] tus-start filename=\(item.filename) size=\(item.totalBytes) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) pending=\(pendingTusCount()) workers=\(tusQueue.sync { activeTusWorkers }) chunk_bytes=\(uploadProfile.initialChunkSize) min_chunk_bytes=\(uploadProfile.minimumChunkSize) max_chunk_bytes=\(uploadProfile.maximumChunkSize) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded())) stall_recovery_budget=\(uploadProfile.maxStallRecoveries)"
         )
         await setUploading(item.id)
         SyncRepository.shared.markUploading(contentId: item.contentId)
@@ -2983,8 +3046,11 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     guard let self else { return true }
                     return self.tusQueue.sync { self.tusCancelFlags[item.id] ?? false }
                 },
+                initialChunkSize: uploadProfile.initialChunkSize,
+                minimumChunkSize: uploadProfile.minimumChunkSize,
+                maximumChunkSize: uploadProfile.maximumChunkSize,
                 patchTimeoutSeconds: patchTimeoutSeconds,
-                maxStallRecoveries: tusMaxStallRecoveriesPerUpload
+                maxStallRecoveries: uploadProfile.maxStallRecoveries
             )
             uploadSeconds = max(0, perfNow() - uploadStart)
             patchRetries = uploadResult.patchRetries
@@ -3031,7 +3097,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             SyncRepository.shared.deleteTusUploadURL(contentId: tusResumeKey(for: item))
             let totalSeconds = max(0, perfNow() - opStartedAt)
             let uploadedBytesEffective = max(0, item.totalBytes - resumeOffset)
-            let perfLine = "[PERF] tus-done filename=\(item.filename) status=\(verified ? "ok" : "verify_failed") size=\(item.totalBytes) resumed_offset=\(resumeOffset) resumed_url=\(usedPersistedResumeURL ? 1 : 0) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) create_ms=\(perfMs(createSeconds)) head_ms=\(perfMs(headSeconds)) head_skipped=\(headSkipped ? 1 : 0) upload_ms=\(perfMs(uploadSeconds)) verify_ms=\(perfMs(verifySeconds)) verify_mode=\(verifyMode) verify_deferred=\(verifyDeferred ? 1 : 0) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded())) patch_retries=\(patchRetries) patch_timeouts=\(patchTimeouts) stall_recoveries=\(stallRecoveries) total_ms=\(perfMs(totalSeconds)) upload_MBps=\(perfMBps(bytes: uploadedBytesEffective, seconds: max(uploadSeconds, 0.001)))"
+            let perfLine = "[PERF] tus-done filename=\(item.filename) status=\(verified ? "ok" : "verify_failed") size=\(item.totalBytes) resumed_offset=\(resumeOffset) resumed_url=\(usedPersistedResumeURL ? 1 : 0) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) create_ms=\(perfMs(createSeconds)) head_ms=\(perfMs(headSeconds)) head_skipped=\(headSkipped ? 1 : 0) upload_ms=\(perfMs(uploadSeconds)) verify_ms=\(perfMs(verifySeconds)) verify_mode=\(verifyMode) verify_deferred=\(verifyDeferred ? 1 : 0) chunk_bytes=\(uploadProfile.initialChunkSize) min_chunk_bytes=\(uploadProfile.minimumChunkSize) max_chunk_bytes=\(uploadProfile.maximumChunkSize) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded())) patch_retries=\(patchRetries) patch_timeouts=\(patchTimeouts) stall_recoveries=\(stallRecoveries) total_ms=\(perfMs(totalSeconds)) upload_MBps=\(perfMBps(bytes: uploadedBytesEffective, seconds: max(uploadSeconds, 0.001)))"
             AppLog.debug(AppLog.upload, perfLine)
             if uploadSeconds >= perfSlowUploadThresholdSeconds {
                 AppLog.info(AppLog.upload, perfLine)
@@ -3053,6 +3119,11 @@ final class HybridUploadManager: NSObject, ObservableObject {
             // Remove exported temp file on success
             do { try FileManager.default.removeItem(at: item.tempFileURL) } catch { }
         } catch {
+            if let uploadFailure = error as? TUSClient.UploadFailure {
+                patchRetries = uploadFailure.patchRetries
+                patchTimeouts = uploadFailure.patchTimeouts
+                stallRecoveries = uploadFailure.stallRecoveries
+            }
             let cancelled = tusQueue.sync { tusCancelFlags[item.id] ?? false }
             let totalSeconds = max(0, perfNow() - opStartedAt)
             if cancelled {
@@ -3089,7 +3160,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 }
             } else {
                 await update(itemID: item.id, status: .failed)
-                let msg = error.localizedDescription
+                let msg = (error as? TUSClient.UploadFailure)?.underlying.localizedDescription ?? error.localizedDescription
                 SyncRepository.shared.markFailed(contentId: item.contentId, error: msg)
                 print("[UPLOAD] TUS failed: \(item.filename) error=\(msg)")
                 perfRecordFailure()

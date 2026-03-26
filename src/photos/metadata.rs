@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::Photo;
+use crate::media_tools::{ffmpeg_command, ffprobe_command};
 use regex::Regex;
 
 // Debug EXIF logging removed after stabilization
@@ -397,7 +398,6 @@ fn decode_heic_libheif(path: &Path) -> Result<DynamicImage> {
 
 /// Decode a still image to a DynamicImage using ffmpeg CLI as a fallback.
 fn decode_still_via_ffmpeg(path: &Path) -> Result<DynamicImage> {
-    use std::process::Command;
     let input = path.to_string_lossy().to_string();
 
     // ffmpeg's HEIF demuxer may expose:
@@ -409,7 +409,7 @@ fn decode_still_via_ffmpeg(path: &Path) -> Result<DynamicImage> {
     //
     // Important: pass `-noautorotate` so orientation is applied exactly once by our EXIF logic in
     // `open_image_any` (avoids double-rotation when ffmpeg also applies displaymatrix transforms).
-    let probe = Command::new("ffprobe")
+    let probe = ffprobe_command()
         .args([
             "-v",
             "error",
@@ -489,7 +489,7 @@ fn decode_still_via_ffmpeg(path: &Path) -> Result<DynamicImage> {
                                 height
                             ));
 
-                            let out = Command::new("ffmpeg")
+                            let out = ffmpeg_command()
                                 .args([
                                     "-hide_banner",
                                     "-loglevel",
@@ -651,7 +651,7 @@ fn decode_still_via_ffmpeg(path: &Path) -> Result<DynamicImage> {
         "png".into(),
         "pipe:1".into(),
     ]);
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args(ff_args)
         .output()
         .map_err(|e| anyhow::anyhow!("Failed to run ffmpeg still-image decode: {}", e))?;
@@ -680,8 +680,7 @@ fn read_exif(path: &Path) -> Result<Exif> {
 
 /// Extract video metadata using ffprobe JSON output
 fn extract_video_metadata_ffprobe(photo: &mut Photo) -> Result<()> {
-    use std::process::Command;
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "quiet",

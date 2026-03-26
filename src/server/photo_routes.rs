@@ -18,6 +18,7 @@ use tracing::{debug, error, info, instrument};
 use crate::auth::types::User;
 use crate::database::embeddings; // for type visibility and search
 use crate::database::embeddings::{PhotoData, PhotoRecord};
+use crate::media_tools::ffmpeg_command;
 use crate::photos::metadata::extract_metadata;
 use crate::photos::metadata::open_image_any;
 use crate::photos::metadata::open_image_upright;
@@ -309,10 +310,8 @@ fn is_ios_supported_container_ext(ext_lc: &str) -> bool {
 }
 
 fn transcode_video_to_mp4(input_path: &StdPath, output_mp4: &StdPath) -> Result<(), anyhow::Error> {
-    use std::process::Command;
-
     // Fast path: try a pure remux (no re-encode). Works when the codecs are already MP4-compatible.
-    let out = Command::new("ffmpeg")
+    let out = ffmpeg_command()
         .args([
             "-hide_banner",
             "-loglevel",
@@ -339,7 +338,7 @@ fn transcode_video_to_mp4(input_path: &StdPath, output_mp4: &StdPath) -> Result<
     }
 
     // Fallback: re-encode to a widely supported iOS profile (H.264 + AAC).
-    let out = Command::new("ffmpeg")
+    let out = ffmpeg_command()
         .args([
             "-hide_banner",
             "-loglevel",
@@ -386,15 +385,13 @@ fn transcode_video_to_stream_mp4(
     input_path: &StdPath,
     output_mp4: &StdPath,
 ) -> Result<(), anyhow::Error> {
-    use std::process::Command;
-
     // Purpose: generate an iOS-friendly MP4 that is smoother to stream over real networks.
     //
     // Strategy:
     // - Re-encode to H.264 + AAC (widely supported by iOS AVPlayer).
     // - Downscale to <= 720p to reduce required throughput.
     // - Cap peak bitrate to avoid rebuffering on mobile/Wi‑Fi fluctuations.
-    let out = Command::new("ffmpeg")
+    let out = ffmpeg_command()
         .args([
             "-hide_banner",
             "-loglevel",
@@ -4976,9 +4973,8 @@ fn cli_transcode_mov_to_mp4(
     input_mov: &std::path::Path,
     output_mp4: &std::path::Path,
 ) -> Result<(), anyhow::Error> {
-    use std::process::Command;
     // Try remux copy first (fast)
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args([
             "-y",
             "-i",
@@ -4996,7 +4992,7 @@ fn cli_transcode_mov_to_mp4(
         _ => {}
     }
     // Fallback to re-encode to H.264
-    let status = Command::new("ffmpeg")
+    let status = ffmpeg_command()
         .args([
             "-y",
             "-i",

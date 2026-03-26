@@ -2,6 +2,7 @@ mod auth;
 mod clip;
 mod database;
 mod face_processing;
+mod media_tools;
 mod photos;
 mod server;
 mod video;
@@ -231,7 +232,7 @@ async fn main() -> Result<()> {
     }
 
     // Check presence of required external tools (ffprobe/ffmpeg)
-    fn tool_version(cmd: &str, args: &[&str]) -> Option<String> {
+    fn tool_version(cmd: &std::path::Path, args: &[&str]) -> Option<String> {
         std::process::Command::new(cmd)
             .args(args)
             .output()
@@ -244,11 +245,13 @@ async fn main() -> Result<()> {
                 }
             })
     }
-    let has_ffprobe = std::process::Command::new("ffprobe")
+    let ffprobe_path = crate::media_tools::ffprobe_path();
+    let ffmpeg_path = crate::media_tools::ffmpeg_path();
+    let has_ffprobe = std::process::Command::new(&ffprobe_path)
         .arg("-version")
         .output()
         .is_ok();
-    let has_ffmpeg = std::process::Command::new("ffmpeg")
+    let has_ffmpeg = std::process::Command::new(&ffmpeg_path)
         .arg("-version")
         .output()
         .is_ok();
@@ -256,17 +259,17 @@ async fn main() -> Result<()> {
         tracing::warn!(
             "ffprobe not found in PATH. Video metadata (duration/size/rotation) may be missing. See cmdtools.md for install instructions."
         );
-    } else if let Some(v) = tool_version("ffprobe", &["-version"]) {
+    } else if let Some(v) = tool_version(&ffprobe_path, &["-version"]) {
         let first = v.lines().next().unwrap_or("");
-        tracing::info!("ffprobe detected: {}", first);
+        tracing::info!("ffprobe detected at {}: {}", ffprobe_path.display(), first);
     }
     if !has_ffmpeg {
         tracing::warn!(
             "ffmpeg not found in PATH. Video poster extraction, HEIC fallback decode, and Live Photo remux may fail. See cmdtools.md for install instructions."
         );
-    } else if let Some(v) = tool_version("ffmpeg", &["-version"]) {
+    } else if let Some(v) = tool_version(&ffmpeg_path, &["-version"]) {
         let first = v.lines().next().unwrap_or("");
-        tracing::info!("ffmpeg detected: {}", first);
+        tracing::info!("ffmpeg detected at {}: {}", ffmpeg_path.display(), first);
     }
 
     // Use the default ClipConfig which is now configured for M-CLIP

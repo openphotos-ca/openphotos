@@ -2,6 +2,7 @@ pub mod auth;
 pub mod clip;
 pub mod database;
 pub mod face_processing;
+pub mod media_tools;
 pub mod photos;
 pub mod server;
 pub mod video;

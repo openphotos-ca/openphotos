@@ -1,9 +1,9 @@
-use axum::body::{Body, Bytes};
+use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::Response;
 use http_body_util::BodyExt as _;
-use hyper::{Request as HyperRequest, Response as HyperResponse};
+use hyper::Response as HyperResponse;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
@@ -18,6 +18,39 @@ use crate::server::state::AppState;
 static RUSTUS_ORIGIN: Lazy<String> = Lazy::new(|| {
     std::env::var("RUSTUS_ORIGIN").unwrap_or_else(|_| "http://127.0.0.1:1081".to_string())
 });
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PatchIngressFraming {
+    content_length: Option<String>,
+    transfer_encoding: Option<String>,
+}
+
+fn normalize_buffered_patch_headers(
+    headers: &mut HeaderMap,
+    body_len: usize,
+) -> Result<PatchIngressFraming, (StatusCode, String)> {
+    let framing = PatchIngressFraming {
+        content_length: headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned),
+        transfer_encoding: headers
+            .get(header::TRANSFER_ENCODING)
+            .and_then(|v| v.to_str().ok())
+            .map(ToOwned::to_owned),
+    };
+
+    let content_length = HeaderValue::from_str(&body_len.to_string()).map_err(|_| {
+        (
+            StatusCode::BAD_GATEWAY,
+            "failed to normalize tus patch content-length".to_string(),
+        )
+    })?;
+    headers.insert(header::CONTENT_LENGTH, content_length);
+    headers.remove(header::TRANSFER_ENCODING);
+
+    Ok(framing)
+}
 
 pub async fn tus_proxy(
     State(_state): State<Arc<AppState>>,
@@ -80,9 +113,42 @@ pub async fn tus_proxy(
     // Build upstream URL by preserving path and query
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
     let upstream_str = format!("{}{}", RUSTUS_ORIGIN.as_str(), path_and_query);
-    let upstream_uri: Uri = upstream_str
-        .parse()
-        .map_err(|_| (StatusCode::BAD_GATEWAY, "invalid upstream uri".to_string()))?;
+    let body = if method == Method::PATCH {
+        // Cloudflare Tunnel defaults to chunked origin requests on HTTP/1.1.
+        // Rustus handles fixed-length PATCH bodies more reliably, so we normalize
+        // the request here before proxying upstream.
+        let buffered = body
+            .collect()
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("failed to buffer tus patch: {}", e),
+                )
+            })?
+            .to_bytes();
+        let buffered_len = buffered.len();
+        let framing = normalize_buffered_patch_headers(&mut headers, buffered_len)?;
+        if framing.transfer_encoding.is_some() || framing.content_length.is_none() {
+            tracing::warn!(
+                target = "upload",
+                "[TUS_PROXY] Normalized PATCH framing content_length={} transfer_encoding={} buffered_bytes={}",
+                framing.content_length.as_deref().unwrap_or("<none>"),
+                framing.transfer_encoding.as_deref().unwrap_or("<none>"),
+                buffered_len
+            );
+        } else {
+            tracing::debug!(
+                target = "upload",
+                "[TUS_PROXY] Buffered PATCH with fixed content_length={} buffered_bytes={}",
+                framing.content_length.as_deref().unwrap_or("<none>"),
+                buffered_len
+            );
+        }
+        Body::from(buffered)
+    } else {
+        body
+    };
 
     // Use hyper client to stream bodies
     // Build hyper client that can stream request/response bodies
@@ -170,4 +236,67 @@ pub async fn tus_proxy(
     }
 
     Ok(resp)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_buffered_patch_headers;
+    use axum::http::{header, HeaderMap, HeaderValue};
+
+    #[test]
+    fn normalize_buffered_patch_headers_replaces_chunked_with_content_length() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+
+        let framing =
+            normalize_buffered_patch_headers(&mut headers, 42).expect("header normalization");
+
+        assert_eq!(framing.content_length, None);
+        assert_eq!(framing.transfer_encoding.as_deref(), Some("chunked"));
+        assert_eq!(
+            headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("42")
+        );
+        assert!(headers.get(header::TRANSFER_ENCODING).is_none());
+    }
+
+    #[test]
+    fn normalize_buffered_patch_headers_overwrites_existing_content_length() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONTENT_LENGTH, HeaderValue::from_static("999"));
+
+        let framing =
+            normalize_buffered_patch_headers(&mut headers, 29).expect("header normalization");
+
+        assert_eq!(framing.content_length.as_deref(), Some("999"));
+        assert_eq!(framing.transfer_encoding, None);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("29")
+        );
+    }
+
+    #[test]
+    fn normalize_buffered_patch_headers_accepts_zero_length() {
+        let mut headers = HeaderMap::new();
+
+        let framing =
+            normalize_buffered_patch_headers(&mut headers, 0).expect("header normalization");
+
+        assert_eq!(framing.content_length, None);
+        assert_eq!(framing.transfer_encoding, None);
+        assert_eq!(
+            headers
+                .get(header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok()),
+            Some("0")
+        );
+    }
 }

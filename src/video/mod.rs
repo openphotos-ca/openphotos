@@ -2,7 +2,8 @@ use anyhow::Result;
 use image::{imageops, DynamicImage};
 use serde::Deserialize;
 use std::path::Path;
-use std::process::Command;
+
+use crate::media_tools::{ffmpeg_command, ffprobe_command};
 
 #[derive(Debug, Clone, Default)]
 pub struct VideoMetadata {
@@ -38,7 +39,7 @@ pub fn is_video_extension(ext: &str) -> bool {
 }
 
 pub fn probe_metadata(path: &Path) -> Result<VideoMetadata> {
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "error",
@@ -89,7 +90,7 @@ pub fn probe_metadata(path: &Path) -> Result<VideoMetadata> {
 ///
 /// This is used to ensure Live Photo paired MOVs are not treated as standalone user videos.
 pub fn is_live_photo_component(path: &Path) -> bool {
-    let output = Command::new("ffprobe")
+    let output = ffprobe_command()
         .args([
             "-v",
             "error",
@@ -126,7 +127,7 @@ pub fn extract_frame_image(path: &Path, time_sec: f64) -> Result<DynamicImage> {
     if ss_arg == "0" {
         ss_arg = "0.0".to_string();
     }
-    let output = Command::new("ffmpeg")
+    let output = ffmpeg_command()
         .args([
             "-y",
             "-ss",
