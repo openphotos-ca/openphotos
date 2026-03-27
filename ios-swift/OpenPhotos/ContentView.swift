@@ -314,6 +314,8 @@ struct SettingsView: View {
     @State private var usageThumbs: Int64 = 0
     @State private var usageImages: Int64 = 0
     @State private var usageVideos: Int64 = 0
+    @State private var serverVersion: String? = nil
+    @State private var isLoadingServerVersion = false
     private var isDemoReadOnly: Bool { auth.isDemoUser }
     private var accountName: String {
         if let name = auth.userName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
@@ -333,6 +335,15 @@ struct SettingsView: View {
     private var accountServerURL: String {
         let url = auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return url.isEmpty ? "-" : url
+    }
+    private var accountServerVersion: String {
+        if isLoadingServerVersion {
+            return "Loading…"
+        }
+        if let version = serverVersion, !version.isEmpty {
+            return version
+        }
+        return "Unavailable"
     }
 
     var body: some View {
@@ -405,6 +416,13 @@ struct SettingsView: View {
                             .lineLimit(2)
                             .truncationMode(.middle)
                     }
+                    HStack {
+                        Text("Server Version")
+                        Spacer()
+                        Text(accountServerVersion)
+                            .foregroundColor(.secondary)
+                            .multilineTextAlignment(.trailing)
+                    }
                     NavigationLink(destination: ChangePasswordView().environmentObject(auth)) {
                         Text("Change Password")
                     }
@@ -453,7 +471,13 @@ struct SettingsView: View {
             }
             .navigationTitle("Settings")
             .alert("Cache Cleared", isPresented: $showCacheCleared) { Button("OK", role: .cancel) { showCacheCleared = false } } message: { Text("Image cache and temp artifacts cleared") }
-            .onAppear { refreshCacheUsage() }
+            .onAppear {
+                refreshCacheUsage()
+                Task { await refreshServerVersion(force: true) }
+            }
+            .onChange(of: auth.serverURL) { _ in
+                Task { await refreshServerVersion(force: true) }
+            }
         }
     }
 }
@@ -466,6 +490,45 @@ extension SettingsView {
         usageThumbs = thumbs
         usageImages = images
         usageVideos = videos
+    }
+
+    private func refreshServerVersion(force: Bool) async {
+        let requestedServerURL = await MainActor.run {
+            auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !requestedServerURL.isEmpty else {
+            await MainActor.run {
+                isLoadingServerVersion = false
+                serverVersion = nil
+            }
+            return
+        }
+
+        await MainActor.run {
+            isLoadingServerVersion = true
+        }
+
+        do {
+            let caps = try await CapabilitiesService.shared.get(force: force)
+            let resolvedVersion = caps.version?.trimmingCharacters(in: .whitespacesAndNewlines)
+            let currentServerURL = await MainActor.run {
+                auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard currentServerURL == requestedServerURL else { return }
+            await MainActor.run {
+                serverVersion = (resolvedVersion?.isEmpty == false) ? resolvedVersion : nil
+                isLoadingServerVersion = false
+            }
+        } catch {
+            let currentServerURL = await MainActor.run {
+                auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            guard currentServerURL == requestedServerURL else { return }
+            await MainActor.run {
+                serverVersion = nil
+                isLoadingServerVersion = false
+            }
+        }
     }
 }
 

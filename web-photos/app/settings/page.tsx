@@ -29,6 +29,16 @@ interface FoldersResponse {
   preserve_tree_path?: boolean;
 }
 
+function resolveConnectedServerUrl(apiBase: string): string {
+  if (typeof window === 'undefined') return '-';
+  try {
+    const resolved = new URL(apiBase, window.location.origin);
+    return resolved.origin;
+  } catch {
+    return window.location.origin;
+  }
+}
+
 export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [folders, setFolders] = useState<string[]>([]);
@@ -89,6 +99,9 @@ export default function SettingsPage() {
   const API = resolveApiBaseUrl(process.env.NEXT_PUBLIC_API_URL || '/api');
   // EE capabilities gating
   const [isEE, setIsEE] = useState(false);
+  const [serverVersion, setServerVersion] = useState<string | null>(null);
+  const [capabilitiesLoading, setCapabilitiesLoading] = useState(true);
+  const [connectedServerUrl, setConnectedServerUrl] = useState('-');
   const { user: me } = useAuthStore();
   const isAdmin = !!me && (me.role === 'owner' || me.role === 'admin');
   const isDemoUser = isDemoEmail(me?.email);
@@ -110,12 +123,29 @@ export default function SettingsPage() {
   useEffect(() => {
     let mounted = true;
     (async () => {
+      if (mounted) setCapabilitiesLoading(true);
       try {
         const res = await fetch(`/api/capabilities?_=${Date.now()}`, { cache: 'no-store' });
-        if (!res.ok) { if (mounted) setIsEE(false); return; }
+        if (!res.ok) {
+          if (mounted) {
+            setIsEE(false);
+            setServerVersion(null);
+          }
+          return;
+        }
         const j = await res.json();
-        if (mounted) setIsEE(!!j?.ee);
-      } catch { if (mounted) setIsEE(false); }
+        if (mounted) {
+          setIsEE(!!j?.ee);
+          setServerVersion(typeof j?.version === 'string' && j.version.trim() ? j.version.trim() : null);
+        }
+      } catch {
+        if (mounted) {
+          setIsEE(false);
+          setServerVersion(null);
+        }
+      } finally {
+        if (mounted) setCapabilitiesLoading(false);
+      }
     })();
     return () => { mounted = false; };
   }, []);
@@ -127,6 +157,10 @@ export default function SettingsPage() {
       setIsEmbedded(true);
     }
   }, []);
+
+  useEffect(() => {
+    setConnectedServerUrl(resolveConnectedServerUrl(API));
+  }, [API]);
 
   // Locked metadata inclusion settings
   const [secLoading, setSecLoading] = useState(false);
@@ -218,6 +252,10 @@ export default function SettingsPage() {
       finally { setEePrefixLoading(false); }
     })();
   }, [token, isEE, isAdmin]);
+
+  const connectedServerVersion = capabilitiesLoading
+    ? 'Loading…'
+    : (serverVersion || 'Unavailable');
 
   const loadFolders = async () => {
     setIsLoading(true);
@@ -523,6 +561,22 @@ export default function SettingsPage() {
             Demo account: settings are read-only.
           </div>
         )}
+        <Card className="mb-8">
+          <CardHeader>
+            <CardTitle>Connection</CardTitle>
+            <CardDescription>Current backend connection details.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">Server URL</Label>
+              <div className="mt-1 break-all text-sm text-foreground">{connectedServerUrl}</div>
+            </div>
+            <div>
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">Server Version</Label>
+              <div className="mt-1 text-sm text-foreground">{connectedServerVersion}</div>
+            </div>
+          </CardContent>
+        </Card>
         <fieldset
           disabled={isDemoUser}
           className={clsx('border-0 p-0 m-0 min-w-0', isDemoUser && 'opacity-70')}
