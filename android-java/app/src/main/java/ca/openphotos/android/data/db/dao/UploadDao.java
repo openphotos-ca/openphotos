@@ -1,5 +1,6 @@
 package ca.openphotos.android.data.db.dao;
 
+import androidx.annotation.Nullable;
 import androidx.room.Dao;
 import androidx.room.Insert;
 import androidx.room.OnConflictStrategy;
@@ -30,10 +31,19 @@ public interface UploadDao {
     @Query("UPDATE uploads SET tusUrl = :url WHERE id = :id")
     void setTusUrl(long id, String url);
 
+    @Query("UPDATE uploads SET sentBytes = :sent WHERE id = :id")
+    void updateSentBytes(long id, long sent);
+
+    @Query("UPDATE uploads SET sentBytes = :sent, tusUrl = :url WHERE id = :id")
+    void setResumeState(long id, long sent, @Nullable String url);
+
+    @Query("UPDATE uploads SET sentBytes = 0, tusUrl = NULL WHERE id = :id")
+    void clearResumeState(long id);
+
     @Query("SELECT * FROM uploads WHERE status = 0 ORDER BY id ASC LIMIT :limit")
     List<UploadEntity> listQueued(int limit);
 
-    @Query("UPDATE uploads SET status = 1, sentBytes = 0 WHERE id = :id AND status = 0")
+    @Query("UPDATE uploads SET status = 1 WHERE id = :id AND status = 0")
     int claimQueued(long id);
 
     @Query("SELECT COUNT(1) FROM uploads WHERE status = :status")
@@ -42,11 +52,17 @@ public interface UploadDao {
     @Query("SELECT COUNT(1) FROM uploads WHERE contentId = :contentId AND status <> 2")
     int countNotDoneByContentId(String contentId);
 
-    @Query("UPDATE uploads SET status = 0, sentBytes = 0 WHERE contentId = :contentId AND status = 3")
+    @Query("UPDATE uploads SET status = 0 WHERE contentId = :contentId AND status = 3")
     int requeueFailedByContentId(String contentId);
 
     @Query("UPDATE uploads SET status = :status, sentBytes = :sent WHERE id = :id")
     void updateStatus(long id, int status, long sent);
+
+    @Query("UPDATE uploads SET status = :status WHERE id = :id")
+    void updateStatusOnly(long id, int status);
+
+    @Query("UPDATE uploads SET status = 2, sentBytes = :sent, tusUrl = NULL WHERE id = :id")
+    void markCompleted(long id, long sent);
 
     @Query("UPDATE uploads SET status = 0 WHERE status = 1")
     int requeueUploading();

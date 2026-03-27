@@ -56,6 +56,8 @@ pub struct AppState {
     pub library_layout: LibraryLayout,
     // Upload events SSE per user_id
     pub upload_channels: Arc<parking_lot::RwLock<HashMap<String, broadcast::Sender<String>>>>,
+    // TUS upload owner mapping for webhook ingestion when hook auth context is missing.
+    pub tus_upload_owners: Arc<parking_lot::RwLock<HashMap<String, String>>>,
     // Global ingestion concurrency guard
     pub ingest_semaphore: Arc<Semaphore>,
     // DuckDB concurrency guard to prevent lock starvation under heavy load
@@ -474,6 +476,7 @@ impl AppState {
             library_layout,
             data_dir: data_dir.to_path_buf(),
             upload_channels: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            tus_upload_owners: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             ingest_semaphore,
             duckdb_semaphore,
             enable_object_detect_on_index,
@@ -500,6 +503,20 @@ impl AppState {
     pub fn subscribe_upload_channel(&self, user_id: &str) -> broadcast::Receiver<String> {
         let tx = self.get_or_create_upload_channel(user_id);
         tx.subscribe()
+    }
+
+    pub fn remember_tus_upload_owner(&self, upload_id: &str, user_id: &str) {
+        self.tus_upload_owners
+            .write()
+            .insert(upload_id.to_string(), user_id.to_string());
+    }
+
+    pub fn tus_upload_owner(&self, upload_id: &str) -> Option<String> {
+        self.tus_upload_owners.read().get(upload_id).cloned()
+    }
+
+    pub fn take_tus_upload_owner(&self, upload_id: &str) -> Option<String> {
+        self.tus_upload_owners.write().remove(upload_id)
     }
 
     /// Record a successful ingest event into the user's current sync session (auto-starts if absent)

@@ -52,8 +52,90 @@ fn normalize_buffered_patch_headers(
     Ok(framing)
 }
 
+fn bearer_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(header::AUTHORIZATION)
+        .and_then(|h| h.to_str().ok())
+        .and_then(|h| h.strip_prefix("Bearer "))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+}
+
+fn cookie_token_from_headers(headers: &HeaderMap) -> Option<&str> {
+    let cookie_hdr = headers.get(header::COOKIE)?.to_str().ok()?;
+    for part in cookie_hdr.split(';') {
+        let trimmed = part.trim();
+        if let Some(val) = trimmed.strip_prefix("auth-token=") {
+            let val = val.trim();
+            if !val.is_empty() {
+                return Some(val);
+            }
+        }
+    }
+    None
+}
+
+async fn auth_user_id_from_headers(headers: &HeaderMap, state: &Arc<AppState>) -> Option<String> {
+    let token =
+        bearer_token_from_headers(headers).or_else(|| cookie_token_from_headers(headers))?;
+    state
+        .auth_service
+        .verify_token(token)
+        .await
+        .ok()
+        .map(|user| user.user_id)
+}
+
+fn upload_id_from_tus_path(path: &str) -> Option<String> {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    let (_, upload_id) = path.rsplit_once("/files/")?;
+    if upload_id.is_empty() || upload_id.contains('/') {
+        None
+    } else {
+        Some(upload_id.to_string())
+    }
+}
+
+fn upload_id_from_location(location: &str) -> Option<String> {
+    let path = location
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| format!("/{}", path)))
+        .unwrap_or_else(|| location.to_string());
+    upload_id_from_tus_path(&path)
+}
+
+fn remember_tus_upload_owner(
+    state: &Arc<AppState>,
+    method: &Method,
+    request_path: &str,
+    location_header: Option<&HeaderValue>,
+    auth_user_id: Option<&str>,
+) {
+    let Some(user_id) = auth_user_id else {
+        return;
+    };
+
+    let upload_id = upload_id_from_tus_path(request_path).or_else(|| {
+        location_header
+            .and_then(|loc| loc.to_str().ok())
+            .and_then(upload_id_from_location)
+    });
+
+    if let Some(upload_id) = upload_id {
+        state.remember_tus_upload_owner(&upload_id, user_id);
+        tracing::debug!(
+            target = "upload",
+            "[TUS_PROXY] Remembered upload owner upload_id={} user_id={} method={} path={}",
+            upload_id,
+            user_id,
+            method.as_str(),
+            request_path
+        );
+    }
+}
+
 pub async fn tus_proxy(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     method: Method,
     uri: Uri,
     mut headers: HeaderMap,
@@ -112,6 +194,13 @@ pub async fn tus_proxy(
     }
     // Build upstream URL by preserving path and query
     let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+    let request_path = uri.path().to_string();
+    let auth_user_id = auth_user_id_from_headers(&headers, &state).await;
+    if let Some(upload_id) = upload_id_from_tus_path(&request_path) {
+        if let Some(user_id) = auth_user_id.as_deref() {
+            state.remember_tus_upload_owner(&upload_id, user_id);
+        }
+    }
     let upstream_str = format!("{}{}", RUSTUS_ORIGIN.as_str(), path_and_query);
     let body = if method == Method::PATCH {
         // Cloudflare Tunnel defaults to chunked origin requests on HTTP/1.1.
@@ -214,6 +303,13 @@ pub async fn tus_proxy(
     let stream = incoming_body.into_data_stream();
     let mut resp = Response::from_parts(parts, Body::from_stream(stream));
     if let Some(loc) = resp.headers().get("location").cloned() {
+        remember_tus_upload_owner(
+            &state,
+            &method,
+            &request_path,
+            Some(&loc),
+            auth_user_id.as_deref(),
+        );
         if let Ok(loc_str) = loc.to_str() {
             // Compute external origin from incoming Host/X-Forwarded-Proto we preserved above
             let scheme = headers
@@ -234,13 +330,24 @@ pub async fn tus_proxy(
             }
         }
     }
+    if !resp.headers().contains_key("location") {
+        remember_tus_upload_owner(
+            &state,
+            &method,
+            &request_path,
+            None,
+            auth_user_id.as_deref(),
+        );
+    }
 
     Ok(resp)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_buffered_patch_headers;
+    use super::{
+        normalize_buffered_patch_headers, upload_id_from_location, upload_id_from_tus_path,
+    };
     use axum::http::{header, HeaderMap, HeaderValue};
 
     #[test]
@@ -297,6 +404,35 @@ mod tests {
                 .get(header::CONTENT_LENGTH)
                 .and_then(|v| v.to_str().ok()),
             Some("0")
+        );
+    }
+
+    #[test]
+    fn upload_id_from_tus_path_extracts_single_segment_id() {
+        assert_eq!(
+            upload_id_from_tus_path("/files/93eb1eb4-0af8-41df-aad2-4702389f43bf"),
+            Some("93eb1eb4-0af8-41df-aad2-4702389f43bf".to_string())
+        );
+        assert_eq!(
+            upload_id_from_tus_path("/files/93eb1eb4-0af8-41df-aad2-4702389f43bf?foo=bar"),
+            Some("93eb1eb4-0af8-41df-aad2-4702389f43bf".to_string())
+        );
+        assert_eq!(upload_id_from_tus_path("/files"), None);
+        assert_eq!(upload_id_from_tus_path("/files/parent/child"), None);
+    }
+
+    #[test]
+    fn upload_id_from_location_supports_absolute_and_relative_urls() {
+        let expected = Some("93eb1eb4-0af8-41df-aad2-4702389f43bf".to_string());
+        assert_eq!(
+            upload_id_from_location(
+                "https://photos.example.com/files/93eb1eb4-0af8-41df-aad2-4702389f43bf"
+            ),
+            expected
+        );
+        assert_eq!(
+            upload_id_from_location("/files/93eb1eb4-0af8-41df-aad2-4702389f43bf"),
+            Some("93eb1eb4-0af8-41df-aad2-4702389f43bf".to_string())
         );
     }
 }

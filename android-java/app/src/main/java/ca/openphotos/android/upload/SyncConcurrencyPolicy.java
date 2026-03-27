@@ -12,9 +12,8 @@ import android.os.PowerManager;
  */
 public final class SyncConcurrencyPolicy {
     private static final int MIB = 1024 * 1024;
-    private static final int CHUNK_1 = 9 * MIB;
-    private static final int CHUNK_2 = 6 * MIB;
-    private static final int CHUNK_3 = 4 * MIB;
+    private static final int CHUNK_WIFI = 1 * MIB;
+    private static final int CHUNK_METERED = TusAdaptiveChunkController.MIN_CHUNK_BYTES;
 
     private SyncConcurrencyPolicy() {}
 
@@ -77,10 +76,7 @@ public final class SyncConcurrencyPolicy {
         int lockedParallelism = (uploadParallelism >= 2 && !lowRam && !powerSave && cpus >= 6) ? 2 : 1;
         lockedParallelism = clamp(lockedParallelism, 1, Math.min(2, uploadParallelism));
 
-        int chunkSize;
-        if (uploadParallelism <= 1) chunkSize = CHUNK_1;
-        else if (uploadParallelism == 2) chunkSize = CHUNK_2;
-        else chunkSize = CHUNK_3;
+        int chunkSize = (cellular || metered || powerSave || lowRam) ? CHUNK_METERED : CHUNK_WIFI;
 
         String networkClass;
         if (wifiOrEthernet) networkClass = "wifi_or_ethernet";

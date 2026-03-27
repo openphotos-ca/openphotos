@@ -44,6 +44,7 @@ public final class UploadFailureLogHelper {
                         + " contentId=" + oneLine(row.contentId)
                         + " file=" + oneLine(row.filename)
                         + " bytes=" + row.totalBytes
+                        + " sent=" + row.sentBytes
                         + " video=" + row.isVideo
                         + " locked=" + row.isLocked
                         + " attempts=" + (photo != null ? photo.attempts : -1)

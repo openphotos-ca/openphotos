@@ -13,6 +13,37 @@ def envOrNull = { String name ->
     return value.isEmpty() ? null : value
 }
 
+def readRootCargoPackageVersion = {
+    File cargoToml = new File(rootProject.projectDir.parentFile, 'Cargo.toml')
+    if (!cargoToml.exists()) {
+        throw new GradleException("Cargo.toml not found: ${cargoToml}")
+    }
+
+    boolean inPackage = false
+    String version = null
+    cargoToml.eachLine('UTF-8') { String line ->
+        String trimmed = line.trim()
+        if (trimmed == '[package]') {
+            inPackage = true
+            return
+        }
+        if (trimmed.startsWith('[')) {
+            inPackage = false
+        }
+        if (inPackage && version == null) {
+            def matcher = trimmed =~ /^version\s*=\s*"([^"]+)"/
+            if (matcher.find()) {
+                version = matcher.group(1)
+            }
+        }
+    }
+
+    if (version == null) {
+        throw new GradleException("Could not parse package version from ${cargoToml}")
+    }
+    return version
+}
+
 def releaseSigningVars = [
     ANDROID_KEYSTORE_PATH    : envOrNull('ANDROID_KEYSTORE_PATH'),
     ANDROID_KEYSTORE_PASSWORD: envOrNull('ANDROID_KEYSTORE_PASSWORD'),
@@ -22,6 +53,14 @@ def releaseSigningVars = [
 
 def missingReleaseSigningVars = releaseSigningVars.findAll { entry -> entry.value == null }.keySet().toList()
 def releaseKeystoreFile = releaseSigningVars.ANDROID_KEYSTORE_PATH != null ? file(releaseSigningVars.ANDROID_KEYSTORE_PATH) : null
+def cargoServerVersionName = readRootCargoPackageVersion()
+def requestedServerVersionName = envOrNull('OPENPHOTOS_SERVER_VERSION')
+
+if (requestedServerVersionName != null && requestedServerVersionName != cargoServerVersionName) {
+    throw new GradleException(
+        "OPENPHOTOS_SERVER_VERSION (${requestedServerVersionName}) does not match Cargo.toml package version (${cargoServerVersionName})."
+    )
+}
 
 android {
     namespace 'ca.openphotos.android'
@@ -32,7 +71,7 @@ android {
         minSdk 30
         targetSdk 34
         versionCode 3
-        versionName '0.3.0'
+        versionName cargoServerVersionName
 
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }

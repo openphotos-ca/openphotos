@@ -24,6 +24,7 @@ import androidx.navigation.fragment.NavHostFragment;
 import ca.openphotos.android.R;
 import ca.openphotos.android.core.AppLinks;
 import ca.openphotos.android.core.AuthManager;
+import ca.openphotos.android.core.CapabilitiesService;
 import ca.openphotos.android.media.DiskImageCache;
 import ca.openphotos.android.prefs.AppearancePreferences;
 import com.bumptech.glide.Glide;
@@ -69,6 +70,7 @@ public class SettingsFragment extends Fragment {
     private TextView tvAccountName;
     private TextView tvAccountEmail;
     private TextView tvAccountServerUrl;
+    private TextView tvAccountServerVersion;
     private TextView tvAboutVersion;
     private View rowAboutSupport;
 
@@ -106,6 +108,7 @@ public class SettingsFragment extends Fragment {
         tvAccountName = view.findViewById(R.id.tv_account_name);
         tvAccountEmail = view.findViewById(R.id.tv_account_email);
         tvAccountServerUrl = view.findViewById(R.id.tv_account_server_url);
+        tvAccountServerVersion = view.findViewById(R.id.tv_account_server_version);
         tvAboutVersion = view.findViewById(R.id.tv_about_version);
         rowAboutSupport = view.findViewById(R.id.row_about_support);
 
@@ -121,6 +124,7 @@ public class SettingsFragment extends Fragment {
         rowChangePassword.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.changePasswordFragment));
 
         bindAccountSummary();
+        refreshServerVersion();
         tvAboutVersion.setText(getVersionString());
         view.findViewById(R.id.btn_about_website).setOnClickListener(v -> openExternalUrl(AppLinks.WEBSITE));
         view.findViewById(R.id.btn_about_privacy).setOnClickListener(v -> openExternalUrl(AppLinks.PRIVACY_POLICY));
@@ -142,6 +146,7 @@ public class SettingsFragment extends Fragment {
         refreshCacheUsage();
         refreshAppearanceSummary();
         bindAccountSummary();
+        refreshServerVersion();
         boolean demoReadOnly = auth != null && auth.isDemoUser();
         cardDemoReadonly.setVisibility(demoReadOnly ? View.VISIBLE : View.GONE);
         setMutatingEnabled(!demoReadOnly);
@@ -178,6 +183,29 @@ public class SettingsFragment extends Fragment {
         tvAccountEmail.setText(email != null ? email : "-");
         String serverUrl = auth.getServerUrl();
         tvAccountServerUrl.setText(serverUrl != null && !serverUrl.trim().isEmpty() ? serverUrl : "-");
+    }
+
+    private void refreshServerVersion() {
+        if (tvAccountServerVersion == null || auth == null) return;
+        final String requestedServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+        if (requestedServerUrl.isEmpty()) {
+            tvAccountServerVersion.setText("Unavailable");
+            return;
+        }
+        tvAccountServerVersion.setText("Loading…");
+        new Thread(() -> {
+            CapabilitiesService.Caps caps = CapabilitiesService.get(appContext);
+            final String resolvedVersion = caps.version != null && !caps.version.trim().isEmpty()
+                    ? caps.version.trim()
+                    : "Unavailable";
+            if (!isAdded()) return;
+            requireActivity().runOnUiThread(() -> {
+                if (!isAdded() || tvAccountServerVersion == null || auth == null) return;
+                String currentServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+                if (!requestedServerUrl.equals(currentServerUrl)) return;
+                tvAccountServerVersion.setText(resolvedVersion);
+            });
+        }).start();
     }
 
     private void refreshCacheUsage() {

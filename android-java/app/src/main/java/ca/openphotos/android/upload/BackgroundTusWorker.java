@@ -303,13 +303,15 @@ public class BackgroundTusWorker extends Worker {
                     + " contentId=" + e.contentId
                     + " file=" + e.filename
                     + " total=" + e.totalBytes
+                    + " sentBytes=" + e.sentBytes
+                    + " hasTusUrl=" + (e.tusUrl != null && !e.tusUrl.isEmpty())
                     + " locked=" + e.isLocked
                     + " video=" + e.isVideo);
             if (e.contentId != null && !e.contentId.isEmpty()) {
                 pdao.markUploading(e.contentId, System.currentTimeMillis() / 1000L);
             }
             proc.process(e);
-            udao.updateStatus(e.id, 2, e.totalBytes);
+            udao.markCompleted(e.id, e.totalBytes);
             if (e.contentId != null && !e.contentId.isEmpty()) {
                 int unresolved = udao.countNotDoneByContentId(e.contentId);
                 if (unresolved == 0) {
@@ -324,7 +326,7 @@ public class BackgroundTusWorker extends Worker {
                     + " elapsedMs=" + (System.currentTimeMillis() - itemStartedAt));
         } catch (InterruptedException ie) {
             Thread.currentThread().interrupt();
-            udao.updateStatus(e.id, 0, 0);
+            udao.updateStatusOnly(e.id, 0);
             Log.w(TAG, runner + " item interrupted uploadId=" + e.id);
         } catch (Exception ex) {
             String errorSummary = UploadFailurePolicy.summarize(ex);
@@ -335,7 +337,7 @@ public class BackgroundTusWorker extends Worker {
                 if (row == null || row.syncState != 2) {
                     int attempts = row != null ? Math.max(0, row.attempts) : 0;
                     if (row != null && retryable && attempts < MAX_AUTO_REQUEUE_ATTEMPTS) {
-                        udao.updateStatus(e.id, 0, 0);
+                        udao.updateStatusOnly(e.id, 0);
                         pdao.markRetryQueued(e.contentId, errorSummary, nowSec);
                         Log.w(TAG, runner + " item auto-requeued uploadId=" + e.id
                                 + " contentId=" + e.contentId
@@ -343,14 +345,14 @@ public class BackgroundTusWorker extends Worker {
                                 + " reason=" + errorSummary);
                         return;
                     }
-                    udao.updateStatus(e.id, 3, 0);
+                    udao.updateStatusOnly(e.id, 3);
                     pdao.markFailed(e.contentId, errorSummary, nowSec);
                 } else {
                     Log.i(TAG, runner + " failure ignored for already-synced contentId=" + e.contentId);
-                    udao.updateStatus(e.id, 3, 0);
+                    udao.updateStatusOnly(e.id, 3);
                 }
             } else {
-                udao.updateStatus(e.id, 3, 0);
+                udao.updateStatusOnly(e.id, 3);
             }
             failed.incrementAndGet();
             Log.e(TAG, runner + " item failed uploadId=" + e.id
@@ -384,7 +386,7 @@ class TusQueueProcessor {
                 java.util.Iterator<String> it = o.keys();
                 while (it.hasNext()) { String k = it.next(); meta.put(k, o.optString(k, null)); }
             }
-            mgr.uploadLockedQueued(file, e.filename, meta, e.id);
+            mgr.uploadLockedQueued(file, e.filename, meta, e);
         } else {
             PhotoEntity ph =
                     (e.contentId != null && !e.contentId.isEmpty())
@@ -397,7 +399,7 @@ class TusQueueProcessor {
                 long fileTs = file.lastModified() > 0 ? (file.lastModified() / 1000L) : 0L;
                 ph.creationTs = fileTs > 0 ? fileTs : (System.currentTimeMillis() / 1000L);
             }
-            mgr.uploadUnlockedQueued(file, ph, e.albumPathsJson, e.id);
+            mgr.uploadUnlockedQueued(file, ph, e.albumPathsJson, e);
         }
     }
 }

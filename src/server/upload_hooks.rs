@@ -171,6 +171,7 @@ pub async fn handle_rustus_hook(
                 .map(|s| s.to_string());
             // Spawn non-blocking task for ingestion; return 200 immediately
             tokio::spawn(async move {
+                let cached_owner_uid = state_clone.tus_upload_owner(info.id.as_str());
                 // Identify user (auth) or resolve via public link (EE)
                 // Defaults
                 let mut resolved_user_id: Option<String> = None;
@@ -394,6 +395,18 @@ pub async fn handle_rustus_hook(
                     resolved_user_id = Some(user.user_id);
                 }
 
+                if resolved_user_id.is_none() {
+                    if let Some(owner_uid) = cached_owner_uid.clone() {
+                        tracing::info!(
+                            target: "upload",
+                            "[UPLOAD] post-finish recovered owner from cached TUS context: user_id={}, upload_id={}",
+                            owner_uid,
+                            info.id
+                        );
+                        resolved_user_id = Some(owner_uid);
+                    }
+                }
+
                 if let Some(owner_uid) = resolved_user_id {
                     if let Some(path) = info.path.as_ref() {
                         tracing::info!(
@@ -442,15 +455,20 @@ pub async fn handle_rustus_hook(
                                 info.id
                             );
                         }
+                        let _ = state_clone.take_tus_upload_owner(info.id.as_str());
                     } else {
                         tracing::warn!(
                             "[UPLOAD] post-finish missing path for id={} (storage={})",
                             info.id,
                             info.storage
                         );
+                        let _ = state_clone.take_tus_upload_owner(info.id.as_str());
                     }
                 } else {
-                    tracing::warn!("[UPLOAD] post-finish without valid auth");
+                    tracing::warn!(
+                        "[UPLOAD] post-finish without valid auth or cached owner (upload_id={})",
+                        info.id
+                    );
                 }
             });
             (StatusCode::OK, "ok".into())
