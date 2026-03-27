@@ -1121,7 +1121,7 @@ export default function HomePage() {
     try {
       const isVideo = viewerPhoto.is_video;
       // Fetch plaintext original
-      const resp = await fetch(`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}`);
+      const resp = await fetch(`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}?format=original`);
       if (!resp.ok) throw new Error(`Fetch original failed: ${resp.status}`);
       let blob = await resp.blob();
       const { encryptV3WithWorker, fileToArrayBuffer, generateImageThumb, generateVideoThumb, umkToHex } = await import('@/lib/e2eeClient');
@@ -1281,7 +1281,7 @@ export default function HomePage() {
     if (e) { e.stopPropagation(); e.preventDefault(); }
     if (!viewerPhoto || !token) return;
     try {
-      const res = await fetch(`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}`, {
+      const res = await fetch(`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}?format=original`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (!res.ok) throw new Error(`Download failed: ${res.status}`);
@@ -1663,7 +1663,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
           const tasks = toLock.map(aid => async () => {
             const p = allPhotos.find(x => x.asset_id === aid) || displayPhotos.find(x => x.asset_id === aid);
             if (!p) return;
-            const resp = await fetch(`/api/images/${encodeURIComponent(aid)}`);
+            const resp = await fetch(`/api/images/${encodeURIComponent(aid)}?format=original`);
             if (!resp.ok) throw new Error(`Fetch failed ${resp.status}`);
             const blob = await resp.blob();
             const bytes = await fileToArrayBuffer(blob);

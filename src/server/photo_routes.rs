@@ -34,6 +34,7 @@ use crate::server::{state::AppState, AppError};
 use crate::video;
 use anyhow::anyhow;
 use duckdb::Connection;
+use image::codecs::jpeg::JpegEncoder;
 use image::imageops::FilterType;
 use image::GenericImageView;
 use tower::util::ServiceExt;
@@ -76,6 +77,45 @@ fn add_private_cache_headers(headers: &mut HeaderMap, etag: Option<&str>) {
             headers.insert(header::ETAG, hv);
         }
     }
+}
+
+fn is_raw_still_path(path: &str) -> bool {
+    crate::photos::is_raw_still_extension(
+        StdPath::new(path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .as_str(),
+    )
+}
+
+fn raw_placeholder_webp_bytes(max_side: u32) -> Result<Vec<u8>, anyhow::Error> {
+    let img = crate::photos::metadata::raw_placeholder_image(max_side).to_rgb8();
+    let enc = webp::Encoder::from_rgb(img.as_raw(), img.width(), img.height());
+    Ok(enc.encode(80.0).to_vec())
+}
+
+fn raw_placeholder_jpeg_bytes(max_side: u32) -> Result<Vec<u8>, anyhow::Error> {
+    let img = crate::photos::metadata::raw_placeholder_image(max_side).to_rgb8();
+    let mut bytes = Vec::new();
+    let mut encoder = JpegEncoder::new_with_quality(&mut bytes, 88);
+    encoder.encode(&img, img.width(), img.height(), image::ColorType::Rgb8)?;
+    Ok(bytes)
+}
+
+fn cache_matches_raw_placeholder_webp(cache_path: &StdPath, max_side: u32) -> bool {
+    std::fs::read(cache_path)
+        .ok()
+        .zip(raw_placeholder_webp_bytes(max_side).ok())
+        .is_some_and(|(cached, expected)| cached == expected)
+}
+
+fn cache_matches_raw_placeholder_jpeg(cache_path: &StdPath, max_side: u32) -> bool {
+    std::fs::read(cache_path)
+        .ok()
+        .zip(raw_placeholder_jpeg_bytes(max_side).ok())
+        .is_some_and(|(cached, expected)| cached == expected)
 }
 
 fn album_ids_for_asset(conn: &Connection, org_id: i32, asset_id: &str) -> duckdb::Result<Vec<i32>> {
@@ -185,6 +225,10 @@ fn sniff_image_content_type(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+fn looks_like_tiff_family(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*")
+}
+
 fn looks_like_declared_image(content_type: &str, bytes: &[u8]) -> bool {
     let ct = content_type.to_ascii_lowercase();
     if ct.starts_with("image/jpeg") {
@@ -211,7 +255,10 @@ fn looks_like_declared_image(content_type: &str, bytes: &[u8]) -> bool {
         return bytes.len() >= 2 && bytes[0] == 0x42 && bytes[1] == 0x4D;
     }
     if ct.starts_with("image/tiff") {
-        return bytes.starts_with(b"II*\0") || bytes.starts_with(b"MM\0*");
+        return looks_like_tiff_family(bytes);
+    }
+    if ct.starts_with("image/dng") {
+        return looks_like_tiff_family(bytes);
     }
     if ct.starts_with("image/heic") || ct.starts_with("image/heif") {
         return matches!(sniff_image_content_type(bytes), Some("image/heic"));
@@ -220,6 +267,39 @@ fn looks_like_declared_image(content_type: &str, bytes: &[u8]) -> bool {
         return matches!(sniff_image_content_type(bytes), Some("image/avif"));
     }
     true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RawImageServeMode {
+    NotRaw,
+    OriginalBytes,
+    DerivedAvif,
+    DerivedJpeg,
+}
+
+fn query_has_format_param(query: &str, format: &str) -> bool {
+    query
+        .split('&')
+        .filter_map(|kv| kv.split_once('=').or(Some((kv, ""))))
+        .any(|(key, value)| key == "format" && value.eq_ignore_ascii_case(format))
+}
+
+fn raw_image_serve_mode(
+    orig_content_type: &str,
+    query: &str,
+    prefer_avif: bool,
+) -> RawImageServeMode {
+    if !orig_content_type.eq_ignore_ascii_case("image/dng") {
+        return RawImageServeMode::NotRaw;
+    }
+    if query_has_format_param(query, "original") {
+        return RawImageServeMode::OriginalBytes;
+    }
+    if prefer_avif {
+        RawImageServeMode::DerivedAvif
+    } else {
+        RawImageServeMode::DerivedJpeg
+    }
 }
 
 fn infer_live_video_content_type(path: &StdPath) -> &'static str {
@@ -3738,8 +3818,9 @@ pub async fn serve_image(
         }
         // Decide on-the-fly AVIF for HEIC if requested or non-Safari
         let query = request.uri().query().unwrap_or("");
-        let wants_avif_param = query.split('&').any(|kv| kv == "format=avif");
-        let wants_heic_param = query.split('&').any(|kv| kv == "format=heic");
+        let wants_avif_param = query_has_format_param(query, "avif");
+        let wants_heic_param = query_has_format_param(query, "heic");
+        let wants_original_param = query_has_format_param(query, "original");
         let ua = request
             .headers()
             .get(header::USER_AGENT)
@@ -3767,18 +3848,10 @@ pub async fn serve_image(
             .unwrap_or("")
             .to_lowercase();
 
-        let orig_content_type = mime_type_opt.unwrap_or_else(|| match ext_lc.as_str() {
-            "jpg" | "jpeg" => "image/jpeg".to_string(),
-            "png" => "image/png".to_string(),
-            "webp" => "image/webp".to_string(),
-            "heic" | "heif" => "image/heic".to_string(),
-            "avif" => "image/avif".to_string(),
-            "mp4" | "m4v" => "video/mp4".to_string(),
-            "mov" => "video/quicktime".to_string(),
-            "avi" => "video/x-msvideo".to_string(),
-            "mkv" => "video/x-matroska".to_string(),
-            "webm" => "video/webm".to_string(),
-            _ => "application/octet-stream".to_string(),
+        let orig_content_type = mime_type_opt.unwrap_or_else(|| {
+            crate::photos::mime_type_for_extension(ext_lc.as_str())
+                .unwrap_or("application/octet-stream")
+                .to_string()
         });
 
         let video_content_type = if is_video && !orig_content_type.starts_with("video/") {
@@ -3812,7 +3885,7 @@ pub async fn serve_image(
         } else {
             false
         };
-        if orig_content_type == "image/heic" && prefer_avif {
+        if !wants_original_param && orig_content_type == "image/heic" && prefer_avif {
             let avif_path = state.avif_path_for(&user.user_id, &asset_id);
             if !avif_path.exists() {
                 if let Some(parent) = avif_path.parent() {
@@ -3859,6 +3932,138 @@ pub async fn serve_image(
                 );
             }
             return Ok((headers_map, bytes).into_response());
+        }
+
+        match raw_image_serve_mode(&orig_content_type, query, prefer_avif) {
+            RawImageServeMode::DerivedAvif | RawImageServeMode::DerivedJpeg => {
+                let try_avif_first = matches!(
+                    raw_image_serve_mode(&orig_content_type, query, prefer_avif),
+                    RawImageServeMode::DerivedAvif
+                );
+                if try_avif_first {
+                    let avif_path = state.avif_path_for(&user.user_id, &asset_id);
+                    if !avif_path.exists() {
+                        if let Some(parent) = avif_path.parent() {
+                            let _ = std::fs::create_dir_all(parent);
+                        }
+                        if let Err(err) = generate_avif(&path, &avif_path) {
+                            tracing::warn!(
+                                target: "upload",
+                                "[RAW] Failed to generate AVIF preview for asset_id={} path={} err={}",
+                                asset_id,
+                                path,
+                                err
+                            );
+                        } else {
+                            tracing::info!(
+                                target: "upload",
+                                "[RAW] Generated AVIF preview for asset_id={} path={}",
+                                asset_id,
+                                path
+                            );
+                        }
+                    }
+                    if avif_path.exists() {
+                        let etag = tokio::fs::metadata(&avif_path)
+                            .await
+                            .ok()
+                            .and_then(|m| weak_etag_from_metadata(&m));
+                        if let Some(et) = etag.as_deref() {
+                            if if_none_match_allows_304(request.headers(), et) {
+                                let mut headers_map = HeaderMap::new();
+                                headers_map.insert(
+                                    header::CONTENT_TYPE,
+                                    axum::http::HeaderValue::from_static("image/avif"),
+                                );
+                                add_private_cache_headers(&mut headers_map, Some(et));
+                                if let Some(sc) = &pin_set_cookie {
+                                    headers_map.insert(
+                                        header::SET_COOKIE,
+                                        axum::http::HeaderValue::from_str(sc).unwrap(),
+                                    );
+                                }
+                                return Ok((StatusCode::NOT_MODIFIED, headers_map).into_response());
+                            }
+                        }
+                        let bytes = tokio::fs::read(&avif_path).await.map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to read AVIF file {}: {}",
+                                avif_path.display(),
+                                e
+                            )
+                        })?;
+                        let mut headers_map = HeaderMap::new();
+                        headers_map.insert(
+                            header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("image/avif"),
+                        );
+                        add_private_cache_headers(&mut headers_map, etag.as_deref());
+                        if let Some(sc) = &pin_set_cookie {
+                            headers_map.insert(
+                                header::SET_COOKIE,
+                                axum::http::HeaderValue::from_str(sc).unwrap(),
+                            );
+                        }
+                        return Ok((headers_map, bytes).into_response());
+                    }
+                }
+
+                let jpeg_path = state.image_preview_jpeg_path_for(&user.user_id, &asset_id);
+                let refresh_placeholder =
+                    jpeg_path.exists() && cache_matches_raw_placeholder_jpeg(&jpeg_path, 2560);
+                if !jpeg_path.exists() || refresh_placeholder {
+                    generate_display_jpeg(&path, &jpeg_path, 2560).map_err(|e| {
+                        anyhow::anyhow!("Failed to generate JPEG preview for {}: {}", asset_id, e)
+                    })?;
+                    tracing::info!(
+                        target: "upload",
+                        "[RAW] Generated JPEG preview for asset_id={} path={} refresh_placeholder={}",
+                        asset_id,
+                        path,
+                        refresh_placeholder
+                    );
+                }
+
+                let etag = tokio::fs::metadata(&jpeg_path)
+                    .await
+                    .ok()
+                    .and_then(|m| weak_etag_from_metadata(&m));
+                if let Some(et) = etag.as_deref() {
+                    if if_none_match_allows_304(request.headers(), et) {
+                        let mut headers_map = HeaderMap::new();
+                        headers_map.insert(
+                            header::CONTENT_TYPE,
+                            axum::http::HeaderValue::from_static("image/jpeg"),
+                        );
+                        add_private_cache_headers(&mut headers_map, Some(et));
+                        if let Some(sc) = &pin_set_cookie {
+                            headers_map.insert(
+                                header::SET_COOKIE,
+                                axum::http::HeaderValue::from_str(sc).unwrap(),
+                            );
+                        }
+                        return Ok((StatusCode::NOT_MODIFIED, headers_map).into_response());
+                    }
+                }
+
+                let bytes = tokio::fs::read(&jpeg_path).await.map_err(|e| {
+                    anyhow::anyhow!("Failed to read JPEG preview {}: {}", jpeg_path.display(), e)
+                })?;
+                let mut headers_map = HeaderMap::new();
+                headers_map.insert(
+                    header::CONTENT_TYPE,
+                    axum::http::HeaderValue::from_static("image/jpeg"),
+                );
+                add_private_cache_headers(&mut headers_map, etag.as_deref());
+                if let Some(sc) = &pin_set_cookie {
+                    headers_map.insert(
+                        header::SET_COOKIE,
+                        axum::http::HeaderValue::from_str(sc).unwrap(),
+                    );
+                }
+                return Ok((headers_map, bytes).into_response());
+            }
+            RawImageServeMode::OriginalBytes | RawImageServeMode::NotRaw => {}
         }
 
         // If this is a video, use ServeFile to support Range seeking / progressive playback.
@@ -4236,9 +4441,18 @@ pub async fn serve_thumbnail(
         state.thumbnail_path_for(&user.user_id, &asset_id)
     };
 
-    if !cache_path.exists() {
+    let refresh_raw_placeholder = !is_video
+        && cache_path.exists()
+        && is_raw_still_path(&orig_path)
+        && cache_matches_raw_placeholder_webp(&cache_path, 512);
+    if !cache_path.exists() || refresh_raw_placeholder {
         debug!(
-            "[THUMBNAIL] Cache miss for asset_id={}, is_video={}, cache_path={}",
+            "[THUMBNAIL] Cache {} for asset_id={}, is_video={}, cache_path={}",
+            if refresh_raw_placeholder {
+                "placeholder refresh"
+            } else {
+                "miss"
+            },
             asset_id,
             is_video,
             cache_path.display()
@@ -4331,7 +4545,27 @@ fn generate_thumbnail(
 
     // Decode source upright. open_image_any applies EXIF/HEIC display transforms when needed.
     let path = std::path::Path::new(original_path);
-    let img = open_image_any(path)?;
+    let img = match open_image_any(path) {
+        Ok(img) => img,
+        Err(err)
+            if crate::photos::is_raw_still_extension(
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .as_str(),
+            ) =>
+        {
+            info!(
+                target: "upload",
+                "[RAW] thumbnail preview unavailable; using placeholder path={} err={}",
+                path.display(),
+                err
+            );
+            crate::photos::metadata::raw_placeholder_image(512)
+        }
+        Err(err) => return Err(err),
+    };
     let (w, h) = img.dimensions();
     // Target geometry: longest side 512
     let max_side: u32 = 512;
@@ -4351,6 +4585,63 @@ fn generate_thumbnail(
 
     let mut f = fs::File::create(thumb_path)?;
     f.write_all(&webp_data)?;
+    Ok(())
+}
+
+fn generate_display_jpeg(
+    original_path: &str,
+    jpeg_path: &std::path::Path,
+    max_side: u32,
+) -> Result<(), anyhow::Error> {
+    use std::fs;
+    use std::io::Write;
+
+    if let Some(parent) = jpeg_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let path = std::path::Path::new(original_path);
+    let mut img = match open_image_any(path) {
+        Ok(img) => img,
+        Err(err)
+            if crate::photos::is_raw_still_extension(
+                path.extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase()
+                    .as_str(),
+            ) =>
+        {
+            info!(
+                target: "upload",
+                "[RAW] display preview unavailable; using placeholder path={} err={}",
+                path.display(),
+                err
+            );
+            crate::photos::metadata::raw_placeholder_image(max_side)
+        }
+        Err(err) => return Err(err),
+    };
+
+    let (w, h) = img.dimensions();
+    if w > max_side || h > max_side {
+        let (tw, th) = if w >= h {
+            let nw = max_side;
+            let nh = ((h as f32) * (nw as f32 / w as f32)).round() as u32;
+            (nw, nh)
+        } else {
+            let nh = max_side;
+            let nw = ((w as f32) * (nh as f32 / h as f32)).round() as u32;
+            (nw, nh)
+        };
+        img = img.resize(tw.max(1), th.max(1), FilterType::Lanczos3);
+    }
+
+    let rgb = img.to_rgb8();
+    let mut f = fs::File::create(jpeg_path)?;
+    let mut encoder = JpegEncoder::new_with_quality(&mut f, 88);
+    encoder.encode(&rgb, rgb.width(), rgb.height(), image::ColorType::Rgb8)?;
+    f.flush()?;
     Ok(())
 }
 
@@ -7268,7 +7559,12 @@ pub async fn debug_photo_row(
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_declared_image, sniff_image_content_type};
+    use super::{
+        cache_matches_raw_placeholder_jpeg, cache_matches_raw_placeholder_webp,
+        generate_display_jpeg, generate_thumbnail, looks_like_declared_image,
+        query_has_format_param, raw_image_serve_mode, sniff_image_content_type, RawImageServeMode,
+    };
+    use std::fs;
 
     #[test]
     fn looks_like_declared_image_accepts_valid_avif_signature() {
@@ -7285,5 +7581,138 @@ mod tests {
         let bytes = [0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F'];
         assert!(!looks_like_declared_image("image/avif", &bytes));
         assert_eq!(sniff_image_content_type(&bytes), Some("image/jpeg"));
+    }
+
+    #[test]
+    fn looks_like_declared_image_accepts_dng_tiff_header() {
+        let bytes = [0x49, 0x49, 0x2A, 0x00, 0x08, 0x00, 0x00, 0x00];
+        assert!(looks_like_declared_image("image/dng", &bytes));
+    }
+
+    #[test]
+    fn raw_image_serve_mode_prefers_original_when_requested() {
+        assert_eq!(
+            raw_image_serve_mode("image/dng", "foo=bar&format=original", true),
+            RawImageServeMode::OriginalBytes
+        );
+        assert_eq!(
+            raw_image_serve_mode("image/dng", "", true),
+            RawImageServeMode::DerivedAvif
+        );
+        assert_eq!(
+            raw_image_serve_mode("image/dng", "", false),
+            RawImageServeMode::DerivedJpeg
+        );
+        assert_eq!(
+            raw_image_serve_mode("image/jpeg", "format=original", true),
+            RawImageServeMode::NotRaw
+        );
+        assert!(query_has_format_param("format=original&x=1", "original"));
+    }
+
+    #[test]
+    fn generate_thumbnail_uses_placeholder_for_invalid_dng() {
+        let base = std::env::temp_dir().join(format!(
+            "openphotos-dng-thumb-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let dng_path = base.join("sample.dng");
+        let thumb_path = base.join("sample.webp");
+        fs::write(&dng_path, b"not-a-real-dng").expect("write dng");
+
+        generate_thumbnail(dng_path.to_str().expect("utf8 path"), &thumb_path)
+            .expect("thumbnail generation should fall back to placeholder");
+
+        let bytes = fs::read(&thumb_path).expect("read thumbnail");
+        assert!(bytes.len() > 12);
+        assert_eq!(&bytes[0..4], b"RIFF");
+        assert_eq!(&bytes[8..12], b"WEBP");
+
+        let _ = fs::remove_file(&dng_path);
+        let _ = fs::remove_file(&thumb_path);
+        let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn generate_display_jpeg_uses_placeholder_for_invalid_dng() {
+        let base = std::env::temp_dir().join(format!(
+            "openphotos-dng-jpeg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let dng_path = base.join("sample.dng");
+        let jpeg_path = base.join("sample.jpg");
+        fs::write(&dng_path, b"not-a-real-dng").expect("write dng");
+
+        generate_display_jpeg(dng_path.to_str().expect("utf8 path"), &jpeg_path, 1024)
+            .expect("jpeg generation should fall back to placeholder");
+
+        let bytes = fs::read(&jpeg_path).expect("read jpeg");
+        assert!(bytes.len() > 4);
+        assert_eq!(bytes[0], 0xFF);
+        assert_eq!(bytes[1], 0xD8);
+
+        let _ = fs::remove_file(&dng_path);
+        let _ = fs::remove_file(&jpeg_path);
+        let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn placeholder_thumbnail_bytes_are_detected_for_refresh() {
+        let base = std::env::temp_dir().join(format!(
+            "openphotos-dng-thumb-refresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let dng_path = base.join("sample.dng");
+        let thumb_path = base.join("sample.webp");
+        fs::write(&dng_path, b"not-a-real-dng").expect("write dng");
+
+        generate_thumbnail(dng_path.to_str().expect("utf8 path"), &thumb_path)
+            .expect("generate placeholder thumbnail");
+
+        assert!(cache_matches_raw_placeholder_webp(&thumb_path, 512));
+
+        let _ = fs::remove_file(&dng_path);
+        let _ = fs::remove_file(&thumb_path);
+        let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn placeholder_display_jpeg_bytes_are_detected_for_refresh() {
+        let base = std::env::temp_dir().join(format!(
+            "openphotos-dng-jpeg-refresh-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let dng_path = base.join("sample.dng");
+        let jpeg_path = base.join("sample.jpg");
+        fs::write(&dng_path, b"not-a-real-dng").expect("write dng");
+
+        generate_display_jpeg(dng_path.to_str().expect("utf8 path"), &jpeg_path, 2560)
+            .expect("generate placeholder jpeg");
+
+        assert!(cache_matches_raw_placeholder_jpeg(&jpeg_path, 2560));
+
+        let _ = fs::remove_file(&dng_path);
+        let _ = fs::remove_file(&jpeg_path);
+        let _ = fs::remove_dir(&base);
     }
 }

@@ -3,7 +3,7 @@ use image::imageops::FilterType;
 use image::{DynamicImage, GenericImageView, Luma};
 use std::path::Path;
 
-use crate::photos::metadata::{ensure_heic_ml_proxy, open_image_upright};
+use crate::photos::metadata::{ensure_heic_ml_proxy, open_image_any, open_image_upright};
 
 /// Compute a 64-bit perceptual hash (pHash) using a DCT-based algorithm.
 /// Steps:
@@ -24,6 +24,10 @@ pub fn compute_phash_from_path(path: &Path) -> Result<u64> {
             .with_context(|| format!("Failed to build ML proxy for pHash: {:?}", path))?;
         let img = image::open(&proxy)
             .with_context(|| format!("Failed to open ML proxy JPG for pHash: {:?}", proxy))?;
+        return compute_phash(&img);
+    } else if ext == "dng" {
+        let img = open_image_any(path)
+            .with_context(|| format!("Failed to open DNG preview for pHash: {:?}", path))?;
         return compute_phash(&img);
     }
 

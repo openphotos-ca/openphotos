@@ -2537,22 +2537,9 @@ pub(crate) async fn index_single_photo_for_user(
         .and_then(|e| e.to_str())
         .unwrap_or("")
         .to_lowercase();
-    let content_type = match ext.as_str() {
-        "jpg" | "jpeg" => "image/jpeg".to_string(),
-        "png" => "image/png".to_string(),
-        "webp" => "image/webp".to_string(),
-        "bmp" => "image/bmp".to_string(),
-        "tiff" | "tif" => "image/tiff".to_string(),
-        "gif" => "image/gif".to_string(),
-        "heic" | "heif" => "image/heic".to_string(),
-        "avif" => "image/avif".to_string(),
-        "mp4" => "video/mp4".to_string(),
-        "mov" => "video/quicktime".to_string(),
-        "avi" => "video/x-msvideo".to_string(),
-        "mkv" => "video/x-matroska".to_string(),
-        "webm" => "video/webm".to_string(),
-        _ => "application/octet-stream".to_string(),
-    };
+    let content_type = crate::photos::mime_type_for_extension(ext.as_str())
+        .unwrap_or("application/octet-stream")
+        .to_string();
 
     // Try to load image only for formats commonly supported by the `image` crate
     let supports_decode = matches!(
@@ -2742,12 +2729,12 @@ pub(crate) async fn index_single_photo_for_user(
                     }
                 }
                 Err(e) => {
-                    if matches!(ext.as_str(), "heic" | "heif") {
-                        // Keep HEIC uploads indexable even when decode backends are unavailable.
-                        // This allows metadata/content_id-based Live Photo pairing to succeed
-                        // instead of leaving the paired MOV as a standalone short video.
+                    if crate::photos::supports_metadata_only_still_ingest(ext.as_str()) {
+                        // Keep still-image uploads indexable even when preview/decode backends are unavailable.
+                        // This preserves gallery visibility and content_id-based pairing instead of skipping ingest.
                         tracing::warn!(
-                            "[REINDEX] HEIC decode unavailable; indexing metadata-only for {}: {}",
+                            "[REINDEX] {} decode unavailable; indexing metadata-only for {}: {}",
+                            ext.to_uppercase(),
                             image_path.display(),
                             e
                         );
@@ -4467,9 +4454,29 @@ fn ensure_thumbnail_for_user(
         fs::create_dir_all(parent)?;
     }
 
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
     let img = match crate::photos::metadata::open_image_any(image_path) {
         Ok(i) => i,
         Err(e) => {
+            if crate::photos::is_raw_still_extension(ext.as_str()) {
+                tracing::warn!(
+                    target: "upload",
+                    "[RAW] thumbnail preview unavailable; writing placeholder asset={} path={} err={}",
+                    asset_id,
+                    image_path.display(),
+                    e
+                );
+                let placeholder = crate::photos::metadata::raw_placeholder_image(512);
+                let rgb = placeholder.to_rgb8();
+                let enc = webp::Encoder::from_rgb(rgb.as_raw(), rgb.width(), rgb.height());
+                let webp_data = enc.encode(80.0);
+                std::fs::write(thumb_path, &*webp_data)?;
+                return Ok(());
+            }
             tracing::warn!(
                 "[REINDEX] Could not open image for thumbnail {}: {}",
                 image_path.display(),

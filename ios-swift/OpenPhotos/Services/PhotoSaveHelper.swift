@@ -99,7 +99,7 @@ enum PhotoSaveHelper {
         try await ensureAddAuthorization()
         let enc = assetId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? assetId
         // Download original image bytes (could be HEIC or JPEG). Decrypt if locked.
-        let tmp = try await downloadToTemp(path: "/api/images/\(enc)", filename: (filename ?? assetId), accept: "image/heic, image/*;q=0.8")
+        let tmp = try await downloadToTemp(path: "/api/images/\(enc)?format=original", filename: (filename ?? assetId), accept: "image/heic, image/*;q=0.8")
         let ext = (filename as NSString?)?.pathExtension.lowercased() ?? "jpg"
         let plain = try decryptIfNeeded(tmp, suggestedExt: ext)
         try await PHPhotoLibrary.shared().performChanges {
@@ -148,7 +148,7 @@ enum PhotoSaveHelper {
         try await ensureAddAuthorization()
         // 1) Still image
         let enc = assetId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? assetId
-        let stillTmp = try await downloadToTemp(path: "/api/images/\(enc)", filename: (filename ?? assetId) + ".heic", accept: "image/heic, image/*;q=0.8")
+        let stillTmp = try await downloadToTemp(path: "/api/images/\(enc)?format=original", filename: (filename ?? assetId) + ".heic", accept: "image/heic, image/*;q=0.8")
         let stillPlain = try decryptIfNeeded(stillTmp, suggestedExt: "heic")
 
         // 2) Motion video (.mov). Locked motion uses /api/live-locked

@@ -645,7 +645,7 @@ final class ServerPhotosService {
 
     private func fetchOriginalBytes(assetId: String) async throws -> (Data, String?) {
         let enc = assetId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? assetId
-        let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/images/\(enc)")
+        let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/images/\(enc)?format=original")
         var req = URLRequest(url: url)
         req.httpMethod = "GET"
         let (data, http) = try await AuthorizedHTTPClient.shared.request(req)
@@ -697,6 +697,7 @@ final class ServerPhotosService {
         switch mimeType.lowercased() {
         case "image/jpeg": return "jpg"
         case "image/heic", "image/heif": return "heic"
+        case "image/dng": return "dng"
         case "image/png": return "png"
         case "video/quicktime": return "mov"
         case "video/mp4": return "mp4"

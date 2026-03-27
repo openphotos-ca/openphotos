@@ -57,6 +57,34 @@ pub struct Photo {
     pub rating: Option<i16>,
 }
 
+pub fn mime_type_for_extension(ext: &str) -> Option<&'static str> {
+    match ext {
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "png" => Some("image/png"),
+        "gif" => Some("image/gif"),
+        "webp" => Some("image/webp"),
+        "bmp" => Some("image/bmp"),
+        "tiff" | "tif" => Some("image/tiff"),
+        "heic" | "heif" => Some("image/heic"),
+        "avif" => Some("image/avif"),
+        "dng" => Some("image/dng"),
+        "mp4" | "m4v" => Some("video/mp4"),
+        "mov" => Some("video/quicktime"),
+        "avi" => Some("video/x-msvideo"),
+        "mkv" => Some("video/x-matroska"),
+        "webm" => Some("video/webm"),
+        _ => None,
+    }
+}
+
+pub fn is_raw_still_extension(ext: &str) -> bool {
+    matches!(ext, "dng")
+}
+
+pub fn supports_metadata_only_still_ingest(ext: &str) -> bool {
+    matches!(ext, "heic" | "heif" | "dng")
+}
+
 impl Photo {
     pub fn from_path(path: &Path, user_id: &str) -> Result<Self> {
         use crate::photos::asset_id;
@@ -93,25 +121,11 @@ impl Photo {
         );
 
         // Determine mime type
-        let mime_type = match path
+        let mime_type = path
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
-            .as_deref()
-        {
-            Some("jpg") | Some("jpeg") => Some("image/jpeg".to_string()),
-            Some("png") => Some("image/png".to_string()),
-            Some("gif") => Some("image/gif".to_string()),
-            Some("webp") => Some("image/webp".to_string()),
-            Some("heic") | Some("heif") => Some("image/heic".to_string()),
-            Some("avif") => Some("image/avif".to_string()),
-            Some("mp4") => Some("video/mp4".to_string()),
-            Some("mov") => Some("video/quicktime".to_string()),
-            Some("avi") => Some("video/x-msvideo".to_string()),
-            Some("mkv") => Some("video/x-matroska".to_string()),
-            Some("webm") => Some("video/webm".to_string()),
-            _ => None,
-        };
+            .and_then(|e| mime_type_for_extension(e.as_str()).map(|m| m.to_string()));
 
         Ok(Photo {
             id: None,
@@ -296,9 +310,22 @@ impl Photo {
 
 #[cfg(test)]
 mod tests {
-    use super::Photo;
+    use super::{
+        is_raw_still_extension, mime_type_for_extension, supports_metadata_only_still_ingest, Photo,
+    };
     use std::fs;
     use std::path::PathBuf;
+
+    #[test]
+    fn mime_type_for_extension_supports_dng() {
+        assert_eq!(mime_type_for_extension("dng"), Some("image/dng"));
+    }
+
+    #[test]
+    fn dng_is_treated_as_raw_and_metadata_only_capable() {
+        assert!(is_raw_still_extension("dng"));
+        assert!(supports_metadata_only_still_ingest("dng"));
+    }
 
     fn make_temp_dir() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(

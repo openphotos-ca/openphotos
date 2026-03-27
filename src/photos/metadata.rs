@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use exif::{Exif, In, Reader, Tag, Value};
 use image::imageops;
-use image::{DynamicImage, GenericImageView, RgbaImage};
+use image::{DynamicImage, GenericImageView, Rgba, RgbaImage};
 use md5;
 use std::fs::File;
 use std::io::BufReader;
@@ -60,49 +60,8 @@ pub fn extract_metadata(photo: &mut Photo) -> Result<()> {
 /// Open an image and adjust orientation to be upright according to EXIF Orientation tag.
 /// If EXIF cannot be read or Orientation is missing, returns the image as-is.
 pub fn open_image_upright(path: &Path) -> Result<DynamicImage> {
-    let mut img = image::open(path)?;
-
-    if let Ok(exif) = read_exif(path) {
-        if let Some(orientation) = exif.get_field(Tag::Orientation, In::PRIMARY) {
-            if let Value::Short(ref vals) = orientation.value {
-                if let Some(&o) = vals.first() {
-                    match o as u16 {
-                        1 => { /* no-op */ }
-                        2 => {
-                            let buf = imageops::flip_horizontal(&img);
-                            img = DynamicImage::ImageRgba8(buf);
-                        }
-                        3 => {
-                            img = DynamicImage::ImageRgba8(imageops::rotate180(&img));
-                        }
-                        4 => {
-                            let buf = imageops::flip_vertical(&img);
-                            img = DynamicImage::ImageRgba8(buf);
-                        }
-                        5 => {
-                            let rotated = DynamicImage::ImageRgba8(imageops::rotate90(&img));
-                            let buf = imageops::flip_horizontal(&rotated);
-                            img = DynamicImage::ImageRgba8(buf);
-                        }
-                        6 => {
-                            img = DynamicImage::ImageRgba8(imageops::rotate90(&img));
-                        }
-                        7 => {
-                            let rotated = DynamicImage::ImageRgba8(imageops::rotate270(&img));
-                            let buf = imageops::flip_horizontal(&rotated);
-                            img = DynamicImage::ImageRgba8(buf);
-                        }
-                        8 => {
-                            img = DynamicImage::ImageRgba8(imageops::rotate270(&img));
-                        }
-                        _ => { /* no-op */ }
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(img)
+    let img = image::open(path)?;
+    Ok(apply_exif_orientation_from_path(img, path))
 }
 
 /// Try to open any supported image, including HEIC/HEIF and AVIF via ffmpeg fallback when needed.
@@ -123,7 +82,7 @@ pub fn open_image_any(path: &Path) -> Result<DynamicImage> {
                         Ok(img)
                     }
                     Err(e2) => {
-                        let mut img = decode_still_via_ffmpeg(path).map_err(|e3| {
+                        let img = decode_still_via_ffmpeg(path).map_err(|e3| {
                             anyhow::anyhow!(
                                 "HEIC decode failed: libheif={} ffmpeg={} prior={}",
                                 e2,
@@ -131,61 +90,121 @@ pub fn open_image_any(path: &Path) -> Result<DynamicImage> {
                                 e
                             )
                         })?;
-                        // Apply EXIF orientation for ffmpeg path as well
-                        if let Ok(exif) = read_exif(path) {
-                            if let Some(orientation) = exif.get_field(Tag::Orientation, In::PRIMARY)
-                            {
-                                if let Value::Short(ref vals) = orientation.value {
-                                    if let Some(&o) = vals.first() {
-                                        use image::imageops;
-                                        img = match o as u16 {
-                                            1 => img,
-                                            2 => DynamicImage::ImageRgba8(
-                                                imageops::flip_horizontal(&img),
-                                            ),
-                                            3 => {
-                                                DynamicImage::ImageRgba8(imageops::rotate180(&img))
-                                            }
-                                            4 => DynamicImage::ImageRgba8(imageops::flip_vertical(
-                                                &img,
-                                            )),
-                                            5 => {
-                                                let r = DynamicImage::ImageRgba8(
-                                                    imageops::rotate90(&img),
-                                                );
-                                                DynamicImage::ImageRgba8(imageops::flip_horizontal(
-                                                    &r,
-                                                ))
-                                            }
-                                            6 => DynamicImage::ImageRgba8(imageops::rotate90(&img)),
-                                            7 => {
-                                                let r = DynamicImage::ImageRgba8(
-                                                    imageops::rotate270(&img),
-                                                );
-                                                DynamicImage::ImageRgba8(imageops::flip_horizontal(
-                                                    &r,
-                                                ))
-                                            }
-                                            8 => {
-                                                DynamicImage::ImageRgba8(imageops::rotate270(&img))
-                                            }
-                                            _ => img,
-                                        };
-                                    }
-                                }
-                            }
-                        }
-                        Ok(img)
+                        Ok(apply_exif_orientation_from_path(img, path))
                     }
                 }
             } else if ext == "avif" {
                 decode_still_via_ffmpeg(path)
                     .map_err(|e2| anyhow::anyhow!("AVIF decode failed: ffmpeg={} prior={}", e2, e))
+            } else if ext == "dng" {
+                match decode_dng_preview(path) {
+                    Ok(img) => {
+                        info!(
+                            target: "upload",
+                            "[RAW] DNG preview decode source=embedded_preview path={}",
+                            path.display()
+                        );
+                        Ok(img)
+                    }
+                    Err(preview_err) => {
+                        let img = decode_still_via_ffmpeg(path).map_err(|ffmpeg_err| {
+                            anyhow::anyhow!(
+                                "DNG decode failed: embedded_preview={} ffmpeg={} prior={}",
+                                preview_err,
+                                ffmpeg_err,
+                                e
+                            )
+                        })?;
+                        info!(
+                            target: "upload",
+                            "[RAW] DNG preview decode source=ffmpeg path={}",
+                            path.display()
+                        );
+                        Ok(apply_exif_orientation_from_path(img, path))
+                    }
+                }
             } else {
                 Err(e)
             }
         }
     }
+}
+
+pub fn raw_placeholder_image(max_side: u32) -> DynamicImage {
+    let side = max_side.max(64);
+    let mut img = RgbaImage::from_pixel(side, side, Rgba([231, 226, 218, 255]));
+    let border = (side / 48).max(4);
+    let stripe = Rgba([213, 207, 198, 255]);
+    let frame = Rgba([86, 79, 72, 255]);
+    let badge = Rgba([71, 82, 93, 255]);
+    let accent = Rgba([245, 243, 239, 255]);
+
+    for y in 0..side {
+        for x in 0..side {
+            if x < border || y < border || x >= side - border || y >= side - border {
+                img.put_pixel(x, y, frame);
+            }
+        }
+    }
+
+    let step = (side / 8).max(20);
+    let thickness = (side / 72).max(3);
+    for start in (0..(side * 2)).step_by(step as usize) {
+        for offset in 0..thickness {
+            for x in 0..side {
+                let y = start as i32 - x as i32 + offset as i32;
+                if (0..side as i32).contains(&y) {
+                    img.put_pixel(x, y as u32, stripe);
+                }
+            }
+        }
+    }
+
+    let badge_w = side * 11 / 16;
+    let badge_h = side / 4;
+    let badge_x = (side - badge_w) / 2;
+    let badge_y = (side - badge_h) / 2;
+    for y in badge_y..(badge_y + badge_h) {
+        for x in badge_x..(badge_x + badge_w) {
+            img.put_pixel(x, y, badge);
+        }
+    }
+
+    let stroke = (side / 80).max(3);
+    let gap = stroke * 2;
+    let left = badge_x + badge_w / 6;
+    let mid = badge_y + badge_h / 4;
+    let bottom = badge_y + badge_h - badge_h / 4;
+    for y in mid..bottom {
+        for dx in 0..stroke {
+            img.put_pixel(left + dx, y, accent);
+            img.put_pixel(left + gap + dx, y, accent);
+            img.put_pixel(left + dx + gap / 2, mid + (y - mid) / 2, accent);
+        }
+    }
+    let center = badge_x + badge_w / 2;
+    for y in mid..bottom {
+        for dx in 0..stroke {
+            img.put_pixel(center + dx, y, accent);
+            img.put_pixel(center + gap + dx, y, accent);
+        }
+    }
+    let right = badge_x + (badge_w * 3 / 4);
+    for y in mid..bottom {
+        for dx in 0..stroke {
+            img.put_pixel(right + dx, y, accent);
+            let diag = right + gap + dx + (y - mid) / 2;
+            if diag < badge_x + badge_w - stroke {
+                img.put_pixel(diag, y, accent);
+            }
+            let diag2 = right + gap + dx + (bottom - y) / 2;
+            if diag2 < badge_x + badge_w - stroke {
+                img.put_pixel(diag2, y, accent);
+            }
+        }
+    }
+
+    DynamicImage::ImageRgba8(img)
 }
 
 /// Get the application-wide ML cache directory (for HEIC/HEIF/AVIF -> JPG proxies).
@@ -666,6 +685,116 @@ fn decode_still_via_ffmpeg(path: &Path) -> Result<DynamicImage> {
     let img = image::load_from_memory(&output.stdout)
         .map_err(|e| anyhow::anyhow!("Failed to load decoded still image from memory: {}", e))?;
     Ok(img)
+}
+
+fn decode_dng_preview(path: &Path) -> Result<DynamicImage> {
+    let exif = read_exif(path)?;
+    for ifd_num in [In::THUMBNAIL, In::PRIMARY] {
+        if let Some(preview_bytes) = embedded_dng_preview_bytes(&exif, ifd_num) {
+            let preview = image::load_from_memory(preview_bytes)
+                .with_context(|| format!("decode embedded DNG preview from {}", path.display()))?;
+            return Ok(apply_exif_orientation_from_path(preview, path));
+        }
+    }
+    Err(anyhow::anyhow!(
+        "no embedded JPEG preview found in {}",
+        path.display()
+    ))
+}
+
+fn embedded_dng_preview_bytes<'a>(exif: &'a Exif, ifd_num: In) -> Option<&'a [u8]> {
+    let buf = exif.buf();
+
+    let jpeg_offset = exif
+        .get_field(Tag::JPEGInterchangeFormat, ifd_num)
+        .and_then(|f| f.value.get_uint(0));
+    let jpeg_len = exif
+        .get_field(Tag::JPEGInterchangeFormatLength, ifd_num)
+        .and_then(|f| f.value.get_uint(0));
+    if let Some(bytes) = preview_slice_from_offset_len(buf, jpeg_offset, jpeg_len) {
+        if bytes.starts_with(&[0xFF, 0xD8]) {
+            return Some(bytes);
+        }
+    }
+
+    let strip_offsets: Vec<u32> = exif
+        .get_field(Tag::StripOffsets, ifd_num)
+        .and_then(|f| f.value.iter_uint())
+        .map(|vals| vals.collect())
+        .unwrap_or_default();
+    let strip_counts: Vec<u32> = exif
+        .get_field(Tag::StripByteCounts, ifd_num)
+        .and_then(|f| f.value.iter_uint())
+        .map(|vals| vals.collect())
+        .unwrap_or_default();
+    if strip_offsets.is_empty() || strip_offsets.len() != strip_counts.len() {
+        return None;
+    }
+
+    let contiguous = strip_offsets
+        .windows(2)
+        .zip(strip_counts.iter())
+        .all(|(pair, count)| pair[0].saturating_add(*count) == pair[1]);
+    if !contiguous {
+        return None;
+    }
+
+    let offset = strip_offsets[0];
+    let len = strip_counts
+        .iter()
+        .try_fold(0u32, |acc, count| acc.checked_add(*count))?;
+    let bytes = preview_slice_from_offset_len(buf, Some(offset), Some(len))?;
+    if bytes.starts_with(&[0xFF, 0xD8]) {
+        Some(bytes)
+    } else {
+        None
+    }
+}
+
+fn preview_slice_from_offset_len<'a>(
+    buf: &'a [u8],
+    offset: Option<u32>,
+    len: Option<u32>,
+) -> Option<&'a [u8]> {
+    let (offset, len) = match (offset, len) {
+        (Some(offset), Some(len)) if len > 0 => (offset as usize, len as usize),
+        _ => return None,
+    };
+    offset
+        .checked_add(len)
+        .filter(|end| *end <= buf.len())
+        .map(|end| &buf[offset..end])
+}
+
+fn apply_exif_orientation_from_path(img: DynamicImage, path: &Path) -> DynamicImage {
+    let orientation = read_exif(path)
+        .ok()
+        .and_then(|exif| exif.get_field(Tag::Orientation, In::PRIMARY).cloned())
+        .and_then(|field| match field.value {
+            Value::Short(vals) => vals.first().copied(),
+            _ => None,
+        })
+        .unwrap_or(1);
+    apply_orientation(img, orientation)
+}
+
+fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
+    match orientation {
+        2 => DynamicImage::ImageRgba8(imageops::flip_horizontal(&img)),
+        3 => DynamicImage::ImageRgba8(imageops::rotate180(&img)),
+        4 => DynamicImage::ImageRgba8(imageops::flip_vertical(&img)),
+        5 => {
+            let rotated = DynamicImage::ImageRgba8(imageops::rotate90(&img));
+            DynamicImage::ImageRgba8(imageops::flip_horizontal(&rotated))
+        }
+        6 => DynamicImage::ImageRgba8(imageops::rotate90(&img)),
+        7 => {
+            let rotated = DynamicImage::ImageRgba8(imageops::rotate270(&img));
+            DynamicImage::ImageRgba8(imageops::flip_horizontal(&rotated))
+        }
+        8 => DynamicImage::ImageRgba8(imageops::rotate270(&img)),
+        _ => img,
+    }
 }
 
 fn read_exif(path: &Path) -> Result<Exif> {
@@ -1168,7 +1297,7 @@ pub async fn reverse_geocode(
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_heic_ml_proxy;
+    use super::{decode_dng_preview, ensure_heic_ml_proxy, raw_placeholder_image};
     use image::codecs::jpeg::JpegEncoder;
     use std::fs;
     use std::path::PathBuf;
@@ -1203,5 +1332,65 @@ mod tests {
         assert!(proxy.exists(), "proxy file should exist");
         assert_ne!(proxy, avif_like, "avif path should map to proxy");
         assert_eq!(proxy.extension().and_then(|e| e.to_str()), Some("jpg"));
+    }
+
+    #[test]
+    fn raw_placeholder_image_has_requested_geometry() {
+        let img = raw_placeholder_image(320);
+        assert_eq!(img.width(), 320);
+        assert_eq!(img.height(), 320);
+    }
+
+    #[test]
+    fn decode_dng_preview_supports_primary_strip_offsets_preview() {
+        let jpeg = {
+            let mut buf = Vec::new();
+            let img = image::RgbImage::from_pixel(2, 1, image::Rgb([24, 120, 220]));
+            JpegEncoder::new_with_quality(&mut buf, 85)
+                .encode(&img, img.width(), img.height(), image::ColorType::Rgb8)
+                .expect("encode jpeg");
+            buf
+        };
+
+        let ifd_offset = 8usize;
+        let entry_count = 2u16;
+        let ifd_size = 2usize + (entry_count as usize * 12) + 4usize;
+        let preview_offset = (ifd_offset + ifd_size) as u32;
+        let preview_len = jpeg.len() as u32;
+
+        let mut dng = Vec::new();
+        dng.extend_from_slice(b"MM");
+        dng.extend_from_slice(&42u16.to_be_bytes());
+        dng.extend_from_slice(&(ifd_offset as u32).to_be_bytes());
+        dng.extend_from_slice(&entry_count.to_be_bytes());
+
+        dng.extend_from_slice(&0x0111u16.to_be_bytes());
+        dng.extend_from_slice(&4u16.to_be_bytes());
+        dng.extend_from_slice(&1u32.to_be_bytes());
+        dng.extend_from_slice(&preview_offset.to_be_bytes());
+
+        dng.extend_from_slice(&0x0117u16.to_be_bytes());
+        dng.extend_from_slice(&4u16.to_be_bytes());
+        dng.extend_from_slice(&1u32.to_be_bytes());
+        dng.extend_from_slice(&preview_len.to_be_bytes());
+
+        dng.extend_from_slice(&0u32.to_be_bytes());
+        dng.extend_from_slice(&jpeg);
+
+        let path = std::env::temp_dir().join(format!(
+            "openphotos-dng-preview-{}-{}.dng",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        fs::write(&path, &dng).expect("write temp dng");
+
+        let img = decode_dng_preview(&path).expect("decode embedded preview");
+        assert_eq!(img.width(), 2);
+        assert_eq!(img.height(), 1);
+
+        let _ = fs::remove_file(&path);
     }
 }

@@ -100,6 +100,7 @@ pub async fn serve_image(
         Some("png") => "image/png",
         Some("gif") => "image/gif",
         Some("webp") => "image/webp",
+        Some("dng") => "image/dng",
         Some("heic") | Some("heif") => "image/heic",
         Some("avif") => "image/avif",
         _ => "image/jpeg",

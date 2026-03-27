@@ -2136,20 +2136,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
         let exportStartedAt = perfNow()
         let filename = resource.originalFilename
         let isVideo = resource.type == .video || resource.type == .fullSizeVideo || resource.type == .pairedVideo
-        let lower = filename.lowercased()
         var mime: String
         if isVideo {
             mime = "video/quicktime"
-        } else if lower.hasSuffix(".heic") || lower.hasSuffix(".heif") {
-            mime = "image/heic"
-        } else if lower.hasSuffix(".png") {
-            mime = "image/png"
-        } else if lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") {
-            mime = "image/jpeg"
         } else {
-            // Fallback: try to detect from UTI if available; otherwise default to JPEG
-            mime = "image/jpeg"
+            mime = stillImageMimeType(for: filename)
         }
+        let lower = filename.lowercased()
         // Snapshot favorite flag from the asset (PhotoKit objects are thread-safe)
         let favFlag = asset.isFavorite
 
@@ -2560,6 +2553,27 @@ final class HybridUploadManager: NSObject, ObservableObject {
         // Keep strong ref until done; also remember request id for cancellation
         _ = writingRequest
         exportRequestsQueue.async { self.activeExportRequests[key] = writingRequest }
+    }
+
+    private func stillImageMimeType(for filename: String) -> String {
+        let lower = filename.lowercased()
+        if lower.hasSuffix(".dng") { return "image/dng" }
+        if lower.hasSuffix(".heic") || lower.hasSuffix(".heif") { return "image/heic" }
+        if lower.hasSuffix(".png") { return "image/png" }
+        if lower.hasSuffix(".jpg") || lower.hasSuffix(".jpeg") { return "image/jpeg" }
+        if lower.hasSuffix(".gif") { return "image/gif" }
+        if lower.hasSuffix(".webp") { return "image/webp" }
+        if lower.hasSuffix(".tif") || lower.hasSuffix(".tiff") { return "image/tiff" }
+        let ext = URL(fileURLWithPath: filename).pathExtension.lowercased()
+        if let utType = UTType(filenameExtension: ext), let mime = utType.preferredMIMEType {
+            switch mime.lowercased() {
+            case "image/x-adobe-dng", "application/dng":
+                return "image/dng"
+            default:
+                return mime
+            }
+        }
+        return "image/jpeg"
     }
 
     private func ensureUMKAvailableForLocked() -> Bool {

@@ -1007,6 +1007,18 @@ impl AppState {
             .join(tier2)
             .join(format!("{}_a2.avif", asset_id))
     }
+    pub fn image_preview_jpeg_path_for(&self, user_id: &str, asset_id: &str) -> std::path::PathBuf {
+        let a = asset_id.chars().nth(0).unwrap_or('0');
+        let b = asset_id.chars().nth(1).unwrap_or('0');
+        let c = asset_id.chars().nth(2).unwrap_or('0');
+        let d = asset_id.chars().nth(3).unwrap_or('0');
+        let tier1 = format!("{}{}", a, b);
+        let tier2 = format!("{}{}", c, d);
+        self.user_thumbnails_path(user_id)
+            .join(tier1)
+            .join(tier2)
+            .join(format!("{}_i2.jpg", asset_id))
+    }
     pub fn locked_original_path_for(&self, user_id: &str, asset_id: &str) -> std::path::PathBuf {
         let a = asset_id.chars().nth(0).unwrap_or('0');
         let b = asset_id.chars().nth(1).unwrap_or('0');
