@@ -12,6 +12,7 @@ OpenPhotos is a self-hosted photo platform with locked albums (E2EE), nested alb
 Access the demo here: [https://demo.openphotos.ca](https://demo.openphotos.ca)
 
 For the mobile app, use `https://demo.openphotos.ca` for the Server Endpoint URL.
+Download the iOS app from the App Store: [OpenPhotos](https://apps.apple.com/us/app/openphotos/id6759428882)
 
 ### Login Credentials
 
