@@ -22,6 +22,7 @@ import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.HashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import io.tus.java.client.TusClient;
@@ -79,12 +80,23 @@ public class TusUploadManager {
 
     /** Upload a single file (unlocked) with TUS metadata, foreground. */
     public void uploadUnlocked(File file, PhotoEntity photo, String albumPathsJson) throws Exception {
-        uploadUnlockedInternal(file, photo, albumPathsJson, null, true, true);
+        uploadUnlockedInternal(file, photo, albumPathsJson, null, null, null, true, true);
+    }
+
+    /** Upload a single file (unlocked) while preserving the original display name and mime type. */
+    public void uploadUnlocked(
+            File file,
+            PhotoEntity photo,
+            String albumPathsJson,
+            @Nullable String originalFilename,
+            @Nullable String originalMimeType
+    ) throws Exception {
+        uploadUnlockedInternal(file, photo, albumPathsJson, null, originalFilename, originalMimeType, true, true);
     }
 
     /** Queue-path unlocked upload: no extra upload rows and no direct synced-state mutation. */
     public void uploadUnlockedQueued(File file, PhotoEntity photo, String albumPathsJson, UploadEntity queueRow) throws Exception {
-        uploadUnlockedInternal(file, photo, albumPathsJson, queueRow, false, false);
+        uploadUnlockedInternal(file, photo, albumPathsJson, queueRow, null, null, false, false);
     }
 
     private void uploadUnlockedInternal(
@@ -92,6 +104,8 @@ public class TusUploadManager {
             PhotoEntity photo,
             String albumPathsJson,
             @Nullable UploadEntity queueRow,
+            @Nullable String originalFilename,
+            @Nullable String originalMimeType,
             boolean createForegroundRow,
             boolean markPhotoSyncedOnSuccess
     ) throws Exception {
@@ -108,18 +122,23 @@ public class TusUploadManager {
                         long now = System.currentTimeMillis() / 1000L;
                         photoDao.markSynced(contentId, now);
                     }
-                    logTusInfo("preflight skip existing asset_id=" + assetId + " file=" + file.getName());
+                    String existingName = chooseUploadFilename(queueRow, originalFilename, originalMimeType, file, photo);
+                    logTusInfo("preflight skip existing asset_id=" + assetId + " file=" + existingName);
                     return;
                 }
             } catch (Exception e) {
-                logTusWarn("preflight exists failed file=" + file.getName() + " reason=" + UploadFailurePolicy.summarize(e));
+                String existingName = chooseUploadFilename(queueRow, originalFilename, originalMimeType, file, photo);
+                logTusWarn("preflight exists failed file=" + existingName + " reason=" + UploadFailurePolicy.summarize(e));
             }
         }
 
-        Map<String, String> meta = new HashMap<>();
-        meta.put("filename", file.getName());
+        String uploadFilename = chooseUploadFilename(queueRow, originalFilename, originalMimeType, file, photo);
         String mime = (photo.mediaType == 1 ? "video" : "image");
-        meta.put("mime_type", mimeForName(file.getName(), mime));
+        String uploadMime = chooseUploadMime(queueRow, originalMimeType, uploadFilename, mime);
+
+        Map<String, String> meta = new HashMap<>();
+        meta.put("filename", uploadFilename);
+        meta.put("mime_type", uploadMime);
         meta.put("content_id", contentId);
         meta.put("media_type", mime);
         meta.put("created_at", String.valueOf(photo.creationTs));
@@ -135,9 +154,9 @@ public class TusUploadManager {
             UploadEntity ue = new UploadEntity();
             ue.itemId = java.util.UUID.randomUUID().toString();
             ue.contentId = contentId;
-            ue.filename = file.getName();
+            ue.filename = uploadFilename;
             ue.tempFilePath = file.getAbsolutePath();
-            ue.mimeType = photo.mediaType == 1 ? "video/*" : "image/*";
+            ue.mimeType = uploadMime;
             ue.isVideo = (photo.mediaType == 1);
             ue.totalBytes = file.length();
             ue.sentBytes = 0;
@@ -153,7 +172,7 @@ public class TusUploadManager {
         }
 
         try {
-            performUpload(upload, uploadRow, file.getName(), assetId, createForegroundRow, size -> {
+            performUpload(upload, uploadRow, uploadFilename, assetId, createForegroundRow, size -> {
                 if (markPhotoSyncedOnSuccess) {
                     photoDao.markSynced(contentId, System.currentTimeMillis() / 1000L);
                 }
@@ -175,6 +194,77 @@ public class TusUploadManager {
         if (lower.endsWith(".mp4")) return "video/mp4";
         if (lower.endsWith(".mov") || lower.endsWith(".qt")) return "video/quicktime";
         return fallbackSemantic.equals("video") ? "video/*" : "image/*";
+    }
+
+    private String chooseUploadFilename(
+            @Nullable UploadEntity queueRow,
+            @Nullable String originalFilename,
+            @Nullable String originalMimeType,
+            File file,
+            PhotoEntity photo
+    ) {
+        String semantic = (photo.mediaType == 1) ? "video" : "image";
+        String candidate = firstNonBlank(
+                queueRow != null ? queueRow.filename : null,
+                originalFilename,
+                file.getName()
+        );
+        String mime = chooseUploadMime(queueRow, originalMimeType, candidate, semantic);
+        return ensureFilenameExtension(candidate, mime, semantic);
+    }
+
+    private String chooseUploadMime(
+            @Nullable UploadEntity queueRow,
+            @Nullable String originalMimeType,
+            String filename,
+            String fallbackSemantic
+    ) {
+        String explicit = firstNonBlank(
+                originalMimeType,
+                queueRow != null ? queueRow.mimeType : null
+        );
+        if (explicit != null && !explicit.contains("*")) return explicit;
+        return mimeForName(filename, fallbackSemantic);
+    }
+
+    @Nullable
+    private String firstNonBlank(@Nullable String... values) {
+        if (values == null) return null;
+        for (String value : values) {
+            if (value == null) continue;
+            String trimmed = value.trim();
+            if (!trimmed.isEmpty()) return trimmed;
+        }
+        return null;
+    }
+
+    private String ensureFilenameExtension(String filename, String mimeType, String fallbackSemantic) {
+        String trimmed = filename == null ? "" : filename.trim();
+        if (trimmed.isEmpty()) {
+            trimmed = fallbackSemantic.equals("video") ? "upload.mov" : "upload.jpg";
+        }
+        int slash = Math.max(trimmed.lastIndexOf('/'), trimmed.lastIndexOf(File.separatorChar));
+        if (slash >= 0 && slash < trimmed.length() - 1) {
+            trimmed = trimmed.substring(slash + 1);
+        }
+        if (trimmed.contains(".")) {
+            return trimmed;
+        }
+        String ext = extensionForMime(mimeType, fallbackSemantic);
+        return ext == null ? trimmed : (trimmed + "." + ext);
+    }
+
+    @Nullable
+    private String extensionForMime(@Nullable String mimeType, String fallbackSemantic) {
+        String lower = mimeType == null ? "" : mimeType.toLowerCase(Locale.US);
+        if (lower.contains("jpeg") || lower.contains("jpg")) return "jpg";
+        if (lower.contains("png")) return "png";
+        if (lower.contains("heic") || lower.contains("heif")) return "heic";
+        if (lower.contains("dng")) return "dng";
+        if (lower.contains("avif")) return "avif";
+        if (lower.contains("mp4")) return "mp4";
+        if (lower.contains("quicktime") || lower.contains("mov")) return "mov";
+        return fallbackSemantic.equals("video") ? "mov" : "jpg";
     }
 
     /** Upload a locked PAE3 file with locked metadata (orig or thumb). */

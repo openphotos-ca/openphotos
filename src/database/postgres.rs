@@ -254,6 +254,8 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
             path TEXT NOT NULL,
             filename TEXT NOT NULL,
             mime_type TEXT,
+            has_gain_map BOOLEAN DEFAULT FALSE,
+            hdr_kind TEXT,
             content_hash TEXT,
             content_id TEXT,
             backup_id TEXT,
@@ -322,6 +324,16 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
     try_exec(
         &client,
         "ALTER TABLE photos ADD COLUMN IF NOT EXISTS backup_id TEXT;",
+    )
+    .await;
+    try_exec(
+        &client,
+        "ALTER TABLE photos ADD COLUMN IF NOT EXISTS has_gain_map BOOLEAN DEFAULT FALSE;",
+    )
+    .await;
+    try_exec(
+        &client,
+        "ALTER TABLE photos ADD COLUMN IF NOT EXISTS hdr_kind TEXT;",
     )
     .await;
     try_exec(

@@ -1669,7 +1669,7 @@ pub async fn get_photos_by_asset_ids(
             " AND COALESCE(p.locked, FALSE) = FALSE"
         };
         let sql = format!(
-            "SELECT id, asset_id, COALESCE(filename,'') AS filename, mime_type, created_at, modified_at, size, width, height, orientation, favorites, locked, delete_time, is_video, is_live_photo, duration_ms, is_screenshot, camera_make, camera_model, iso, aperture, shutter_speed, focal_length, location_name, city, province, country, rating
+            "SELECT id, asset_id, COALESCE(filename,'') AS filename, mime_type, COALESCE(has_gain_map, FALSE), hdr_kind, created_at, modified_at, size, width, height, orientation, favorites, locked, delete_time, is_video, is_live_photo, duration_ms, is_screenshot, camera_make, camera_model, iso, aperture, shutter_speed, focal_length, location_name, city, province, country, rating
              FROM photos p WHERE p.organization_id = $1 AND p.user_id = $2 AND p.asset_id IN ({}){}",
             placeholders.join(","),
             lock_clause
@@ -1686,36 +1686,38 @@ pub async fn get_photos_by_asset_ids(
                 path: String::new(),
                 filename: r.get(2),
                 mime_type: r.get(3),
-                created_at: r.get(4),
-                modified_at: r.get(5),
-                size: r.get(6),
-                width: r.get(7),
-                height: r.get(8),
-                orientation: r.get(9),
-                favorites: r.get(10),
-                locked: r.get(11),
-                delete_time: r.get(12),
-                is_video: r.get(13),
-                is_live_photo: r.get(14),
+                has_gain_map: r.get(4),
+                hdr_kind: r.get(5),
+                created_at: r.get(6),
+                modified_at: r.get(7),
+                size: r.get(8),
+                width: r.get(9),
+                height: r.get(10),
+                orientation: r.get(11),
+                favorites: r.get(12),
+                locked: r.get(13),
+                delete_time: r.get(14),
+                is_video: r.get(15),
+                is_live_photo: r.get(16),
                 live_video_path: None,
-                duration_ms: r.get(15),
-                is_screenshot: r.get(16),
-                camera_make: r.get(17),
-                camera_model: r.get(18),
-                iso: r.get(19),
-                aperture: r.get(20),
-                shutter_speed: r.get(21),
-                focal_length: r.get(22),
+                duration_ms: r.get(17),
+                is_screenshot: r.get(18),
+                camera_make: r.get(19),
+                camera_model: r.get(20),
+                iso: r.get(21),
+                aperture: r.get(22),
+                shutter_speed: r.get(23),
+                focal_length: r.get(24),
                 latitude: None,
                 longitude: None,
                 altitude: None,
-                location_name: r.get(23),
-                city: r.get(24),
-                province: r.get(25),
-                country: r.get(26),
+                location_name: r.get(25),
+                city: r.get(26),
+                province: r.get(27),
+                country: r.get(28),
                 caption: None,
                 description: None,
-                rating: r.get(27),
+                rating: r.get(29),
             });
         }
         return Ok(Json(out));
@@ -1733,9 +1735,9 @@ pub async fn get_photos_by_asset_ids(
     let include_locked = payload.include_locked.unwrap_or(false);
     for aid in &payload.asset_ids {
         let sql = if include_locked {
-            "SELECT id, asset_id, path, filename, mime_type, created_at, modified_at, size, width, height, orientation, favorites, locked, delete_time, is_video, is_live_photo, live_video_path, duration_ms, is_screenshot, camera_make, camera_model, iso, aperture, shutter_speed, focal_length, latitude, longitude, altitude, location_name, city, province, country, caption, description, rating FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(delete_time,0) = 0 LIMIT 1"
+            "SELECT id, asset_id, path, filename, mime_type, COALESCE(has_gain_map, FALSE), hdr_kind, created_at, modified_at, size, width, height, orientation, favorites, locked, delete_time, is_video, is_live_photo, live_video_path, duration_ms, is_screenshot, camera_make, camera_model, iso, aperture, shutter_speed, focal_length, latitude, longitude, altitude, location_name, city, province, country, caption, description, rating FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(delete_time,0) = 0 LIMIT 1"
         } else {
-            "SELECT id, asset_id, path, filename, mime_type, created_at, modified_at, size, width, height, orientation, favorites, locked, delete_time, is_video, is_live_photo, live_video_path, duration_ms, is_screenshot, camera_make, camera_model, iso, aperture, shutter_speed, focal_length, latitude, longitude, altitude, location_name, city, province, country, caption, description, rating FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(locked, FALSE) = FALSE AND COALESCE(delete_time,0) = 0 LIMIT 1"
+            "SELECT id, asset_id, path, filename, mime_type, COALESCE(has_gain_map, FALSE), hdr_kind, created_at, modified_at, size, width, height, orientation, favorites, locked, delete_time, is_video, is_live_photo, live_video_path, duration_ms, is_screenshot, camera_make, camera_model, iso, aperture, shutter_speed, focal_length, latitude, longitude, altitude, location_name, city, province, country, caption, description, rating FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(locked, FALSE) = FALSE AND COALESCE(delete_time,0) = 0 LIMIT 1"
         };
         if let Ok(mut stmt) = conn.prepare(sql) {
             if let Ok(row) = stmt.query_row(
@@ -1747,36 +1749,38 @@ pub async fn get_photos_by_asset_ids(
                         path: row.get(2)?,
                         filename: row.get(3)?,
                         mime_type: row.get(4)?,
-                        created_at: row.get(5)?,
-                        modified_at: row.get(6)?,
-                        size: row.get(7)?,
-                        width: row.get(8)?,
-                        height: row.get(9)?,
-                        orientation: row.get(10)?,
-                        favorites: row.get(11)?,
-                        locked: row.get(12)?,
-                        delete_time: row.get(13)?,
-                        is_video: row.get(14)?,
-                        is_live_photo: row.get(15)?,
-                        live_video_path: row.get(16)?,
-                        duration_ms: row.get(17)?,
-                        is_screenshot: row.get(18)?,
-                        camera_make: row.get(19)?,
-                        camera_model: row.get(20)?,
-                        iso: row.get(21)?,
-                        aperture: row.get(22)?,
-                        shutter_speed: row.get(23)?,
-                        focal_length: row.get(24)?,
-                        latitude: row.get(25)?,
-                        longitude: row.get(26)?,
-                        altitude: row.get(27)?,
-                        location_name: row.get(28)?,
-                        city: row.get(29)?,
-                        province: row.get(30)?,
-                        country: row.get(31)?,
-                        caption: row.get(32)?,
-                        description: row.get(33)?,
-                        rating: row.get(34).ok(),
+                        has_gain_map: row.get(5)?,
+                        hdr_kind: row.get(6)?,
+                        created_at: row.get(7)?,
+                        modified_at: row.get(8)?,
+                        size: row.get(9)?,
+                        width: row.get(10)?,
+                        height: row.get(11)?,
+                        orientation: row.get(12)?,
+                        favorites: row.get(13)?,
+                        locked: row.get(14)?,
+                        delete_time: row.get(15)?,
+                        is_video: row.get(16)?,
+                        is_live_photo: row.get(17)?,
+                        live_video_path: row.get(18)?,
+                        duration_ms: row.get(19)?,
+                        is_screenshot: row.get(20)?,
+                        camera_make: row.get(21)?,
+                        camera_model: row.get(22)?,
+                        iso: row.get(23)?,
+                        aperture: row.get(24)?,
+                        shutter_speed: row.get(25)?,
+                        focal_length: row.get(26)?,
+                        latitude: row.get(27)?,
+                        longitude: row.get(28)?,
+                        altitude: row.get(29)?,
+                        location_name: row.get(30)?,
+                        city: row.get(31)?,
+                        province: row.get(32)?,
+                        country: row.get(33)?,
+                        caption: row.get(34)?,
+                        description: row.get(35)?,
+                        rating: row.get(36).ok(),
                     })
                 },
             ) {
@@ -2241,6 +2245,7 @@ pub async fn list_photos(
     // Minimal-ish column set: include filename + camera/location metadata needed by viewer info panel
     let mut base = String::from(
         "SELECT DISTINCT p.id, p.asset_id, COALESCE(p.filename, '') AS filename, p.mime_type, \
+                COALESCE(p.has_gain_map, FALSE), p.hdr_kind, \
                 p.created_at, p.modified_at, p.size, p.width, p.height, \
                 p.orientation, p.favorites, p.locked, p.delete_time, p.is_video, p.is_live_photo, \
                 p.duration_ms, p.is_screenshot, p.camera_make, p.camera_model, \
@@ -2309,36 +2314,38 @@ pub async fn list_photos(
                 path: String::new(),
                 filename: row.get(2)?,
                 mime_type: row.get(3)?,
-                created_at: row.get(4)?,
-                modified_at: row.get(5)?,
-                size: row.get(6)?,
-                width: row.get(7)?,
-                height: row.get(8)?,
-                orientation: row.get(9)?,
-                favorites: row.get(10)?,
-                locked: row.get(11)?,
-                delete_time: row.get(12)?,
-                is_video: row.get(13)?,
-                is_live_photo: row.get(14)?,
+                has_gain_map: row.get(4)?,
+                hdr_kind: row.get(5)?,
+                created_at: row.get(6)?,
+                modified_at: row.get(7)?,
+                size: row.get(8)?,
+                width: row.get(9)?,
+                height: row.get(10)?,
+                orientation: row.get(11)?,
+                favorites: row.get(12)?,
+                locked: row.get(13)?,
+                delete_time: row.get(14)?,
+                is_video: row.get(15)?,
+                is_live_photo: row.get(16)?,
                 live_video_path: None,
-                duration_ms: row.get(15)?,
-                is_screenshot: row.get(16)?,
-                camera_make: row.get(17)?,
-                camera_model: row.get(18)?,
-                iso: row.get(19)?,
-                aperture: row.get(20)?,
-                shutter_speed: row.get(21)?,
-                focal_length: row.get(22)?,
+                duration_ms: row.get(17)?,
+                is_screenshot: row.get(18)?,
+                camera_make: row.get(19)?,
+                camera_model: row.get(20)?,
+                iso: row.get(21)?,
+                aperture: row.get(22)?,
+                shutter_speed: row.get(23)?,
+                focal_length: row.get(24)?,
                 latitude: None,
                 longitude: None,
                 altitude: None,
-                location_name: row.get(23)?,
-                city: row.get(24)?,
-                province: row.get(25)?,
-                country: row.get(26)?,
+                location_name: row.get(25)?,
+                city: row.get(26)?,
+                province: row.get(27)?,
+                country: row.get(28)?,
                 caption: None,
                 description: None,
-                rating: row.get(27).ok(),
+                rating: row.get(29).ok(),
             })
         });
         for r in mapped? {
@@ -3702,48 +3709,69 @@ pub async fn serve_image(
     // Note: `mime_type` is not always populated (especially for older ingests). For video playback to
     // start quickly on clients (AVPlayer), we want HTTP Range support. We therefore also read
     // `is_video` and use `ServeFile` when appropriate even if the stored `mime_type` is missing.
-    let photo_data: Option<(String, Option<String>, bool, bool, Option<i64>, Option<i64>)> =
-        if let Some(pg) = &state.pg_client {
-            let row = pg
+    let photo_data: Option<(
+        String,
+        Option<String>,
+        bool,
+        bool,
+        Option<i64>,
+        Option<i64>,
+        bool,
+        Option<String>,
+    )> = if let Some(pg) = &state.pg_client {
+        let row = pg
             .query_opt(
-                "SELECT path, mime_type, COALESCE(is_video, FALSE), COALESCE(locked, FALSE), size, duration_ms FROM photos WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 LIMIT 1",
+                "SELECT path, mime_type, COALESCE(is_video, FALSE), COALESCE(locked, FALSE), size, duration_ms, COALESCE(has_gain_map, FALSE), hdr_kind FROM photos WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 LIMIT 1",
                 &[&user.organization_id, &user.user_id, &asset_id],
             )
             .await
             .map_err(|e| AppError(anyhow::anyhow!(e.to_string())))?;
-            row.map(|r| {
-                (
-                    r.get::<_, String>(0),
-                    r.get::<_, Option<String>>(1),
-                    r.get::<_, bool>(2),
-                    r.get::<_, bool>(3),
-                    r.get::<_, Option<i64>>(4),
-                    r.get::<_, Option<i64>>(5),
-                )
-            })
-        } else {
-            let data_db = state.get_user_data_database(&user.user_id)?;
-            let conn = data_db.lock();
-            let mut stmt = conn.prepare(
-            "SELECT path, mime_type, COALESCE(is_video, FALSE), COALESCE(locked, FALSE), size, duration_ms FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? LIMIT 1",
-        )?;
-            stmt.query_row(
-                duckdb::params![user.organization_id, &user.user_id, &asset_id],
-                |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1).ok(),
-                        row.get::<_, bool>(2)?,
-                        row.get::<_, bool>(3)?,
-                        row.get::<_, Option<i64>>(4).ok().flatten(),
-                        row.get::<_, Option<i64>>(5).ok().flatten(),
-                    ))
-                },
+        row.map(|r| {
+            (
+                r.get::<_, String>(0),
+                r.get::<_, Option<String>>(1),
+                r.get::<_, bool>(2),
+                r.get::<_, bool>(3),
+                r.get::<_, Option<i64>>(4),
+                r.get::<_, Option<i64>>(5),
+                r.get::<_, bool>(6),
+                r.get::<_, Option<String>>(7),
             )
-            .ok()
-        }; // Database lock released here
+        })
+    } else {
+        let data_db = state.get_user_data_database(&user.user_id)?;
+        let conn = data_db.lock();
+        let mut stmt = conn.prepare(
+            "SELECT path, mime_type, COALESCE(is_video, FALSE), COALESCE(locked, FALSE), size, duration_ms, COALESCE(has_gain_map, FALSE), hdr_kind FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? LIMIT 1",
+        )?;
+        stmt.query_row(
+            duckdb::params![user.organization_id, &user.user_id, &asset_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1).ok(),
+                    row.get::<_, bool>(2)?,
+                    row.get::<_, bool>(3)?,
+                    row.get::<_, Option<i64>>(4).ok().flatten(),
+                    row.get::<_, Option<i64>>(5).ok().flatten(),
+                    row.get::<_, bool>(6)?,
+                    row.get::<_, Option<String>>(7).ok().flatten(),
+                ))
+            },
+        )
+        .ok()
+    }; // Database lock released here
 
-    if let Some((path, mime_type_opt, is_video, is_locked, size_opt, duration_ms_opt)) = photo_data
+    if let Some((
+        path,
+        mime_type_opt,
+        is_video,
+        is_locked,
+        size_opt,
+        duration_ms_opt,
+        has_gain_map,
+        hdr_kind,
+    )) = photo_data
     {
         if should_ignore_served_media_path(StdPath::new(&path)) {
             return Ok((StatusCode::NOT_FOUND, "not found").into_response());
@@ -3853,6 +3881,20 @@ pub async fn serve_image(
                 .unwrap_or("application/octet-stream")
                 .to_string()
         });
+        if has_gain_map {
+            tracing::info!(
+                target: "upload",
+                "[HDR] serve_image asset_id={} kind={} mime={} wants_original={} wants_heic={} wants_avif={} accepts_heic={} accepts_avif={}",
+                asset_id,
+                hdr_kind.as_deref().unwrap_or("unknown"),
+                orig_content_type,
+                wants_original_param,
+                wants_heic_param,
+                wants_avif_param,
+                accepts_heic,
+                accepts_avif
+            );
+        }
 
         let video_content_type = if is_video && !orig_content_type.starts_with("video/") {
             match ext_lc.as_str() {

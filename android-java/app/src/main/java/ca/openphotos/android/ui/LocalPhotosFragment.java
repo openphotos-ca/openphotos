@@ -812,7 +812,7 @@ public class LocalPhotosFragment extends Fragment {
             for (LocalMediaItem item : picked) {
                 File tmp = null;
                 try {
-                    tmp = copyToCache(Uri.parse(item.uri));
+                    tmp = copyToCache(Uri.parse(item.uri), item.displayName, item.mimeType);
                     PhotoEntity p = new PhotoEntity();
                     p.contentId = stableContentId(item.localId);
                     p.contentUri = item.uri;
@@ -823,7 +823,7 @@ public class LocalPhotosFragment extends Fragment {
                     p.syncState = 0;
                     p.estimatedBytes = item.sizeBytes;
                     String albumPaths = AlbumPathUtil.pathsJsonFromRelativePath(item.relativePath);
-                    tus.uploadUnlocked(tmp, p, albumPaths);
+                    tus.uploadUnlocked(tmp, p, albumPaths, item.displayName, item.mimeType);
                     ok++;
                 } catch (Exception e) {
                     fail++;
@@ -972,8 +972,9 @@ public class LocalPhotosFragment extends Fragment {
         return idx >= 0 ? p.substring(idx + 1) : p;
     }
 
-    private File copyToCache(@NonNull Uri uri) throws Exception {
-        File out = File.createTempFile("local_sync_", ".bin", requireContext().getCacheDir());
+    private File copyToCache(@NonNull Uri uri, @NonNull String displayName, @NonNull String mimeType) throws Exception {
+        String ext = extensionFromNameOrMime(displayName, mimeType);
+        File out = File.createTempFile("local_sync_", "." + ext, requireContext().getCacheDir());
         try (InputStream is = requireContext().getContentResolver().openInputStream(uri);
              FileOutputStream fos = new FileOutputStream(out)) {
             if (is == null) throw new IllegalStateException("Cannot open input");
@@ -982,6 +983,23 @@ public class LocalPhotosFragment extends Fragment {
             while ((n = is.read(buf)) > 0) fos.write(buf, 0, n);
         }
         return out;
+    }
+
+    @NonNull
+    private static String extensionFromNameOrMime(@NonNull String displayName, @NonNull String mimeType) {
+        int dot = displayName.lastIndexOf('.');
+        if (dot > 0 && dot < displayName.length() - 1) {
+            return displayName.substring(dot + 1);
+        }
+        String lower = mimeType.toLowerCase(java.util.Locale.US);
+        if (lower.contains("jpeg") || lower.contains("jpg")) return "jpg";
+        if (lower.contains("png")) return "png";
+        if (lower.contains("heic") || lower.contains("heif")) return "heic";
+        if (lower.contains("dng")) return "dng";
+        if (lower.contains("avif")) return "avif";
+        if (lower.contains("mp4")) return "mp4";
+        if (lower.contains("quicktime") || lower.contains("mov")) return "mov";
+        return "bin";
     }
 
     @NonNull

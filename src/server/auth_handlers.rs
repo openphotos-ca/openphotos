@@ -2901,6 +2901,8 @@ pub(crate) async fn index_single_photo_for_user(
                 .to_string_lossy()
                 .to_string(),
             mime_type: Some(content_type.clone()),
+            has_gain_map: parsed.has_gain_map,
+            hdr_kind: parsed.hdr_kind.clone(),
             backup_id: Some(backup_id.clone()),
             created_at: created_time,
             modified_at: modified_time,
@@ -3045,8 +3047,8 @@ pub(crate) async fn index_single_photo_for_user(
         conn.execute(
             "INSERT INTO photos (
             organization_id, user_id, asset_id, path, filename, mime_type, content_hash, backup_id, created_at, modified_at, size,
-            width, height, is_video, is_screenshot, last_indexed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            width, height, is_video, is_screenshot, has_gain_map, hdr_kind, last_indexed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (organization_id, asset_id) DO UPDATE SET 
             path = EXCLUDED.path,
             filename = EXCLUDED.filename,
@@ -3056,6 +3058,8 @@ pub(crate) async fn index_single_photo_for_user(
             height = EXCLUDED.height,
             is_video = EXCLUDED.is_video,
             is_screenshot = EXCLUDED.is_screenshot,
+            has_gain_map = EXCLUDED.has_gain_map,
+            hdr_kind = EXCLUDED.hdr_kind,
             content_hash = EXCLUDED.content_hash,
             backup_id = EXCLUDED.backup_id,
             last_indexed = EXCLUDED.last_indexed,
@@ -3081,6 +3085,8 @@ pub(crate) async fn index_single_photo_for_user(
                 &(parsed.height.unwrap_or(height_i32)) as &dyn duckdb::ToSql,
                 &is_video_flag as &dyn duckdb::ToSql,
                 &is_screenshot_flag as &dyn duckdb::ToSql,
+                &parsed.has_gain_map as &dyn duckdb::ToSql,
+                &parsed.hdr_kind as &dyn duckdb::ToSql,
                 &now_ts as &dyn duckdb::ToSql,
             ],
         )?;
@@ -3400,8 +3406,8 @@ async fn index_heic_photo_for_user(
     conn.execute(
         "INSERT INTO photos (
             organization_id, user_id, asset_id, path, filename, mime_type, backup_id, created_at, modified_at, size,
-            width, height, is_video, is_live_photo, live_video_path, is_screenshot, last_indexed
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            width, height, is_video, is_live_photo, live_video_path, is_screenshot, has_gain_map, hdr_kind, last_indexed
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT (organization_id, asset_id) DO UPDATE SET
             path = EXCLUDED.path,
             filename = EXCLUDED.filename,
@@ -3413,6 +3419,8 @@ async fn index_heic_photo_for_user(
             is_live_photo = EXCLUDED.is_live_photo,
             live_video_path = EXCLUDED.live_video_path,
             is_screenshot = EXCLUDED.is_screenshot,
+            has_gain_map = EXCLUDED.has_gain_map,
+            hdr_kind = EXCLUDED.hdr_kind,
             last_indexed = EXCLUDED.last_indexed,
             locked = FALSE,
             crypto_version = 0",
@@ -3436,6 +3444,8 @@ async fn index_heic_photo_for_user(
             &live_mov.is_some(),
             &live_mov.as_ref().map(|p| p.to_string_lossy().to_string()),
             &false, // HEIC screenshots rare; default to false
+            &parsed.has_gain_map,
+            &parsed.hdr_kind,
             &chrono::Utc::now().timestamp(),
         ],
     )?;

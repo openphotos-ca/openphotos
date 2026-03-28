@@ -19,6 +19,19 @@ struct ServerFullScreenViewer: View {
         return f
     }()
 
+    private static func dynamicRangeLabel(for photo: ServerPhoto) -> String {
+        switch (photo.hdr_kind ?? "").lowercased() {
+        case "android_ultra_hdr_jpeg":
+            return "Ultra HDR"
+        case "gainmap_jpeg":
+            return "HDR (gain map JPEG)"
+        case "gainmap_heic":
+            return "HDR (gain map HEIC)"
+        default:
+            return (photo.has_gain_map ?? false) ? "HDR (gain map)" : "SDR"
+        }
+    }
+
     // Input list and initial index
     @State private var photos: [ServerPhoto]
     @State private var currentIndex: Int
@@ -102,6 +115,8 @@ struct ServerFullScreenViewer: View {
                 asset_id: "",
                 filename: nil,
                 mime_type: "image/jpeg",
+                has_gain_map: nil,
+                hdr_kind: nil,
                 created_at: 0,
                 modified_at: nil,
                 size: nil,
@@ -435,6 +450,7 @@ struct ServerFullScreenViewer: View {
                     HStack { Text("Name"); Spacer(); Text(current.filename ?? current.asset_id).foregroundColor(.secondary) }
                     HStack { Text("Asset ID"); Spacer(); Text(current.asset_id).foregroundColor(.secondary) }
                     if let size = current.size { HStack { Text("Size"); Spacer(); Text(Self.fileSizeFormatter.string(fromByteCount: size)).foregroundColor(.secondary) } }
+                    HStack { Text("Dynamic Range"); Spacer(); Text(Self.dynamicRangeLabel(for: current)).foregroundColor(.secondary) }
                     if let w = current.width, let h = current.height { HStack { Text("Dimensions"); Spacer(); Text("\(w) × \(h)").foregroundColor(.secondary) } }
                 }
                 Section(header: Text("Camera")) {

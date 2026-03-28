@@ -24,6 +24,10 @@ pub struct Photo {
     pub path: String,
     pub filename: String,
     pub mime_type: Option<String>,
+    #[serde(default)]
+    pub has_gain_map: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hdr_kind: Option<String>,
     pub created_at: i64,
     pub modified_at: i64,
     pub size: i64,
@@ -133,6 +137,8 @@ impl Photo {
             path: path.to_string_lossy().to_string(),
             filename,
             mime_type,
+            has_gain_map: false,
+            hdr_kind: None,
             created_at,
             modified_at,
             size: metadata.len() as i64,

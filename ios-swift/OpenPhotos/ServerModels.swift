@@ -13,6 +13,8 @@ struct ServerPhoto: Identifiable, Decodable, Hashable {
     let asset_id: String
     let filename: String?
     let mime_type: String?
+    let has_gain_map: Bool?
+    let hdr_kind: String?
     let created_at: Int64
     let modified_at: Int64?
     let size: Int64?
@@ -47,6 +49,8 @@ struct ServerPhoto: Identifiable, Decodable, Hashable {
         case asset_id
         case filename
         case mime_type
+        case has_gain_map
+        case hdr_kind
         case created_at
         case modified_at
         case size

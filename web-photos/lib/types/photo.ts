@@ -4,6 +4,8 @@ export interface Photo {
   path: string;
   filename: string;
   mime_type?: string;
+  has_gain_map?: boolean;
+  hdr_kind?: string | null;
   created_at: number;
   modified_at: number;
   size: number;

@@ -46,15 +46,188 @@ pub fn extract_metadata(photo: &mut Photo) -> Result<()> {
                 // Native parse failed; keep filesystem timestamps and continue (no external fallback)
             }
         }
+
+        match detect_gain_map_kind(path, photo.mime_type.as_deref()) {
+            Ok(Some(kind)) => {
+                photo.has_gain_map = true;
+                photo.hdr_kind = Some(kind.clone());
+                info!(
+                    target: "upload",
+                    "[HDR] detected still gain-map kind={} path={}",
+                    kind,
+                    path.display()
+                );
+            }
+            Ok(None) => {
+                photo.has_gain_map = false;
+                photo.hdr_kind = None;
+            }
+            Err(err) => {
+                photo.has_gain_map = false;
+                photo.hdr_kind = None;
+                warn!(
+                    target: "upload",
+                    "[HDR] gain-map detection failed path={} err={}",
+                    path.display(),
+                    err
+                );
+            }
+        }
     } else {
         // Video metadata via ffprobe (duration, creation_time, tags, GPS)
         let _ = extract_video_metadata_ffprobe(photo);
+        photo.has_gain_map = false;
+        photo.hdr_kind = None;
     }
 
     // Detect screenshot after we have dimensions
     photo.detect_screenshot();
 
     Ok(())
+}
+
+pub const HDR_KIND_ANDROID_ULTRA_HDR_JPEG: &str = "android_ultra_hdr_jpeg";
+pub const HDR_KIND_GAINMAP_HEIC: &str = "gainmap_heic";
+pub const HDR_KIND_GAINMAP_JPEG: &str = "gainmap_jpeg";
+
+const HDR_JPEG_SCAN_LIMIT_BYTES: usize = 4 * 1024 * 1024;
+
+pub fn detect_gain_map_kind(path: &Path, mime_type: Option<&str>) -> Result<Option<String>> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let mime_lc = mime_type.unwrap_or("").to_ascii_lowercase();
+
+    if ext == "jpg" || ext == "jpeg" || mime_lc == "image/jpeg" {
+        return detect_gain_map_jpeg(path);
+    }
+    if ext == "heic" || ext == "heif" || mime_lc == "image/heic" || mime_lc == "image/heif" {
+        return detect_gain_map_heic(path);
+    }
+    Ok(None)
+}
+
+fn detect_gain_map_jpeg(path: &Path) -> Result<Option<String>> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read JPEG for HDR detection {}", path.display()))?;
+    let scan_len = bytes.len().min(HDR_JPEG_SCAN_LIMIT_BYTES);
+    Ok(detect_gain_map_jpeg_from_bytes(&bytes[..scan_len]).map(str::to_string))
+}
+
+fn detect_gain_map_jpeg_from_bytes(bytes: &[u8]) -> Option<&'static str> {
+    let haystack = String::from_utf8_lossy(bytes);
+
+    let has_hdrgm_namespace = haystack.contains("http://ns.adobe.com/hdr-gain-map/1.0/")
+        || haystack.contains("hdrgm:Version")
+        || haystack.contains("hdrgm:GainMapMin")
+        || haystack.contains("hdrgm:GainMapMax")
+        || haystack.contains("hdrgm:HDRCapacityMin")
+        || haystack.contains("hdrgm:HDRCapacityMax");
+    let has_google_container = haystack.contains("http://ns.google.com/photos/1.0/container/")
+        || haystack.contains("http://ns.google.com/photos/1.0/container/item/")
+        || haystack.contains("GContainer:Directory")
+        || haystack.contains("GContainer:Item")
+        || haystack.contains("Container:Directory")
+        || haystack.contains("Container:Item");
+    let has_gain_map_semantic = haystack.contains("Semantic=\"GainMap\"")
+        || haystack.contains("Semantic='GainMap'")
+        || haystack.contains(">GainMap<");
+    let has_iso_gain_map = haystack.contains("21496-1")
+        || haystack.contains("ISOGainMap")
+        || haystack.contains("GainMap")
+        || haystack.contains("hdrgainmap");
+
+    if (has_hdrgm_namespace && has_google_container)
+        || (has_google_container && has_gain_map_semantic)
+        || (has_hdrgm_namespace && has_gain_map_semantic)
+    {
+        return Some(HDR_KIND_ANDROID_ULTRA_HDR_JPEG);
+    }
+
+    if has_iso_gain_map {
+        return Some(HDR_KIND_GAINMAP_JPEG);
+    }
+
+    None
+}
+
+fn detect_gain_map_heic(path: &Path) -> Result<Option<String>> {
+    let input = path.to_string_lossy().to_string();
+    let output = ffprobe_command()
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "json",
+            "-show_entries",
+            "stream=index,width,height,pix_fmt,codec_type:stream_tags:stream_disposition:stream_group",
+            "-show_streams",
+            &input,
+        ])
+        .output()
+        .with_context(|| format!("run ffprobe for HEIC HDR detection {}", path.display()))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("parse ffprobe JSON for {}", path.display()))?;
+    let probe_text = String::from_utf8_lossy(&output.stdout).to_ascii_lowercase();
+
+    let mut total_video_streams = 0usize;
+    let mut gray_streams = 0usize;
+    let mut aux_hint = probe_text.contains("gain")
+        || probe_text.contains("aux")
+        || probe_text.contains("hdr")
+        || probe_text.contains("iso gain");
+
+    if let Some(streams) = json.get("streams").and_then(|s| s.as_array()) {
+        for stream in streams {
+            if stream
+                .get("codec_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                != "video"
+            {
+                continue;
+            }
+            let width = stream.get("width").and_then(|v| v.as_u64()).unwrap_or(0);
+            let height = stream.get("height").and_then(|v| v.as_u64()).unwrap_or(0);
+            if width == 0 || height == 0 {
+                continue;
+            }
+            total_video_streams += 1;
+            let pix_fmt = stream
+                .get("pix_fmt")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if pix_fmt.starts_with("gray") {
+                gray_streams += 1;
+            }
+            if let Some(tags) = stream.get("tags").and_then(|v| v.as_object()) {
+                aux_hint = aux_hint
+                    || tags.iter().any(|(key, value)| {
+                        let key_lc = key.to_ascii_lowercase();
+                        let value_lc = value.to_string().to_ascii_lowercase();
+                        key_lc.contains("gain")
+                            || key_lc.contains("aux")
+                            || key_lc.contains("hdr")
+                            || value_lc.contains("gain")
+                            || value_lc.contains("aux")
+                            || value_lc.contains("hdr")
+                    });
+            }
+        }
+    }
+
+    if total_video_streams > 1 && gray_streams > 0 && (aux_hint || gray_streams >= 1) {
+        return Ok(Some(HDR_KIND_GAINMAP_HEIC.to_string()));
+    }
+
+    Ok(None)
 }
 
 /// Open an image and adjust orientation to be upright according to EXIF Orientation tag.
@@ -1297,7 +1470,10 @@ pub async fn reverse_geocode(
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_dng_preview, ensure_heic_ml_proxy, raw_placeholder_image};
+    use super::{
+        decode_dng_preview, detect_gain_map_jpeg_from_bytes, ensure_heic_ml_proxy,
+        raw_placeholder_image, HDR_KIND_ANDROID_ULTRA_HDR_JPEG, HDR_KIND_GAINMAP_JPEG,
+    };
     use image::codecs::jpeg::JpegEncoder;
     use std::fs;
     use std::path::PathBuf;
@@ -1392,5 +1568,36 @@ mod tests {
         assert_eq!(img.height(), 1);
 
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn detect_gain_map_jpeg_identifies_android_ultra_hdr_markers() {
+        let bytes = br#"
+            <x:xmpmeta xmlns:hdrgm="http://ns.adobe.com/hdr-gain-map/1.0/"
+                       xmlns:Container="http://ns.google.com/photos/1.0/container/"
+                       xmlns:Item="http://ns.google.com/photos/1.0/container/item/">
+              <rdf:Description hdrgm:Version="1.0" />
+              <Container:Directory>
+                <Container:Item Item:Semantic="GainMap" />
+              </Container:Directory>
+            </x:xmpmeta>
+        "#;
+        assert_eq!(
+            detect_gain_map_jpeg_from_bytes(bytes),
+            Some(HDR_KIND_ANDROID_ULTRA_HDR_JPEG)
+        );
+    }
+
+    #[test]
+    fn detect_gain_map_jpeg_identifies_generic_gain_map_markers() {
+        let bytes = br#"
+            <x:xmpmeta>
+              <rdf:Description SomeTag="ISOGainMap" />
+            </x:xmpmeta>
+        "#;
+        assert_eq!(
+            detect_gain_map_jpeg_from_bytes(bytes),
+            Some(HDR_KIND_GAINMAP_JPEG)
+        );
     }
 }

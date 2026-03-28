@@ -56,6 +56,20 @@ function isPhotoFavorite(p: Photo | null | undefined): boolean {
   return Number((p as any).favorites ?? 0) === 1;
 }
 
+function photoDynamicRangeLabel(p: Photo | null | undefined): string {
+  if (!p) return 'SDR';
+  switch ((p.hdr_kind || '').toLowerCase()) {
+    case 'android_ultra_hdr_jpeg':
+      return 'Ultra HDR';
+    case 'gainmap_jpeg':
+      return 'HDR (gain map JPEG)';
+    case 'gainmap_heic':
+      return 'HDR (gain map HEIC)';
+    default:
+      return p.has_gain_map ? 'HDR (gain map)' : 'SDR';
+  }
+}
+
 async function fetchEncryptedForUnlock(
   assetId: string,
   headers?: Record<string, string>,
@@ -2225,6 +2239,8 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
                   </div>
                   <div className="text-muted-foreground">Size</div>
                   <div>{humanFileSize(viewerPhoto.size)}</div>
+                  <div className="text-muted-foreground mt-2">Dynamic Range</div>
+                  <div>{photoDynamicRangeLabel(viewerPhoto)}</div>
                   <div className="text-muted-foreground mt-2">Asset ID</div>
                   <div className="flex items-center gap-2">
                     <span className="truncate" title={viewerPhoto.asset_id}>{viewerPhoto.asset_id}</span>

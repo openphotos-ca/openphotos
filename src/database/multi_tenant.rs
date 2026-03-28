@@ -1225,6 +1225,8 @@ impl MultiTenantDatabase {
                 path TEXT NOT NULL,
                 filename TEXT NOT NULL,
                 mime_type TEXT,
+                has_gain_map BOOLEAN DEFAULT FALSE,
+                hdr_kind TEXT,
                 content_hash TEXT,
                 content_id TEXT,
                 backup_id TEXT,
@@ -1284,6 +1286,8 @@ impl MultiTenantDatabase {
             -- New searchable metadata columns (backfill)
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS caption TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS description TEXT;
+            ALTER TABLE photos ADD COLUMN IF NOT EXISTS has_gain_map BOOLEAN DEFAULT FALSE;
+            ALTER TABLE photos ADD COLUMN IF NOT EXISTS hdr_kind TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS comments TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS likes TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS ocr_text TEXT;

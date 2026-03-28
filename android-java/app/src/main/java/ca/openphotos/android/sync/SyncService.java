@@ -410,10 +410,10 @@ public final class SyncService {
                 photoDao.markBackgroundQueued(contentId, nowSec);
             } else {
                 File tmp = exportToCache(c.uri, guessExtension(c.mime));
-                enqueueUnlockedUploadRow(contentId, tmp, c.isVideo, c.albumPathsJson, c.mime);
+                enqueueUnlockedUploadRow(contentId, tmp, c.displayName, c.isVideo, c.albumPathsJson, c.mime);
                 rowsEnqueuedForCandidate++;
                 if (motionVideo != null && motionVideo.exists() && motionVideo.length() > 0) {
-                    enqueueUnlockedUploadRow(contentId, motionVideo, true, c.albumPathsJson, "video/mp4");
+                    enqueueUnlockedUploadRow(contentId, motionVideo, motionVideo.getName(), true, c.albumPathsJson, "video/mp4");
                     motionQueued = true;
                     rowsEnqueuedForCandidate++;
                     Log.i(MOTION_TAG, "paired-enqueue mode=unlocked contentId=" + contentId
@@ -449,6 +449,7 @@ public final class SyncService {
     private void enqueueUnlockedUploadRow(
             String contentId,
             File tempFile,
+            String displayName,
             boolean isVideo,
             String albumPathsJson,
             String mimeType
@@ -456,7 +457,7 @@ public final class SyncService {
         UploadEntity ue = new UploadEntity();
         ue.itemId = java.util.UUID.randomUUID().toString();
         ue.contentId = contentId;
-        ue.filename = tempFile.getName();
+        ue.filename = preferredUploadFilename(displayName, tempFile.getName(), mimeType, isVideo);
         ue.tempFilePath = tempFile.getAbsolutePath();
         ue.mimeType = mimeType != null ? mimeType : (isVideo ? "video/*" : "image/*");
         ue.isVideo = isVideo;
@@ -470,6 +471,21 @@ public final class SyncService {
         ue.albumPathsJson = prefs.preserveAlbum() ? albumPathsJson : null;
         ue.lockedMetadataJson = null;
         uploadDao.upsert(ue);
+    }
+
+    private String preferredUploadFilename(String displayName, String fallbackName, String mimeType, boolean isVideo) {
+        String candidate = (displayName != null && !displayName.trim().isEmpty()) ? displayName.trim() : fallbackName;
+        if (candidate == null || candidate.trim().isEmpty()) {
+            candidate = isVideo ? "upload.mov" : "upload.jpg";
+        }
+        if (candidate.contains(".")) {
+            return candidate;
+        }
+        String ext = guessExtension(mimeType);
+        if (ext == null || ext.isEmpty()) {
+            ext = isVideo ? "mov" : "jpg";
+        }
+        return candidate + "." + ext;
     }
 
     public Stats getStats() {

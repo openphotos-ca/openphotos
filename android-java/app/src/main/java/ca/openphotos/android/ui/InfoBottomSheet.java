@@ -21,6 +21,20 @@ import ca.openphotos.android.server.ServerPhotosService;
 public class InfoBottomSheet extends DialogFragment {
     public static InfoBottomSheet newInstance(String assetId) { InfoBottomSheet s = new InfoBottomSheet(); Bundle b = new Bundle(); b.putString("assetId", assetId); s.setArguments(b); return s; }
 
+    private static String dynamicRangeLabel(@NonNull org.json.JSONObject photo) {
+        String kind = photo.optString("hdr_kind", "").trim().toLowerCase(java.util.Locale.US);
+        switch (kind) {
+            case "android_ultra_hdr_jpeg":
+                return "Ultra HDR";
+            case "gainmap_jpeg":
+                return "HDR (gain map JPEG)";
+            case "gainmap_heic":
+                return "HDR (gain map HEIC)";
+            default:
+                return photo.optBoolean("has_gain_map", false) ? "HDR (gain map)" : "SDR";
+        }
+    }
+
     @NonNull @Override public Dialog onCreateDialog(@Nullable Bundle savedInstanceState) {
         String aid = getArguments()!=null? getArguments().getString("assetId","") : "";
         ScrollView sv = new ScrollView(requireContext());
@@ -50,6 +64,7 @@ public class InfoBottomSheet extends DialogFragment {
                     sb.append("Name: ").append(p.optString("filename", aid)).append("\n");
                     sb.append("Asset ID: ").append(aid).append("\n");
                     sb.append("Size: ").append(String.valueOf(p.optLong("size",0))).append(" bytes\n\n");
+                    sb.append("Dynamic Range: ").append(dynamicRangeLabel(p)).append("\n\n");
                     // Camera
                     sb.append("Camera\n");
                     sb.append(p.optString("camera_make","")); if (p.has("camera_model")) sb.append(" ").append(p.optString("camera_model","")); sb.append("\n");
@@ -67,4 +82,3 @@ public class InfoBottomSheet extends DialogFragment {
         return d;
     }
 }
-

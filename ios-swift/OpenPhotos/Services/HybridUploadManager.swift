@@ -2079,33 +2079,24 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 let isLiveAsset = asset.mediaSubtypes.contains(.photoLive)
 
                 if isLiveAsset {
-                    // Prefer a still photo for primary
-                    for res in resources {
-                        if res.type == .photo || res.type == .fullSizePhoto || res.type == .alternatePhoto {
-                            primary = primary ?? res
-                        }
-                        if res.type == .pairedVideo { pairedMov = res }
-                    }
-                    // Fallbacks
-                    if primary == nil {
-                        for res in resources {
-                            if res.type == .photo || res.type == .fullSizePhoto || res.type == .alternatePhoto { primary = res; break }
-                        }
-                    }
-                    if pairedMov == nil {
-                        for res in resources {
-                            if res.type == .video || res.type == .fullSizeVideo { pairedMov = res; break }
-                        }
-                    }
+                    primary =
+                        resources.first(where: { $0.type == .fullSizePhoto }) ??
+                        resources.first(where: { $0.type == .photo }) ??
+                        resources.first(where: { $0.type == .alternatePhoto })
+                    pairedMov =
+                        resources.first(where: { $0.type == .pairedVideo }) ??
+                        resources.first(where: { $0.type == .fullSizeVideo }) ??
+                        resources.first(where: { $0.type == .video })
                 } else {
-                    for res in resources {
-                        if res.type == .photo || res.type == .fullSizePhoto || res.type == .alternatePhoto {
-                            primary = primary ?? res
-                        } else if res.type == .video || res.type == .fullSizeVideo {
-                            primary = primary ?? res
-                        } else if res.type == .pairedVideo {
-                            pairedMov = res
-                        }
+                    if asset.mediaType == .image {
+                        primary =
+                            resources.first(where: { $0.type == .fullSizePhoto }) ??
+                            resources.first(where: { $0.type == .photo }) ??
+                            resources.first(where: { $0.type == .alternatePhoto })
+                    } else {
+                        primary =
+                            resources.first(where: { $0.type == .fullSizeVideo }) ??
+                            resources.first(where: { $0.type == .video })
                     }
                 }
 

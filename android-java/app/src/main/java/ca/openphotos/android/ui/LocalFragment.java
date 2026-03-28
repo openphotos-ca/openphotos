@@ -177,7 +177,7 @@ public class LocalFragment extends Fragment {
                                     "manual"
                             );
                         }
-                        java.io.File tmp = copyToCache(uri);
+                        java.io.File tmp = copyToCache(uri, meta.displayName, meta.mimeType);
                         ca.openphotos.android.data.db.entities.PhotoEntity p = new ca.openphotos.android.data.db.entities.PhotoEntity();
                         p.contentId = cid;
                         p.mediaType = meta.isVideo ? 1 : 0;
@@ -186,7 +186,7 @@ public class LocalFragment extends Fragment {
                         p.pixelWidth = 0;
                         p.pixelHeight = 0;
                         p.syncState = 0;
-                        mgr.uploadUnlocked(tmp, p, "[]");
+                        mgr.uploadUnlocked(tmp, p, "[]", meta.displayName, meta.mimeType);
                         tmp.delete();
                         if (motion != null && motion.exists() && motion.length() > 0) {
                             ca.openphotos.android.data.db.entities.PhotoEntity mv = new ca.openphotos.android.data.db.entities.PhotoEntity();
@@ -211,12 +211,32 @@ public class LocalFragment extends Fragment {
         }).start();
     }
 
-    private java.io.File copyToCache(android.net.Uri uri) throws Exception {
-        java.io.File out = java.io.File.createTempFile("ux_", ".bin", requireContext().getCacheDir());
+    private java.io.File copyToCache(android.net.Uri uri, @Nullable String displayName, @Nullable String mimeType) throws Exception {
+        String ext = extensionFromNameOrMime(displayName, mimeType);
+        java.io.File out = java.io.File.createTempFile("ux_", "." + ext, requireContext().getCacheDir());
         try (java.io.InputStream is = requireContext().getContentResolver().openInputStream(uri); java.io.FileOutputStream fos = new java.io.FileOutputStream(out)) {
             byte[] buf = new byte[8192]; int r; while ((r = is.read(buf)) > 0) fos.write(buf, 0, r);
         }
         return out;
+    }
+
+    @NonNull
+    private static String extensionFromNameOrMime(@Nullable String displayName, @Nullable String mimeType) {
+        if (displayName != null) {
+            int dot = displayName.lastIndexOf('.');
+            if (dot > 0 && dot < displayName.length() - 1) {
+                return displayName.substring(dot + 1);
+            }
+        }
+        String lower = mimeType == null ? "" : mimeType.toLowerCase(java.util.Locale.US);
+        if (lower.contains("jpeg") || lower.contains("jpg")) return "jpg";
+        if (lower.contains("png")) return "png";
+        if (lower.contains("heic") || lower.contains("heif")) return "heic";
+        if (lower.contains("dng")) return "dng";
+        if (lower.contains("avif")) return "avif";
+        if (lower.contains("mp4")) return "mp4";
+        if (lower.contains("quicktime") || lower.contains("mov")) return "mov";
+        return "bin";
     }
 
     private LocalUploadMeta readLocalMeta(Uri uri, boolean isVideoHint) {

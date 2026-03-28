@@ -37,6 +37,8 @@ pub struct PhotoUpsert {
     pub path: String,
     pub filename: String,
     pub mime_type: Option<String>,
+    pub has_gain_map: bool,
+    pub hdr_kind: Option<String>,
     pub backup_id: Option<String>,
     pub created_at: i64,
     pub modified_at: i64,
