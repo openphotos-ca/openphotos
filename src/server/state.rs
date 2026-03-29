@@ -6,6 +6,7 @@ use crate::database::multi_tenant::MultiTenantDatabase;
 use crate::database::pg_meta_store::PgMetaStore;
 use crate::database::{embeddings::EmbeddingStore, Database};
 use crate::face_processing::FaceService;
+use crate::server::updates::UpdateService;
 use crate::yolo_detection::YoloDetector;
 use anyhow::Result;
 use chrono::Utc;
@@ -71,6 +72,7 @@ pub struct AppState {
     pub live_photo_video_backfill_done: Arc<parking_lot::RwLock<HashSet<String>>>,
     // Optional Postgres client for embeddings backend
     pub pg_client: Option<StdArc<tokio_postgres::Client>>,
+    pub update_service: Arc<UpdateService>,
 }
 
 impl AppState {
@@ -450,6 +452,8 @@ impl AppState {
         }
 
         // pg_client already computed above
+        let update_service = Arc::new(UpdateService::new());
+        UpdateService::spawn_background_checks(update_service.clone());
 
         Ok(Self {
             visual_encoders: Arc::new(RwLock::new(visual_encoders)),
@@ -485,6 +489,7 @@ impl AppState {
             live_photo_video_backfill_done: Arc::new(parking_lot::RwLock::new(HashSet::new())),
             pg_client,
             meta,
+            update_service,
         })
     }
 

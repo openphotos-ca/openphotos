@@ -41,6 +41,7 @@ use crate::server::similar_routes::{
 };
 use crate::server::state::AppState;
 use crate::server::text_search::{reindex_text, text_search};
+use crate::server::updates::{check_server_update, get_server_update_status};
 use crate::server::upload_handlers::upload_multipart;
 
 #[cfg(feature = "ee")]
@@ -124,7 +125,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/auth/oauth/github/callback",
             get(oauth_github_callback),
-        );
+        )
+        .route("/api/server/update-status", get(get_server_update_status))
+        .route("/api/server/update/check", post(check_server_update));
 
     #[cfg(feature = "ee")]
     let app_base = app_base

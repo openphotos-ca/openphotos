@@ -316,6 +316,10 @@ struct SettingsView: View {
     @State private var usageVideos: Int64 = 0
     @State private var serverVersion: String? = nil
     @State private var isLoadingServerVersion = false
+    @State private var serverUpdateStatus: ServerUpdateService.UpdateStatus? = nil
+    @State private var isLoadingServerUpdate = false
+    @State private var showServerUpdateSection = false
+    @State private var serverUpdateError: String? = nil
     private var isDemoReadOnly: Bool { auth.isDemoUser }
     private var accountName: String {
         if let name = auth.userName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
@@ -344,6 +348,52 @@ struct SettingsView: View {
             return version
         }
         return "Unavailable"
+    }
+    private var serverUpdateStatusLabel: String {
+        if isLoadingServerUpdate && serverUpdateStatus == nil {
+            return "Loading…"
+        }
+        switch serverUpdateStatus?.status {
+        case "disabled":
+            return "Update checks disabled"
+        case "check_failed":
+            return "Check failed"
+        case "unsupported_install_mode":
+            return "Unsupported install mode"
+        case "ok":
+            return serverUpdateStatus?.available == true ? "Update available" : "Up to date"
+        default:
+            if serverUpdateError != nil {
+                return "Unavailable"
+            }
+            return "Never checked"
+        }
+    }
+    private var serverUpdateCurrentVersion: String {
+        let version = serverUpdateStatus?.currentVersion.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !version.isEmpty {
+            return version
+        }
+        return accountServerVersion
+    }
+    private var serverUpdateLatestVersion: String {
+        let version = serverUpdateStatus?.latestVersion?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !version.isEmpty {
+            return version
+        }
+        if isLoadingServerUpdate && serverUpdateStatus == nil {
+            return "Loading…"
+        }
+        return "Unavailable"
+    }
+    private var serverUpdateErrorMessage: String? {
+        if let value = serverUpdateStatus?.lastError?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            return value
+        }
+        if let value = serverUpdateError?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
+            return value
+        }
+        return nil
     }
 
     var body: some View {
@@ -428,6 +478,39 @@ struct SettingsView: View {
                     }
                     .disabled(isDemoReadOnly)
                 }
+                if showServerUpdateSection {
+                    Section("Server Update") {
+                        HStack {
+                            Text("Status")
+                            Spacer()
+                            Text(serverUpdateStatusLabel)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        HStack {
+                            Text("Current Version")
+                            Spacer()
+                            Text(serverUpdateCurrentVersion)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        HStack {
+                            Text("Latest Version")
+                            Spacer()
+                            Text(serverUpdateLatestVersion)
+                                .foregroundColor(.secondary)
+                                .multilineTextAlignment(.trailing)
+                        }
+                        if let errorMessage = serverUpdateErrorMessage {
+                            Text(errorMessage)
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                        }
+                        Text("Install this update from the web admin UI or directly on the server host.")
+                            .font(.footnote)
+                            .foregroundColor(.secondary)
+                    }
+                }
 
                 Section("About") {
                     HStack {
@@ -474,9 +557,11 @@ struct SettingsView: View {
             .onAppear {
                 refreshCacheUsage()
                 Task { await refreshServerVersion(force: true) }
+                Task { await refreshServerUpdateStatus() }
             }
-            .onChange(of: auth.serverURL) { _ in
+            .onChange(of: auth.serverURL) {
                 Task { await refreshServerVersion(force: true) }
+                Task { await refreshServerUpdateStatus() }
             }
         }
     }
@@ -528,6 +613,48 @@ extension SettingsView {
                 serverVersion = nil
                 isLoadingServerVersion = false
             }
+        }
+    }
+
+    private func refreshServerUpdateStatus() async {
+        let requestedServerURL = await MainActor.run {
+            auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !requestedServerURL.isEmpty else {
+            await MainActor.run {
+                showServerUpdateSection = false
+                serverUpdateStatus = nil
+                serverUpdateError = nil
+                isLoadingServerUpdate = false
+            }
+            return
+        }
+
+        await MainActor.run {
+            isLoadingServerUpdate = true
+        }
+
+        let result = await ServerUpdateService.shared.getStatus()
+        let currentServerURL = await MainActor.run {
+            auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard currentServerURL == requestedServerURL else { return }
+
+        await MainActor.run {
+            switch result {
+            case .authorized(let status):
+                serverUpdateStatus = status
+                serverUpdateError = nil
+                showServerUpdateSection = true
+            case .forbidden:
+                serverUpdateStatus = nil
+                serverUpdateError = nil
+                showServerUpdateSection = false
+            case .failure(let message):
+                serverUpdateError = message
+                showServerUpdateSection = true
+            }
+            isLoadingServerUpdate = false
         }
     }
 }

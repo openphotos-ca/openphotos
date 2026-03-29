@@ -12,6 +12,7 @@ pub mod similar_routes;
 pub mod state;
 pub mod text_search;
 pub mod tus_proxy;
+pub mod updates;
 pub mod upload_handlers;
 pub mod upload_hooks;
 // Enterprise team handlers are available under feature gate in src/ee.rs

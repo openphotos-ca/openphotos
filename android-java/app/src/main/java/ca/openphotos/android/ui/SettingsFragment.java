@@ -25,6 +25,7 @@ import ca.openphotos.android.R;
 import ca.openphotos.android.core.AppLinks;
 import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.core.CapabilitiesService;
+import ca.openphotos.android.core.ServerUpdateService;
 import ca.openphotos.android.media.DiskImageCache;
 import ca.openphotos.android.prefs.AppearancePreferences;
 import com.bumptech.glide.Glide;
@@ -71,6 +72,11 @@ public class SettingsFragment extends Fragment {
     private TextView tvAccountEmail;
     private TextView tvAccountServerUrl;
     private TextView tvAccountServerVersion;
+    private View cardServerUpdate;
+    private TextView tvServerUpdateStatus;
+    private TextView tvServerUpdateCurrentVersion;
+    private TextView tvServerUpdateLatestVersion;
+    private TextView tvServerUpdateMessage;
     private TextView tvAboutVersion;
     private View rowAboutSupport;
 
@@ -109,6 +115,11 @@ public class SettingsFragment extends Fragment {
         tvAccountEmail = view.findViewById(R.id.tv_account_email);
         tvAccountServerUrl = view.findViewById(R.id.tv_account_server_url);
         tvAccountServerVersion = view.findViewById(R.id.tv_account_server_version);
+        cardServerUpdate = view.findViewById(R.id.card_server_update);
+        tvServerUpdateStatus = view.findViewById(R.id.tv_server_update_status);
+        tvServerUpdateCurrentVersion = view.findViewById(R.id.tv_server_update_current_version);
+        tvServerUpdateLatestVersion = view.findViewById(R.id.tv_server_update_latest_version);
+        tvServerUpdateMessage = view.findViewById(R.id.tv_server_update_message);
         tvAboutVersion = view.findViewById(R.id.tv_about_version);
         rowAboutSupport = view.findViewById(R.id.row_about_support);
 
@@ -125,6 +136,7 @@ public class SettingsFragment extends Fragment {
 
         bindAccountSummary();
         refreshServerVersion();
+        refreshServerUpdate();
         tvAboutVersion.setText(getVersionString());
         view.findViewById(R.id.btn_about_website).setOnClickListener(v -> openExternalUrl(AppLinks.WEBSITE));
         view.findViewById(R.id.btn_about_privacy).setOnClickListener(v -> openExternalUrl(AppLinks.PRIVACY_POLICY));
@@ -147,6 +159,7 @@ public class SettingsFragment extends Fragment {
         refreshAppearanceSummary();
         bindAccountSummary();
         refreshServerVersion();
+        refreshServerUpdate();
         boolean demoReadOnly = auth != null && auth.isDemoUser();
         cardDemoReadonly.setVisibility(demoReadOnly ? View.VISIBLE : View.GONE);
         setMutatingEnabled(!demoReadOnly);
@@ -206,6 +219,77 @@ public class SettingsFragment extends Fragment {
                 tvAccountServerVersion.setText(resolvedVersion);
             });
         }).start();
+    }
+
+    private void refreshServerUpdate() {
+        if (cardServerUpdate == null || auth == null) return;
+        final String requestedServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+        if (requestedServerUrl.isEmpty()) {
+            cardServerUpdate.setVisibility(View.GONE);
+            return;
+        }
+        new Thread(() -> {
+            ServerUpdateService.Result result = ServerUpdateService.get(appContext);
+            if (!isAdded()) return;
+            requireActivity().runOnUiThread(() -> {
+                if (!isAdded() || auth == null || cardServerUpdate == null) return;
+                String currentServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+                if (!requestedServerUrl.equals(currentServerUrl)) return;
+                if (result.forbidden) {
+                    cardServerUpdate.setVisibility(View.GONE);
+                    return;
+                }
+                cardServerUpdate.setVisibility(View.VISIBLE);
+                bindServerUpdate(result.status, result.error);
+            });
+        }).start();
+    }
+
+    private void bindServerUpdate(@Nullable ServerUpdateService.Status status, @Nullable String error) {
+        if (tvServerUpdateStatus == null || tvServerUpdateCurrentVersion == null
+                || tvServerUpdateLatestVersion == null || tvServerUpdateMessage == null) {
+            return;
+        }
+        String stateLabel = "Unavailable";
+        String currentVersion = tvAccountServerVersion != null ? tvAccountServerVersion.getText().toString() : "Unavailable";
+        String latestVersion = "Unavailable";
+        String message = "Install updates from the web admin UI or directly on the server host.";
+
+        if (status != null) {
+            currentVersion = status.currentVersion != null && !status.currentVersion.trim().isEmpty()
+                    ? status.currentVersion.trim()
+                    : currentVersion;
+            latestVersion = status.latestVersion != null && !status.latestVersion.trim().isEmpty()
+                    ? status.latestVersion.trim()
+                    : latestVersion;
+            switch (status.status) {
+                case "disabled":
+                    stateLabel = "Update checks disabled";
+                    break;
+                case "check_failed":
+                    stateLabel = "Check failed";
+                    break;
+                case "unsupported_install_mode":
+                    stateLabel = "Unsupported install mode";
+                    break;
+                case "ok":
+                    stateLabel = status.available ? "Update available" : "Up to date";
+                    break;
+                default:
+                    stateLabel = "Never checked";
+                    break;
+            }
+            if (status.lastError != null && !status.lastError.trim().isEmpty()) {
+                message = status.lastError.trim() + "\n\n" + message;
+            }
+        } else if (error != null && !error.trim().isEmpty()) {
+            message = error.trim() + "\n\n" + message;
+        }
+
+        tvServerUpdateStatus.setText(stateLabel);
+        tvServerUpdateCurrentVersion.setText("Current version: " + currentVersion);
+        tvServerUpdateLatestVersion.setText("Latest version: " + latestVersion);
+        tvServerUpdateMessage.setText(message);
     }
 
     private void refreshCacheUsage() {

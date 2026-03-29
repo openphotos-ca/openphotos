@@ -29,6 +29,30 @@ interface FoldersResponse {
   preserve_tree_path?: boolean;
 }
 
+interface ServerUpdateArtifact {
+  platform: string;
+  arch: string;
+  url: string;
+  sha256?: string | null;
+}
+
+interface ServerUpdateStatus {
+  current_version: string;
+  latest_version?: string | null;
+  available: boolean;
+  channel: string;
+  checked_at?: string | null;
+  status: 'disabled' | 'never_checked' | 'ok' | 'check_failed' | 'unsupported_install_mode';
+  install_mode: 'linux-deb' | 'macos-pkg' | 'windows-nsis' | 'unknown';
+  install_arch: string;
+  install_supported: boolean;
+  release_notes_url?: string | null;
+  artifact?: ServerUpdateArtifact | null;
+  install_command?: string | null;
+  manual_steps: string[];
+  last_error?: string | null;
+}
+
 function resolveConnectedServerUrl(apiBase: string): string {
   if (typeof window === 'undefined') return '-';
   try {
@@ -102,6 +126,11 @@ export default function SettingsPage() {
   const [serverVersion, setServerVersion] = useState<string | null>(null);
   const [capabilitiesLoading, setCapabilitiesLoading] = useState(true);
   const [connectedServerUrl, setConnectedServerUrl] = useState('-');
+  const [serverUpdate, setServerUpdate] = useState<ServerUpdateStatus | null>(null);
+  const [serverUpdateLoading, setServerUpdateLoading] = useState(false);
+  const [serverUpdateChecking, setServerUpdateChecking] = useState(false);
+  const [serverUpdateHidden, setServerUpdateHidden] = useState(false);
+  const [serverUpdateError, setServerUpdateError] = useState<string | null>(null);
   const { user: me } = useAuthStore();
   const isAdmin = !!me && (me.role === 'owner' || me.role === 'admin');
   const isDemoUser = isDemoEmail(me?.email);
@@ -161,6 +190,62 @@ export default function SettingsPage() {
   useEffect(() => {
     setConnectedServerUrl(resolveConnectedServerUrl(API));
   }, [API]);
+
+  const fetchServerUpdateStatus = async (method: 'GET' | 'POST' = 'GET') => {
+    if (!token) return;
+    if (method === 'POST') {
+      setServerUpdateChecking(true);
+    } else {
+      setServerUpdateLoading(true);
+    }
+
+    try {
+      const endpoint = method === 'POST' ? `${API}/server/update/check` : `${API}/server/update-status?_=${Date.now()}`;
+      const res = await fetch(endpoint, {
+        method,
+        headers: { 'Authorization': `Bearer ${token}` },
+        cache: 'no-store',
+      });
+      if (res.status === 403) {
+        setServerUpdateHidden(true);
+        setServerUpdate(null);
+        setServerUpdateError(null);
+        return;
+      }
+
+      const raw = await res.text();
+      const payload = raw ? JSON.parse(raw) : null;
+      if (!res.ok || !payload) {
+        throw new Error(payload?.error || payload?.message || `Failed to load update status (${res.status})`);
+      }
+
+      setServerUpdateHidden(false);
+      setServerUpdate(payload as ServerUpdateStatus);
+      setServerUpdateError(null);
+    } catch (error) {
+      logger.warn('Failed to load server update status', error);
+      setServerUpdateHidden(false);
+      setServerUpdateError(error instanceof Error ? error.message : 'Failed to load update status');
+    } finally {
+      if (method === 'POST') {
+        setServerUpdateChecking(false);
+      } else {
+        setServerUpdateLoading(false);
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!token || !isAdmin) {
+      setServerUpdate(null);
+      setServerUpdateError(null);
+      setServerUpdateHidden(false);
+      setServerUpdateLoading(false);
+      setServerUpdateChecking(false);
+      return;
+    }
+    fetchServerUpdateStatus('GET');
+  }, [API, isAdmin, token]);
 
   // Locked metadata inclusion settings
   const [secLoading, setSecLoading] = useState(false);
@@ -256,6 +341,43 @@ export default function SettingsPage() {
   const connectedServerVersion = capabilitiesLoading
     ? 'Loading…'
     : (serverVersion || 'Unavailable');
+  const showServerUpdateCard = isAdmin && !serverUpdateHidden;
+  const serverUpdateLabel = (() => {
+    if (serverUpdateLoading && !serverUpdate) return 'Checking…';
+    switch (serverUpdate?.status) {
+      case 'disabled':
+        return 'Update checks disabled';
+      case 'check_failed':
+        return 'Check failed';
+      case 'unsupported_install_mode':
+        return 'Unsupported install mode';
+      case 'ok':
+        return serverUpdate.available ? 'Update available' : 'Up to date';
+      default:
+        if (serverUpdateError) return 'Unavailable';
+        return 'Never checked';
+    }
+  })();
+  const serverUpdateLastChecked = serverUpdate?.checked_at
+    ? new Date(serverUpdate.checked_at).toLocaleString()
+    : 'Never';
+  const copyInstallCommand = async () => {
+    if (!serverUpdate?.install_command) return;
+    try {
+      await navigator.clipboard.writeText(serverUpdate.install_command);
+      toast({
+        title: 'Install command copied',
+        description: 'Run it on the server host to install the update.',
+        variant: 'success',
+      });
+    } catch (error) {
+      toast({
+        title: 'Copy failed',
+        description: error instanceof Error ? error.message : 'Unable to copy install command.',
+        variant: 'destructive',
+      });
+    }
+  };
 
   const loadFolders = async () => {
     setIsLoading(true);
@@ -577,6 +699,92 @@ export default function SettingsPage() {
             </div>
           </CardContent>
         </Card>
+        {showServerUpdateCard && (
+          <Card className="mb-8">
+            <CardHeader>
+              <CardTitle>Server Update</CardTitle>
+              <CardDescription>Admin-only server release status and guided install steps.</CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Status</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdateLabel}</div>
+                </div>
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Last Checked</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdateLastChecked}</div>
+                </div>
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Current Version</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdate?.current_version || connectedServerVersion}</div>
+                </div>
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Latest Version</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdate?.latest_version || 'Unavailable'}</div>
+                </div>
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Install Mode</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdate?.install_mode || 'unknown'} / {serverUpdate?.install_arch || '-'}</div>
+                </div>
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Channel</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdate?.channel || 'stable'}</div>
+                </div>
+              </div>
+              {serverUpdate?.artifact?.url && (
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Installer</Label>
+                  <div className="mt-1 break-all text-sm text-foreground">{serverUpdate.artifact.url}</div>
+                </div>
+              )}
+              {(serverUpdate?.last_error || serverUpdateError) && (
+                <div className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-sm text-amber-200">
+                  {serverUpdate?.last_error || serverUpdateError}
+                </div>
+              )}
+              {serverUpdate?.available && serverUpdate.manual_steps.length > 0 && (
+                <div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Install Steps</Label>
+                  <ol className="mt-2 space-y-1 list-decimal pl-5 text-sm text-muted-foreground">
+                    {serverUpdate.manual_steps.map((step) => (
+                      <li key={step}>{step}</li>
+                    ))}
+                  </ol>
+                </div>
+              )}
+              <div className="flex flex-wrap gap-3">
+                <Button onClick={() => fetchServerUpdateStatus('POST')} disabled={serverUpdateChecking || isDemoUser}>
+                  {serverUpdateChecking ? 'Checking…' : 'Check now'}
+                </Button>
+                {serverUpdate?.release_notes_url && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => window.open(serverUpdate.release_notes_url!, '_blank', 'noopener,noreferrer')}
+                  >
+                    Open release notes
+                  </Button>
+                )}
+                {serverUpdate?.available && serverUpdate?.artifact?.url && (
+                  <Button
+                    variant="ghost"
+                    onClick={() => window.open(serverUpdate.artifact!.url, '_blank', 'noopener,noreferrer')}
+                  >
+                    Download installer
+                  </Button>
+                )}
+                {serverUpdate?.install_command && (
+                  <Button variant="ghost" onClick={copyInstallCommand}>
+                    Copy install command
+                  </Button>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground">
+                Install this update from the web admin UI or directly on the server host.
+              </p>
+            </CardContent>
+          </Card>
+        )}
         <fieldset
           disabled={isDemoUser}
           className={clsx('border-0 p-0 m-0 min-w-0', isDemoUser && 'opacity-70')}
