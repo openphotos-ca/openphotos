@@ -46,6 +46,7 @@ struct OpenPhotosApp: App {
                         UserDefaults.standard.set(UUID().uuidString, forKey: markerKey)
                         print("[APP] First run detected — purged keychain items and E2EE markers")
                     }
+                    LocalNetworkPermissionRequester.shared.requestOnFirstLaunchIfNeeded()
                     PhotoService.shared.requestPermissions()
                     // Kick off a sync if authenticated and allowed
                     SyncService.shared.syncOnAppOpen()
@@ -54,7 +55,8 @@ struct OpenPhotosApp: App {
                     Task {
                         await AuthManager.shared.refreshIfNeeded()
                         // Warm session and demonstrate authorized helper (401→refresh→retry)
-                        if true {
+                        if AuthManager.shared.isAuthenticated,
+                           !AuthManager.shared.currentEffectiveBaseURL().isEmpty {
                             let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/auth/me")
                             struct MeDTO: Decodable { let id: Int? }
                             _ = try? await AuthorizedHTTPClient.shared.getJSON(url) as MeDTO

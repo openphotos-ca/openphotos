@@ -28,11 +28,14 @@ struct LoginView: View {
                     }
                     .pickerStyle(.segmented)
                 }
+
+                Section("Server") {
+                    ServerAddressEditor { message in
+                        serverValidationMessage = message
+                    }
+                }
+
                 Section {
-                    ServerAddressEditor(onValidationChanged: { msg in
-                        serverValidationMessage = msg
-                    })
-                    .environmentObject(auth)
                     if isRegister {
                         TextField("Full Name", text: $name)
                             .textContentType(.name)
@@ -65,7 +68,14 @@ struct LoginView: View {
                             .frame(maxWidth: .infinity)
                     }
                 }
-                .disabled(isLoading || serverValidationMessage != nil || email.isEmpty || password.isEmpty || (isRegister && name.isEmpty))
+                .disabled(
+                    isLoading ||
+                    auth.currentEffectiveBaseURL().isEmpty ||
+                    serverValidationMessage != nil ||
+                    email.isEmpty ||
+                    password.isEmpty ||
+                    (isRegister && name.isEmpty)
+                )
                 if mustChangePassword {
                     Section(header: Text("Set New Password")) {
                         SecureField("New Password", text: $newPassword)
@@ -77,7 +87,10 @@ struct LoginView: View {
             .navigationTitle(isRegister ? "Create Account" : "Log In")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button(action: { dismiss() }) {
+                    Button(action: {
+                        auth.clearManualServerOverride()
+                        dismiss()
+                    }) {
                         Image(systemName: "xmark")
                             .imageScale(.medium)
                     }
@@ -85,6 +98,8 @@ struct LoginView: View {
                 }
             }
             .onAppear {
+                serverValidationMessage = nil
+                loadLastUsedLoginValues()
                 applyDemoDefaultsIfNeeded()
             }
             .onChange(of: auth.serverURL) { _ in
@@ -94,6 +109,11 @@ struct LoginView: View {
                 mustChangePassword = false
                 errorMessage = nil
                 applyDemoDefaultsIfNeeded()
+            }
+            .onDisappear {
+                if !auth.isAuthenticated {
+                    auth.clearManualServerOverride()
+                }
             }
         }
     }
@@ -117,6 +137,7 @@ struct LoginView: View {
                         if accounts.count == 1 {
                             let must = try await auth.loginFinish(email: email, organizationId: accounts[0].id, password: password)
                             await MainActor.run {
+                                self.auth.commitManualServerOverride()
                                 self.organizations = [Org(id: accounts[0].id, name: accounts[0].name)]
                                 self.selectedOrgId = accounts[0].id
                                 self.mustChangePassword = must
@@ -136,7 +157,10 @@ struct LoginView: View {
                     } catch {
                         if auth.shouldFallbackToSingleStepLogin(error) {
                             let must = try await auth.loginSingleStep(email: email, password: password)
-                            await MainActor.run { self.mustChangePassword = must }
+                            await MainActor.run {
+                                self.auth.commitManualServerOverride()
+                                self.mustChangePassword = must
+                            }
                             if !must {
                                 await MainActor.run { dismiss() }
                             } else {
@@ -149,7 +173,10 @@ struct LoginView: View {
                 } else {
                     guard let gid = selectedOrgId else { throw NSError(domain: "Auth", code: 5, userInfo: [NSLocalizedDescriptionKey: "Select organization"]) }
                     let must = try await auth.loginFinish(email: email, organizationId: gid, password: password)
-                    await MainActor.run { self.mustChangePassword = must }
+                    await MainActor.run {
+                        self.auth.commitManualServerOverride()
+                        self.mustChangePassword = must
+                    }
                     if !must { await MainActor.run { dismiss() } }
                     else { await MainActor.run { self.isLoading = false } }
                 }
@@ -185,9 +212,17 @@ struct LoginView: View {
         }
     }
 
+    private func loadLastUsedLoginValues() {
+        if email.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+           let lastEmail = auth.lastUsedLoginEmail() {
+            email = lastEmail
+        }
+        password = ""
+    }
+
     private func applyDemoDefaultsIfNeeded() {
-        guard let parsed = AuthManager.parseBaseURL(auth.serverURL) else { return }
-        let host = AuthManager.normalizeHost(parsed.host).lowercased()
+        let config = auth.currentServerConfig()
+        let host = AuthManager.normalizeHost(config.host).lowercased()
         guard host == "demo.openphotos.ca" else { return }
 
         email = "demo@openphotos.ca"
@@ -208,7 +243,10 @@ extension LoginView {
         Task {
             do {
                 try await auth.register(name: name, email: email, password: password)
-                await MainActor.run { dismiss() }
+                await MainActor.run {
+                    auth.commitManualServerOverride()
+                    dismiss()
+                }
             } catch {
                 await MainActor.run {
                     errorMessage = error.localizedDescription

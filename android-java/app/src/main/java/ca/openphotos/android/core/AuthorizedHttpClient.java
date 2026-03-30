@@ -37,7 +37,14 @@ public class AuthorizedHttpClient {
                         String tokenUsed = extractBearerToken(req.header("Authorization"));
                         try { android.util.Log.i("OpenPhotos", "[HTTP] -> " + req.method() + " " + req.url() + " auth=" + (req.header("Authorization")!=null)); } catch (Exception ignored) {}
 
-                        Response resp = chain.proceed(req);
+                        Response resp;
+                        try {
+                            resp = chain.proceed(req);
+                        } catch (IOException ioe) {
+                            Request fallback = auth.buildFallbackRequest(req, ioe);
+                            if (fallback == null) throw ioe;
+                            resp = chain.proceed(fallback);
+                        }
 
                         try {
                             android.util.Log.i("OpenPhotos", "[HTTP] <- " + resp.code() + " " + req.method() + " " + req.url() + " success=" + resp.isSuccessful());
@@ -49,7 +56,14 @@ public class AuthorizedHttpClient {
                             if (auth.refreshAfterUnauthorized(tokenUsed)) {
                                 Request retry = applyAuth(chain.request());
                                 try { android.util.Log.i("OpenPhotos", "[HTTP] retry auth=" + (retry.header("Authorization")!=null)); } catch (Exception ignored) {}
-                                Response retryResp = chain.proceed(retry);
+                                Response retryResp;
+                                try {
+                                    retryResp = chain.proceed(retry);
+                                } catch (IOException ioe) {
+                                    Request fallback = auth.buildFallbackRequest(retry, ioe);
+                                    if (fallback == null) throw ioe;
+                                    retryResp = chain.proceed(fallback);
+                                }
                                 try {
                                     android.util.Log.i("OpenPhotos", "[HTTP] <- (retry) " + retryResp.code() + " " + retry.method() + " " + retry.url() + " success=" + retryResp.isSuccessful());
                                 } catch (Exception ignored) {}

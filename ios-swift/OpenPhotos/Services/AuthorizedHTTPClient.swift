@@ -11,10 +11,29 @@ struct AuthorizedHTTPClient {
         }
     }
 
+    private func resolvedBaseURL() -> String {
+        let effective = AuthManager.shared.currentEffectiveBaseURL()
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if !effective.isEmpty {
+            return effective
+        }
+
+        let config = AuthManager.shared.currentServerConfig()
+        guard !config.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let fallback = AuthManager.buildBaseURL(
+                scheme: config.scheme,
+                host: config.host,
+                port: config.port
+              ) else {
+            return ""
+        }
+        return fallback.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
     // MARK: - URL helpers
 
     private func joinedURL(_ path: String) -> URL {
-        let base = AuthManager.shared.serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let base = resolvedBaseURL()
         let normalizedPath = path.hasPrefix("/") ? path : "/" + path
         return URL(string: base + normalizedPath)!
     }
@@ -30,7 +49,7 @@ struct AuthorizedHTTPClient {
         await AuthManager.shared.refreshIfNeeded()
         var req1 = req
         AuthManager.shared.authHeader().forEach { k, v in req1.setValue(v, forHTTPHeaderField: k) }
-        let (data, resp) = try await URLSession.shared.data(for: req1)
+        let (data, resp) = try await AuthManager.shared.dataForResolvedRequest(req1)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "HTTP", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
@@ -43,7 +62,7 @@ struct AuthorizedHTTPClient {
             }
             var retry = req
             AuthManager.shared.authHeader().forEach { k, v in retry.setValue(v, forHTTPHeaderField: k) }
-            let (d2, r2) = try await URLSession.shared.data(for: retry)
+            let (d2, r2) = try await AuthManager.shared.dataForResolvedRequest(retry)
             guard let h2 = r2 as? HTTPURLResponse else {
                 throw NSError(domain: "HTTP", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response"])
             }

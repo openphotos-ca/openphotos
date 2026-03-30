@@ -101,7 +101,10 @@ struct ServerAddressEditor: View {
             }
         }
         .onAppear { loadFromAuth() }
-        .onChange(of: scheme) { _ in validateAndCommit() }
+        .onChange(of: scheme) { newScheme in
+            applyDefaultPortForSchemeChange(newScheme)
+            validateAndCommit()
+        }
         .onChange(of: hostOrIP) { newValue in
             // If a full URL is pasted into the host field, parse it and split into components.
             if newValue.contains("://"), let parsed = AuthManager.parseBaseURL(newValue) {
@@ -127,7 +130,7 @@ extension ServerAddressEditor {
         let cfg = auth.currentServerConfig()
         scheme = Scheme(rawValue: cfg.scheme) ?? .http
         hostOrIP = cfg.host
-        portText = (cfg.port == AuthManager.defaultServerPort) ? "" : String(cfg.port)
+        portText = displayPortText(host: cfg.host, port: cfg.port)
         validateAndCommit()
     }
 
@@ -140,8 +143,19 @@ extension ServerAddressEditor {
         scheme = Scheme(rawValue: parsed.scheme) ?? .http
         hostOrIP = parsed.host
         let resolvedPort = parsed.port ?? AuthManager.defaultServerPort
-        portText = (resolvedPort == AuthManager.defaultServerPort) ? "" : String(resolvedPort)
+        portText = displayPortText(host: parsed.host, port: resolvedPort)
         validateAndCommit()
+    }
+
+    private func displayPortText(host: String, port: Int) -> String {
+        return String(port)
+    }
+
+    private func applyDefaultPortForSchemeChange(_ newScheme: Scheme) {
+        let portTrim = portText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if newScheme == .https, portTrim.isEmpty {
+            portText = "443"
+        }
     }
 
     private func validateAndCommit() {

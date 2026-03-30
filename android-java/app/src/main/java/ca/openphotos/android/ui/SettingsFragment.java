@@ -71,6 +71,7 @@ public class SettingsFragment extends Fragment {
     private TextView tvAccountName;
     private TextView tvAccountEmail;
     private TextView tvAccountServerUrl;
+    private TextView tvNetworkSettingsSummary;
     private TextView tvAccountServerVersion;
     private View cardServerUpdate;
     private TextView tvServerUpdateStatus;
@@ -79,6 +80,7 @@ public class SettingsFragment extends Fragment {
     private TextView tvServerUpdateMessage;
     private TextView tvAboutVersion;
     private View rowAboutSupport;
+    private View rowNetworkSettings;
 
     @Nullable
     @Override
@@ -114,6 +116,7 @@ public class SettingsFragment extends Fragment {
         tvAccountName = view.findViewById(R.id.tv_account_name);
         tvAccountEmail = view.findViewById(R.id.tv_account_email);
         tvAccountServerUrl = view.findViewById(R.id.tv_account_server_url);
+        tvNetworkSettingsSummary = view.findViewById(R.id.tv_network_settings_summary);
         tvAccountServerVersion = view.findViewById(R.id.tv_account_server_version);
         cardServerUpdate = view.findViewById(R.id.card_server_update);
         tvServerUpdateStatus = view.findViewById(R.id.tv_server_update_status);
@@ -122,6 +125,7 @@ public class SettingsFragment extends Fragment {
         tvServerUpdateMessage = view.findViewById(R.id.tv_server_update_message);
         tvAboutVersion = view.findViewById(R.id.tv_about_version);
         rowAboutSupport = view.findViewById(R.id.row_about_support);
+        rowNetworkSettings = view.findViewById(R.id.row_network_settings);
 
         loadCapsIntoUi();
         refreshCacheUsage();
@@ -133,6 +137,7 @@ public class SettingsFragment extends Fragment {
 
         rowSecurity.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.securitySettingsFragment));
         rowChangePassword.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.changePasswordFragment));
+        rowNetworkSettings.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.networkSettingsFragment));
 
         bindAccountSummary();
         refreshServerVersion();
@@ -173,6 +178,7 @@ public class SettingsFragment extends Fragment {
         if (btnClearCache != null) btnClearCache.setEnabled(enabled);
         setRowEnabled(rowSecurity, enabled);
         setRowEnabled(rowChangePassword, enabled);
+        setRowEnabled(rowNetworkSettings, enabled);
     }
 
     private void setRowEnabled(@Nullable View row, boolean enabled) {
@@ -196,6 +202,11 @@ public class SettingsFragment extends Fragment {
         tvAccountEmail.setText(email != null ? email : "-");
         String serverUrl = auth.getServerUrl();
         tvAccountServerUrl.setText(serverUrl != null && !serverUrl.trim().isEmpty() ? serverUrl : "-");
+        if (tvNetworkSettingsSummary != null) {
+            tvNetworkSettingsSummary.setText(auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
+                    ? "Using Local Network"
+                    : (auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.PUBLIC ? "Using External Network" : "Not Configured"));
+        }
     }
 
     private void refreshServerVersion() {

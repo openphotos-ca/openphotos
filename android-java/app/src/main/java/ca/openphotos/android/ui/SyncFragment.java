@@ -38,6 +38,7 @@ public class SyncFragment extends Fragment {
     private SyncPreferences prefs;
 
     private TextInputEditText etServerUrl;
+    private TextView tvServerRoute;
     private TextView tvAccountStatus;
     private MaterialButton btnLoginLogout;
 
@@ -93,6 +94,7 @@ public class SyncFragment extends Fragment {
         prefs = new SyncPreferences(requireContext().getApplicationContext());
 
         etServerUrl = root.findViewById(R.id.et_sync_server_url);
+        tvServerRoute = root.findViewById(R.id.tv_sync_server_route);
         tvAccountStatus = root.findViewById(R.id.tv_sync_account_status);
         btnLoginLogout = root.findViewById(R.id.btn_sync_login_logout);
 
@@ -154,12 +156,14 @@ public class SyncFragment extends Fragment {
 
     private void bindStaticActions(@NonNull View root) {
         root.findViewById(R.id.btn_sync_save_url).setOnClickListener(v -> {
-            String url = etServerUrl.getText() != null ? etServerUrl.getText().toString().trim() : "";
-            AuthManager.get(requireContext()).setServerUrl(url);
-            Toast.makeText(requireContext(), "Server URL saved", Toast.LENGTH_SHORT).show();
+            NavHostFragment.findNavController(this).navigate(R.id.networkSettingsFragment);
         });
 
-        root.findViewById(R.id.btn_sync_test).setOnClickListener(v -> testPing());
+        root.findViewById(R.id.btn_sync_test).setOnClickListener(v -> {
+            AuthManager.get(requireContext()).refreshNetworkRouting();
+            Toast.makeText(requireContext(), "Refreshing network route", Toast.LENGTH_SHORT).show();
+            refreshAuthState();
+        });
 
         btnRestrictionBatterySettings.setOnClickListener(v -> {
             if (!BatteryOptimizationHelper.openBatteryOptimizationSettings(this)) {
@@ -178,9 +182,13 @@ public class SyncFragment extends Fragment {
         btnLoginLogout.setOnClickListener(v -> {
             AuthManager auth = AuthManager.get(requireContext());
             if (auth.isAuthenticated()) {
-                auth.logoutAndForgetCredentials();
+                auth.logoutPreservingLoginEmail();
                 refreshAuthState();
                 Toast.makeText(requireContext(), "Logged out", Toast.LENGTH_SHORT).show();
+                try {
+                    NavHostFragment.findNavController(this).navigate(R.id.serverLoginFragment);
+                } catch (Exception ignored) {
+                }
             } else {
                 NavHostFragment.findNavController(this).navigate(R.id.serverLoginFragment);
             }
@@ -287,6 +295,13 @@ public class SyncFragment extends Fragment {
 
     private void applyPrefsToUi() {
         etServerUrl.setText(AuthManager.get(requireContext()).getServerUrl());
+        etServerUrl.setEnabled(false);
+        if (tvServerRoute != null) {
+            AuthManager auth = AuthManager.get(requireContext());
+            tvServerRoute.setText(auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
+                    ? "Using Local Network"
+                    : (auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.PUBLIC ? "Using External Network" : "Not Configured"));
+        }
 
         boolean selectedScope = "selected".equals(prefs.scope());
         if (selectedScope) toggleScope.check(btnScopeSelected.getId());
@@ -358,6 +373,11 @@ public class SyncFragment extends Fragment {
                 authed ? R.color.app_success : R.color.app_text_secondary));
         btnLoginLogout.setText(authed ? "Log Out" : "Log In");
         etServerUrl.setText(auth.getServerUrl());
+        if (tvServerRoute != null) {
+            tvServerRoute.setText(auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
+                    ? "Using Local Network"
+                    : (auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.PUBLIC ? "Using External Network" : "Not Configured"));
+        }
     }
 
     private void refreshStatsSoon() {
@@ -437,21 +457,4 @@ public class SyncFragment extends Fragment {
         }
     }
 
-    private void testPing() {
-        new Thread(() -> {
-            try {
-                String u = AuthManager.get(requireContext()).getServerUrl() + "/ping";
-                OkHttpClient c = new OkHttpClient();
-                Request rq = new Request.Builder().url(u).get().build();
-                try (Response r = c.newCall(rq).execute()) {
-                    String msg = r.isSuccessful()
-                            ? ("Success (" + r.code() + ")")
-                            : ("HTTP " + r.code());
-                    requireActivity().runOnUiThread(() -> Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show());
-                }
-            } catch (Exception e) {
-                requireActivity().runOnUiThread(() -> Toast.makeText(requireContext(), "Connection test failed", Toast.LENGTH_SHORT).show());
-            }
-        }).start();
-    }
 }

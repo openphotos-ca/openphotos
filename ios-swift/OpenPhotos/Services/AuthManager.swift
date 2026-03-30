@@ -1,5 +1,7 @@
 import Foundation
 import Combine
+import Network
+import Darwin
 
 private actor RefreshCoordinator {
     private var inFlight = false
@@ -27,7 +29,37 @@ final class AuthManager: ObservableObject {
     static let shared = AuthManager()
     private static let demoEmail = "demo@openphotos.ca"
 
-    @Published var serverURL: String
+    enum ManualPreferredEndpoint: String, CaseIterable, Identifiable {
+        case `public`
+        case local
+
+        var id: String { rawValue }
+    }
+
+    enum ActiveEndpoint: String {
+        case none
+        case `public`
+        case local
+    }
+
+    enum NetworkTransportKind: String {
+        case offline
+        case wifi
+        case ethernet
+        case cellular
+        case other
+    }
+
+    @Published private(set) var serverURL: String
+    @Published private(set) var publicBaseURL: String
+    @Published private(set) var localBaseURL: String
+    @Published private(set) var autoSwitchEnabled: Bool
+    @Published private(set) var manualPreferredEndpoint: ManualPreferredEndpoint
+    @Published private(set) var activeEndpoint: ActiveEndpoint = .none
+    @Published private(set) var networkTransport: NetworkTransportKind = .offline
+    @Published private(set) var lastLocalProbeSucceeded: Bool?
+    @Published private(set) var lastLocalProbeMessage: String?
+    @Published private(set) var lastLocalProbeAt: Date?
     @Published private(set) var token: String?
     @Published private(set) var refreshToken: String?
     @Published private(set) var expiresAt: Date?
@@ -64,7 +96,12 @@ final class AuthManager: ObservableObject {
     private let userIdDefaultsKey = "auth.userId"
     private let userNameDefaultsKey = "auth.userName"
     private let userEmailDefaultsKey = "auth.userEmail"
+    private let lastLoginEmailDefaultsKey = "auth.lastLoginEmail"
     private let serverURLDefaultsKey = "server.baseURL"
+    private let publicServerURLDefaultsKey = "network.publicBaseURL"
+    private let localServerURLDefaultsKey = "network.localBaseURL"
+    private let autoSwitchDefaultsKey = "network.autoSwitchEnabled"
+    private let manualPreferredEndpointDefaultsKey = "network.manualPreferredEndpoint"
     private let serverSchemeDefaultsKey = "server.scheme"
     private let serverHostDefaultsKey = "server.host"
     private let serverPortDefaultsKey = "server.port"
@@ -76,37 +113,56 @@ final class AuthManager: ObservableObject {
     private let firstRunMarkerKey = "app.firstRunMarker"
     private var lastAutoLoginAttemptAt: Date?
     private let autoLoginCooldownSeconds: TimeInterval = 20
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "openphotos.auth.network")
+    private let routeDecisionTTL: TimeInterval = 30
+    private let localProbeFailureBackoff: TimeInterval = 60
+    private var currentUsesWiFiOrEthernet = false
+    private var currentHasPrivateOrLoopbackLANAddress = false
+    private var networkGeneration: Int = 0
+    private var lastProbeNetworkGeneration: Int = -1
+    private var hasManualServerOverride = false
+    private var manualServerOverrideBaseURL: String = ""
 
     private init() {
-        // Default server URL; prefer structured persisted value if present, else fall back to legacy baseURL.
         let defaults = UserDefaults.standard
-        let persistedScheme = defaults.string(forKey: serverSchemeDefaultsKey)
-        let persistedHost = defaults.string(forKey: serverHostDefaultsKey)
-        let persistedPort = defaults.object(forKey: serverPortDefaultsKey) as? Int
-        if let persistedScheme, let persistedHost,
-           let base = AuthManager.buildBaseURL(scheme: persistedScheme, host: persistedHost, port: persistedPort) {
-            self.serverURL = base
-            defaults.set(base, forKey: serverURLDefaultsKey)
-            defaults.set(persistedScheme.lowercased(), forKey: serverSchemeDefaultsKey)
-            defaults.set(AuthManager.normalizeHost(persistedHost), forKey: serverHostDefaultsKey)
-            defaults.set(persistedPort ?? AuthManager.defaultServerPort, forKey: serverPortDefaultsKey)
-        } else if let persistedURL = defaults.string(forKey: serverURLDefaultsKey),
-                  let parsed = AuthManager.parseBaseURL(persistedURL) {
-            self.serverURL = AuthManager.buildBaseURL(
-                scheme: parsed.scheme,
-                host: parsed.host,
-                port: parsed.port
-            ) ?? persistedURL
+        let legacyBaseURL = AuthManager.migratedLegacyServerURL(defaults: defaults)
+        let persistedPublicBaseURL = AuthManager.normalizedBaseURL(defaults.string(forKey: publicServerURLDefaultsKey))
+        let persistedLocalBaseURL = AuthManager.normalizedBaseURL(defaults.string(forKey: localServerURLDefaultsKey))
+        let initialConfiguredBaseURLs = AuthManager.repartitionConfiguredBaseURLs(
+            publicBaseURL: !persistedPublicBaseURL.isEmpty ? persistedPublicBaseURL : legacyBaseURL,
+            localBaseURL: persistedLocalBaseURL
+        )
+        let resolvedPublicBaseURL = initialConfiguredBaseURLs.publicBaseURL
+        let resolvedLocalBaseURL = initialConfiguredBaseURLs.localBaseURL
+        let autoSwitch = defaults.object(forKey: autoSwitchDefaultsKey) as? Bool ?? true
+        let manualPreferredRaw = defaults.string(forKey: manualPreferredEndpointDefaultsKey) ?? ManualPreferredEndpoint.public.rawValue
+        let manualPreferred = ManualPreferredEndpoint(rawValue: manualPreferredRaw) ?? .public
+        let initialServerURL = AuthManager.initialResolvedBaseURL(
+            publicBaseURL: resolvedPublicBaseURL,
+            localBaseURL: resolvedLocalBaseURL,
+            autoSwitchEnabled: autoSwitch,
+            manualPreferredEndpoint: manualPreferred
+        )
+        self.publicBaseURL = resolvedPublicBaseURL
+        self.localBaseURL = resolvedLocalBaseURL
+        self.autoSwitchEnabled = autoSwitch
+        self.manualPreferredEndpoint = manualPreferred
+        self.serverURL = initialServerURL
+        self.activeEndpoint = AuthManager.endpointType(
+            for: initialServerURL,
+            publicBaseURL: resolvedPublicBaseURL,
+            localBaseURL: resolvedLocalBaseURL
+        )
+        defaults.set(resolvedPublicBaseURL, forKey: publicServerURLDefaultsKey)
+        defaults.set(resolvedLocalBaseURL, forKey: localServerURLDefaultsKey)
+        defaults.set(autoSwitch, forKey: autoSwitchDefaultsKey)
+        defaults.set(manualPreferred.rawValue, forKey: manualPreferredEndpointDefaultsKey)
+        defaults.set(initialServerURL, forKey: serverURLDefaultsKey)
+        if let parsed = AuthManager.parseBaseURL(resolvedPublicBaseURL.isEmpty ? initialServerURL : resolvedPublicBaseURL) {
             defaults.set(parsed.scheme, forKey: serverSchemeDefaultsKey)
             defaults.set(parsed.host, forKey: serverHostDefaultsKey)
             defaults.set(parsed.port ?? AuthManager.defaultServerPort, forKey: serverPortDefaultsKey)
-        } else {
-            // Fresh installs should not prefill server settings.
-            self.serverURL = ""
-            defaults.removeObject(forKey: serverURLDefaultsKey)
-            defaults.removeObject(forKey: serverSchemeDefaultsKey)
-            defaults.removeObject(forKey: serverHostDefaultsKey)
-            defaults.removeObject(forKey: serverPortDefaultsKey)
         }
 
         // Keychain items (including auth tokens) can survive uninstall/reinstall.
@@ -119,6 +175,7 @@ final class AuthManager: ObservableObject {
             defaults.removeObject(forKey: userIdDefaultsKey)
             defaults.removeObject(forKey: userNameDefaultsKey)
             defaults.removeObject(forKey: userEmailDefaultsKey)
+            defaults.removeObject(forKey: lastLoginEmailDefaultsKey)
             token = nil
             refreshToken = nil
             expiresAt = nil
@@ -172,11 +229,21 @@ final class AuthManager: ObservableObject {
         self.autoRetryBgMinutes = retryMins ?? 5
         let syncEnabled = UserDefaults.standard.object(forKey: syncEnabledDefaultsKey) as? Bool
         self.syncEnabledAfterManualStart = syncEnabled ?? false
+
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            guard let self else { return }
+            Task { @MainActor in
+                self.handleNetworkPathUpdate(path)
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
+        Task {
+            await refreshEffectiveServerURL(reason: "startup", forceProbe: true)
+        }
     }
 
     func setServerURL(_ url: String) {
-        guard let parsed = AuthManager.parseBaseURL(url) else { return }
-        _ = setServerConfig(scheme: parsed.scheme, host: parsed.host, port: parsed.port)
+        updateSingleConfiguredBaseURL(url)
     }
 
     struct ServerConfig: Equatable {
@@ -186,7 +253,16 @@ final class AuthManager: ObservableObject {
     }
 
     func currentServerConfig() -> ServerConfig {
-        if let parsed = AuthManager.parseBaseURL(serverURL) {
+        if hasManualServerOverride,
+           let parsed = AuthManager.parseBaseURL(manualServerOverrideBaseURL.isEmpty ? serverURL : manualServerOverrideBaseURL) {
+            return ServerConfig(
+                scheme: parsed.scheme,
+                host: parsed.host,
+                port: parsed.port ?? AuthManager.defaultServerPort
+            )
+        }
+        let preferredBaseURL = preferredConfiguredBaseURL()
+        if let parsed = AuthManager.parseBaseURL(preferredBaseURL) {
             return ServerConfig(
                 scheme: parsed.scheme,
                 host: parsed.host,
@@ -203,15 +279,194 @@ final class AuthManager: ObservableObject {
 
     @discardableResult
     func setServerConfig(scheme: String, host: String, port: Int?) -> Bool {
+        let hostTrim = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedScheme = scheme.isEmpty ? AuthManager.defaultServerScheme : scheme
         let resolvedPort = port ?? AuthManager.defaultServerPort
-        guard let base = AuthManager.buildBaseURL(scheme: scheme, host: host, port: resolvedPort) else { return false }
-        serverURL = base
-        let defaults = UserDefaults.standard
-        defaults.set(base, forKey: serverURLDefaultsKey)
-        defaults.set(scheme.lowercased(), forKey: serverSchemeDefaultsKey)
-        defaults.set(AuthManager.normalizeHost(host), forKey: serverHostDefaultsKey)
-        defaults.set(resolvedPort, forKey: serverPortDefaultsKey)
+
+        guard !hostTrim.isEmpty else {
+            hasManualServerOverride = true
+            manualServerOverrideBaseURL = ""
+            applyResolvedBaseURL("", endpoint: .none)
+            return true
+        }
+
+        guard let base = AuthManager.buildBaseURL(scheme: resolvedScheme, host: hostTrim, port: resolvedPort) else { return false }
+        hasManualServerOverride = true
+        manualServerOverrideBaseURL = base
+        applyResolvedBaseURL(
+            base,
+            endpoint: AuthManager.endpointType(
+                for: base,
+                publicBaseURL: publicBaseURL,
+                localBaseURL: localBaseURL
+            )
+        )
         return true
+    }
+
+    func commitManualServerOverride() {
+        guard hasManualServerOverride else { return }
+        let submittedBaseURL = AuthManager.normalizedBaseURL(
+            manualServerOverrideBaseURL.isEmpty ? serverURL : manualServerOverrideBaseURL
+        )
+        hasManualServerOverride = false
+        manualServerOverrideBaseURL = ""
+        guard !submittedBaseURL.isEmpty else {
+            applyImmediateResolvedBaseURL()
+            return
+        }
+        updateSingleConfiguredBaseURL(submittedBaseURL)
+    }
+
+    private func commitSuccessfulManualServerOverrideIfNeeded() {
+        guard hasManualServerOverride else { return }
+        commitManualServerOverride()
+    }
+
+    func clearManualServerOverride() {
+        guard hasManualServerOverride else { return }
+        hasManualServerOverride = false
+        manualServerOverrideBaseURL = ""
+        applyImmediateResolvedBaseURL()
+    }
+
+    func currentEffectiveBaseURL() -> String {
+        serverURL
+    }
+
+    func effectiveBaseURL() async -> String {
+        await refreshEffectiveServerURL(reason: "on-demand")
+    }
+
+    func networkStatusSummary() -> String {
+        switch activeEndpoint {
+        case .local:
+            return "Using Local Network"
+        case .public:
+            return "Using External Network"
+        case .none:
+            return "Not Configured"
+        }
+    }
+
+    func setPublicBaseURL(_ rawURL: String) {
+        updateSingleConfiguredBaseURL(rawURL)
+    }
+
+    func setLocalBaseURL(_ rawURL: String) {
+        updateConfiguredBaseURLs(publicBaseURL: publicBaseURL, localBaseURL: rawURL)
+    }
+
+    func saveConfiguredBaseURLs(publicBaseURL rawPublicBaseURL: String, localBaseURL rawLocalBaseURL: String) {
+        applyConfiguredBaseURLs(
+            publicBaseURL: rawPublicBaseURL,
+            localBaseURL: rawLocalBaseURL,
+            refreshCurrentConnection: false,
+            refreshReason: nil
+        )
+    }
+
+    func updateConfiguredBaseURLs(publicBaseURL rawPublicBaseURL: String, localBaseURL rawLocalBaseURL: String) {
+        applyConfiguredBaseURLs(
+            publicBaseURL: rawPublicBaseURL,
+            localBaseURL: rawLocalBaseURL,
+            refreshCurrentConnection: true,
+            refreshReason: "configured-base-url-change"
+        )
+    }
+
+    func updateSingleConfiguredBaseURL(_ rawURL: String) {
+        let normalized = AuthManager.normalizedBaseURL(rawURL)
+        hasManualServerOverride = false
+        manualServerOverrideBaseURL = ""
+        if normalized.isEmpty {
+            publicBaseURL = ""
+            localBaseURL = ""
+        } else if AuthManager.isLocalEndpointURL(normalized) {
+            let repartitioned = AuthManager.repartitionConfiguredBaseURLs(
+                publicBaseURL: publicBaseURL,
+                localBaseURL: normalized
+            )
+            publicBaseURL = repartitioned.publicBaseURL
+            localBaseURL = repartitioned.localBaseURL
+        } else {
+            let repartitioned = AuthManager.repartitionConfiguredBaseURLs(
+                publicBaseURL: normalized,
+                localBaseURL: localBaseURL
+            )
+            publicBaseURL = repartitioned.publicBaseURL
+            localBaseURL = repartitioned.localBaseURL
+        }
+
+        applyImmediateResolvedBaseURL()
+        persistNetworkProfile()
+
+        if !normalized.isEmpty {
+            addRecentServer(normalized)
+            if let parsed = AuthManager.parseBaseURL(normalized) {
+                UserDefaults.standard.set(parsed.scheme, forKey: serverSchemeDefaultsKey)
+                UserDefaults.standard.set(parsed.host, forKey: serverHostDefaultsKey)
+                UserDefaults.standard.set(parsed.port ?? AuthManager.defaultServerPort, forKey: serverPortDefaultsKey)
+            }
+        }
+
+        Task {
+            await refreshEffectiveServerURL(reason: "single-base-url-change", forceProbe: true)
+        }
+    }
+
+    func setAutoSwitchEnabled(_ enabled: Bool) {
+        autoSwitchEnabled = enabled
+        persistNetworkProfile()
+        Task {
+            await refreshEffectiveServerURL(reason: "auto-switch-change", forceProbe: true)
+        }
+    }
+
+    func setManualPreferredEndpoint(_ endpoint: ManualPreferredEndpoint) {
+        manualPreferredEndpoint = endpoint
+        persistNetworkProfile()
+        Task {
+            await refreshEffectiveServerURL(reason: "manual-endpoint-change", forceProbe: true)
+        }
+    }
+
+    func useCurrentConnection() {
+        switch activeEndpoint {
+        case .local:
+            autoSwitchEnabled = false
+            manualPreferredEndpoint = .local
+        case .public:
+            autoSwitchEnabled = false
+            manualPreferredEndpoint = .public
+        case .none:
+            break
+        }
+        persistNetworkProfile()
+        Task {
+            await refreshEffectiveServerURL(reason: "use-current-connection", forceProbe: true)
+        }
+    }
+
+    func refreshNetworkRouting() async {
+        _ = await refreshEffectiveServerURL(reason: "manual-refresh", forceProbe: true)
+    }
+
+    func testConfiguredEndpoint(_ endpoint: ManualPreferredEndpoint) async -> (success: Bool, message: String) {
+        let baseURL = endpoint == .local ? localBaseURL : publicBaseURL
+        guard !baseURL.isEmpty else {
+            return (false, endpoint == .local ? "Local URL is not configured." : "Public URL is not configured.")
+        }
+        let result = await pingBaseURL(baseURL)
+        if endpoint == .local {
+            await MainActor.run {
+                self.lastLocalProbeSucceeded = result.success
+                self.lastLocalProbeMessage = result.message
+                self.lastLocalProbeAt = Date()
+                self.lastProbeNetworkGeneration = self.networkGeneration
+            }
+        }
+        return result
     }
 
     func recentServers() -> [String] {
@@ -220,7 +475,7 @@ final class AuthManager: ObservableObject {
 
     func addRecentServer(_ baseURL: String) {
         guard let parsed = AuthManager.parseBaseURL(baseURL),
-              let normalized = AuthManager.buildBaseURL(scheme: parsed.scheme, host: parsed.host, port: parsed.port ?? AuthManager.defaultServerPort)
+              let normalized = AuthManager.buildBaseURL(scheme: parsed.scheme, host: parsed.host, port: parsed.port)
         else { return }
         var recents = recentServers()
         recents.removeAll(where: { $0 == normalized })
@@ -293,6 +548,7 @@ final class AuthManager: ObservableObject {
     private func saveLoginCredentials(email: String, password: String, organizationId: Int?) {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedEmail.isEmpty, !password.isEmpty else { return }
+        saveLastLoginEmail(trimmedEmail)
         saveUserEmail(trimmedEmail)
         keychain.set(Data(trimmedEmail.utf8), service: credentialsService, account: credentialEmailAccount)
         keychain.set(Data(password.utf8), service: credentialsService, account: credentialPasswordAccount)
@@ -301,7 +557,10 @@ final class AuthManager: ObservableObject {
         } else {
             keychain.remove(service: credentialsService, account: credentialOrgIdAccount)
         }
-        keychain.set(Data(serverURL.utf8), service: credentialsService, account: credentialServerAccount)
+        let serverIdentity = credentialServerIdentity()
+        if !serverIdentity.isEmpty {
+            keychain.set(Data(serverIdentity.utf8), service: credentialsService, account: credentialServerAccount)
+        }
     }
 
     private func loadSavedCredentials() -> SavedCredentials? {
@@ -319,9 +578,8 @@ final class AuthManager: ObservableObject {
         if let serverData = keychain.get(service: credentialsService, account: credentialServerAccount),
            let savedServer = String(data: serverData, encoding: .utf8),
            !savedServer.isEmpty {
-            let lhs = savedServer.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            let rhs = serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            guard lhs == rhs else { return nil }
+            let normalizedSavedServer = savedServer.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+            guard currentCredentialServerKeys().contains(normalizedSavedServer) else { return nil }
         }
 
         var organizationId: Int? = nil
@@ -338,6 +596,23 @@ final class AuthManager: ObservableObject {
         keychain.remove(service: credentialsService, account: credentialPasswordAccount)
         keychain.remove(service: credentialsService, account: credentialOrgIdAccount)
         keychain.remove(service: credentialsService, account: credentialServerAccount)
+    }
+
+    private func saveLastLoginEmail(_ email: String?) {
+        let normalized = email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if let normalized, !normalized.isEmpty {
+            UserDefaults.standard.set(normalized, forKey: lastLoginEmailDefaultsKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: lastLoginEmailDefaultsKey)
+        }
+    }
+
+    func lastUsedLoginEmail() -> String? {
+        let normalized = UserDefaults.standard.string(forKey: lastLoginEmailDefaultsKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        guard let normalized, !normalized.isEmpty else { return nil }
+        return normalized
     }
 
     private func canAttemptAutoLogin(now: Date = Date()) -> Bool {
@@ -431,9 +706,10 @@ final class AuthManager: ObservableObject {
     }
 
     private func performRefresh(force: Bool) async -> Bool {
+        let resolvedBaseURL = await refreshEffectiveServerURL(reason: "auth-refresh", forceProbe: force)
         let snapshot = await MainActor.run {
             AuthSnapshot(
-                serverURL: self.serverURL,
+                serverURL: resolvedBaseURL.isEmpty ? self.serverURL : resolvedBaseURL,
                 accessToken: self.token,
                 refreshToken: self.refreshToken,
                 expiresAt: self.expiresAt
@@ -511,6 +787,72 @@ final class AuthManager: ObservableObject {
             ?? normalizeUserName(user?.user_name)
     }
 
+    private func urlForPath(_ path: String, forceProbe: Bool = false) async throws -> URL {
+        let baseURL = await refreshEffectiveServerURL(reason: path, forceProbe: forceProbe)
+        guard !baseURL.isEmpty, let url = URL(string: baseURL + path) else {
+            throw NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])
+        }
+        return url
+    }
+
+    private func performData(for request: URLRequest, allowPublicFallback: Bool = true) async throws -> (Data, URLResponse) {
+        do {
+            return try await URLSession.shared.data(for: request)
+        } catch {
+            guard allowPublicFallback, let fallbackRequest = fallbackRequest(for: request, error: error) else {
+                throw error
+            }
+            return try await URLSession.shared.data(for: fallbackRequest)
+        }
+    }
+
+    func dataForResolvedRequest(_ request: URLRequest, allowPublicFallback: Bool = true) async throws -> (Data, URLResponse) {
+        try await performData(for: request, allowPublicFallback: allowPublicFallback)
+    }
+
+    private func fallbackRequest(for request: URLRequest, error: Error) -> URLRequest? {
+        guard shouldFallbackToPublic(after: error),
+              !publicBaseURL.isEmpty,
+              !localBaseURL.isEmpty,
+              let requestURL = request.url
+        else {
+            return nil
+        }
+
+        let localPrefix = localBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let publicPrefix = publicBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let requestAbsoluteString = requestURL.absoluteString
+        guard !localPrefix.isEmpty,
+              !publicPrefix.isEmpty,
+              requestAbsoluteString.hasPrefix(localPrefix)
+        else {
+            return nil
+        }
+
+        let suffix = String(requestAbsoluteString.dropFirst(localPrefix.count))
+        guard let fallbackURL = URL(string: publicPrefix + suffix) else { return nil }
+
+        lastLocalProbeSucceeded = false
+        lastLocalProbeMessage = (error as NSError).localizedDescription
+        lastLocalProbeAt = Date()
+        lastProbeNetworkGeneration = networkGeneration
+        applyResolvedBaseURL(publicPrefix, endpoint: .public)
+
+        var fallbackRequest = request
+        fallbackRequest.url = fallbackURL
+        return fallbackRequest
+    }
+
+    private func shouldFallbackToPublic(after error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .timedOut, .cannotFindHost, .cannotConnectToHost, .networkConnectionLost, .notConnectedToInternet, .dnsLookupFailed:
+            return true
+        default:
+            return false
+        }
+    }
+
     private func requestRefresh(
         url: URL,
         accessToken: String?,
@@ -528,7 +870,7 @@ final class AuthManager: ObservableObject {
             req.httpBody = try JSONSerialization.data(withJSONObject: [String: String](), options: [])
         }
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await performData(for: req)
         guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             return nil
         }
@@ -560,15 +902,13 @@ final class AuthManager: ObservableObject {
     struct OrgAccount { let id: Int; let name: String }
 
     func loginStart(email: String) async throws -> [OrgAccount] {
-        guard let url = URL(string: serverURL + "/api/auth/login/start") else {
-            throw NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])
-        }
+        let url = try await urlForPath("/api/auth/login/start", forceProbe: true)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = ["email": email]
         req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await performData(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "Auth", code: 2, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
@@ -593,15 +933,13 @@ final class AuthManager: ObservableObject {
 
     // Returns true if password change is required
     func loginFinish(email: String, organizationId: Int, password: String) async throws -> Bool {
-        guard let url = URL(string: serverURL + "/api/auth/login/finish") else {
-            throw NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])
-        }
+        let url = try await urlForPath("/api/auth/login/finish", forceProbe: true)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: Any] = ["email": email, "organization_id": organizationId, "password": password]
         req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await performData(for: req)
         guard let http = resp as? HTTPURLResponse else { throw NSError(domain: "Auth", code: 2, userInfo: [NSLocalizedDescriptionKey: "No response"]) }
         guard (200..<300).contains(http.statusCode) else {
             let msg = String(data: data, encoding: .utf8) ?? "Login failed"
@@ -613,6 +951,7 @@ final class AuthManager: ObservableObject {
         }
         let must = decoded.password_change_required ?? false
         await MainActor.run {
+            self.commitSuccessfulManualServerOverrideIfNeeded()
             self.saveTokens(token: decoded.token, refresh: decoded.refresh_token, expiresIn: decoded.expires_in)
             self.saveUserId(decoded.user?.user_id)
             self.saveUserName(Self.resolvedUserName(from: decoded.user))
@@ -627,15 +966,13 @@ final class AuthManager: ObservableObject {
 
     // Returns true if password change is required
     func loginSingleStep(email: String, password: String) async throws -> Bool {
-        guard let url = URL(string: serverURL + "/api/auth/login") else {
-            throw NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])
-        }
+        let url = try await urlForPath("/api/auth/login", forceProbe: true)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         let body: [String: String] = ["email": email, "password": password]
         req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await performData(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "Auth", code: 2, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
@@ -649,6 +986,7 @@ final class AuthManager: ObservableObject {
         }
         let must = decoded.password_change_required ?? false
         await MainActor.run {
+            self.commitSuccessfulManualServerOverrideIfNeeded()
             self.saveTokens(token: decoded.token, refresh: decoded.refresh_token, expiresIn: decoded.expires_in)
             self.saveUserId(decoded.user?.user_id)
             self.saveUserName(Self.resolvedUserName(from: decoded.user))
@@ -674,9 +1012,7 @@ final class AuthManager: ObservableObject {
     }
 
     func changePassword(newPassword: String, currentPassword: String? = nil) async throws {
-        guard let url = URL(string: serverURL + "/api/auth/password/change") else {
-            throw NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])
-        }
+        let url = try await urlForPath("/api/auth/password/change", forceProbe: true)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -684,7 +1020,7 @@ final class AuthManager: ObservableObject {
         var body: [String: Any] = ["new_password": newPassword]
         if let currentPassword, !currentPassword.isEmpty { body["current_password"] = currentPassword }
         req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await performData(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "Auth", code: 4, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
@@ -705,9 +1041,7 @@ final class AuthManager: ObservableObject {
     }
 
     func register(name: String, email: String, password: String) async throws {
-        guard let url = URL(string: serverURL + "/api/auth/register") else {
-            throw NSError(domain: "Auth", code: 1, userInfo: [NSLocalizedDescriptionKey: "Invalid server URL"])
-        }
+        let url = try await urlForPath("/api/auth/register", forceProbe: true)
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -719,7 +1053,7 @@ final class AuthManager: ObservableObject {
         ]
         req.httpBody = try JSONSerialization.data(withJSONObject: body, options: [])
 
-        let (data, resp) = try await URLSession.shared.data(for: req)
+        let (data, resp) = try await performData(for: req)
         guard let http = resp as? HTTPURLResponse else {
             throw NSError(domain: "Auth", code: 2, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
@@ -735,6 +1069,7 @@ final class AuthManager: ObservableObject {
         let expiresIn = (dict?["expires_in"] as? NSNumber)?.int64Value
         let uid = (dict?["user"] as? [String: Any])?["user_id"] as? String
         await MainActor.run {
+            self.commitSuccessfulManualServerOverrideIfNeeded()
             self.saveTokens(token: token, refresh: refresh, expiresIn: expiresIn)
             self.saveUserId(uid)
             self.saveUserName(name)
@@ -757,6 +1092,263 @@ final class AuthManager: ObservableObject {
         saveUserName(nil)
         saveUserEmail(nil)
         clearSyncEnabledAfterManualStart()
+    }
+
+    private func handleNetworkPathUpdate(_ path: NWPath) {
+        if path.status != .satisfied {
+            networkTransport = .offline
+            currentUsesWiFiOrEthernet = false
+            currentHasPrivateOrLoopbackLANAddress = false
+        } else if path.usesInterfaceType(.wifi) {
+            networkTransport = .wifi
+            currentUsesWiFiOrEthernet = true
+            currentHasPrivateOrLoopbackLANAddress = currentLANInterfaceHasPrivateOrLoopbackAddress(for: path)
+        } else if path.usesInterfaceType(.wiredEthernet) {
+            networkTransport = .ethernet
+            currentUsesWiFiOrEthernet = true
+            currentHasPrivateOrLoopbackLANAddress = currentLANInterfaceHasPrivateOrLoopbackAddress(for: path)
+        } else if path.usesInterfaceType(.cellular) {
+            networkTransport = .cellular
+            currentUsesWiFiOrEthernet = false
+            currentHasPrivateOrLoopbackLANAddress = false
+        } else {
+            networkTransport = .other
+            currentUsesWiFiOrEthernet = false
+            currentHasPrivateOrLoopbackLANAddress = false
+        }
+        networkGeneration += 1
+        Task {
+            await refreshEffectiveServerURL(reason: "network-path-update", forceProbe: true)
+        }
+    }
+
+    private func currentLANInterfaceHasPrivateOrLoopbackAddress(for path: NWPath) -> Bool {
+        let interfaceNames = Set(
+            path.availableInterfaces
+                .filter { $0.type == .wifi || $0.type == .wiredEthernet }
+                .map(\.name)
+        )
+        return AuthManager.interfaceHasPrivateOrLoopbackAddress(interfaceNames: interfaceNames)
+    }
+
+    private func persistNetworkProfile() {
+        let defaults = UserDefaults.standard
+        defaults.set(publicBaseURL, forKey: publicServerURLDefaultsKey)
+        defaults.set(localBaseURL, forKey: localServerURLDefaultsKey)
+        defaults.set(autoSwitchEnabled, forKey: autoSwitchDefaultsKey)
+        defaults.set(manualPreferredEndpoint.rawValue, forKey: manualPreferredEndpointDefaultsKey)
+    }
+
+    private func applyConfiguredBaseURLs(
+        publicBaseURL rawPublicBaseURL: String,
+        localBaseURL rawLocalBaseURL: String,
+        refreshCurrentConnection: Bool,
+        refreshReason: String?
+    ) {
+        let repartitioned = AuthManager.repartitionConfiguredBaseURLs(
+            publicBaseURL: rawPublicBaseURL,
+            localBaseURL: rawLocalBaseURL
+        )
+        hasManualServerOverride = false
+        manualServerOverrideBaseURL = ""
+        publicBaseURL = repartitioned.publicBaseURL
+        localBaseURL = repartitioned.localBaseURL
+        if refreshCurrentConnection {
+            applyImmediateResolvedBaseURL()
+        }
+        persistNetworkProfile()
+
+        let preferredConfiguredBaseURL = AuthManager.configuredPreferredBaseURL(
+            publicBaseURL: repartitioned.publicBaseURL,
+            localBaseURL: repartitioned.localBaseURL
+        )
+        if !preferredConfiguredBaseURL.isEmpty {
+            addRecentServer(preferredConfiguredBaseURL)
+            if let parsed = AuthManager.parseBaseURL(preferredConfiguredBaseURL) {
+                UserDefaults.standard.set(parsed.scheme, forKey: serverSchemeDefaultsKey)
+                UserDefaults.standard.set(parsed.host, forKey: serverHostDefaultsKey)
+                UserDefaults.standard.set(parsed.port ?? AuthManager.defaultServerPort, forKey: serverPortDefaultsKey)
+            }
+        }
+
+        guard refreshCurrentConnection, let refreshReason else { return }
+        Task {
+            await refreshEffectiveServerURL(reason: refreshReason, forceProbe: true)
+        }
+    }
+
+    private func applyResolvedBaseURL(_ baseURL: String, endpoint: ActiveEndpoint) {
+        let normalized = AuthManager.normalizedBaseURL(baseURL)
+        serverURL = normalized
+        activeEndpoint = endpoint
+        if !hasManualServerOverride {
+            UserDefaults.standard.set(normalized, forKey: serverURLDefaultsKey)
+        }
+    }
+
+    private func applyImmediateResolvedBaseURL() {
+        let immediate = AuthManager.initialResolvedBaseURL(
+            publicBaseURL: publicBaseURL,
+            localBaseURL: localBaseURL,
+            autoSwitchEnabled: autoSwitchEnabled,
+            manualPreferredEndpoint: manualPreferredEndpoint
+        )
+        applyResolvedBaseURL(
+            immediate,
+            endpoint: AuthManager.endpointType(
+                for: immediate,
+                publicBaseURL: publicBaseURL,
+                localBaseURL: localBaseURL
+            )
+        )
+    }
+
+    private func preferredConfiguredBaseURL() -> String {
+        if !publicBaseURL.isEmpty {
+            return publicBaseURL
+        }
+        if !localBaseURL.isEmpty {
+            return localBaseURL
+        }
+        return serverURL
+    }
+
+    private func credentialServerIdentity() -> String {
+        if !publicBaseURL.isEmpty {
+            return publicBaseURL.lowercased()
+        }
+        if !localBaseURL.isEmpty {
+            return localBaseURL.lowercased()
+        }
+        return serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+    }
+
+    private func currentCredentialServerKeys() -> Set<String> {
+        var keys: Set<String> = []
+        for candidate in [publicBaseURL, localBaseURL, serverURL, credentialServerIdentity()] {
+            let normalized = candidate.trimmingCharacters(in: CharacterSet(charactersIn: "/")).lowercased()
+            if !normalized.isEmpty {
+                keys.insert(normalized)
+            }
+        }
+        return keys
+    }
+
+    @discardableResult
+    func refreshEffectiveServerURL(reason: String, forceProbe: Bool = false) async -> String {
+        let manualOverrideBaseURL = await MainActor.run { () -> String? in
+            guard self.hasManualServerOverride else { return nil }
+            return self.manualServerOverrideBaseURL
+        }
+        if let manualOverrideBaseURL {
+            return manualOverrideBaseURL
+        }
+
+        let configuredPublic = publicBaseURL
+        let configuredLocal = localBaseURL
+
+        if configuredPublic.isEmpty && configuredLocal.isEmpty {
+            await MainActor.run {
+                self.applyResolvedBaseURL("", endpoint: .none)
+            }
+            return ""
+        }
+
+        if !autoSwitchEnabled {
+            let resolved = AuthManager.manualResolvedBaseURL(
+                publicBaseURL: configuredPublic,
+                localBaseURL: configuredLocal,
+                manualPreferredEndpoint: manualPreferredEndpoint
+            )
+            let endpoint = AuthManager.endpointType(
+                for: resolved,
+                publicBaseURL: configuredPublic,
+                localBaseURL: configuredLocal
+            )
+            await MainActor.run {
+                self.applyResolvedBaseURL(resolved, endpoint: endpoint)
+            }
+            return resolved
+        }
+
+        if configuredLocal.isEmpty {
+            let resolved = configuredPublic
+            await MainActor.run {
+                self.applyResolvedBaseURL(resolved, endpoint: .public)
+            }
+            return resolved
+        }
+
+        if configuredPublic.isEmpty {
+            let resolved = configuredLocal
+            await MainActor.run {
+                self.applyResolvedBaseURL(resolved, endpoint: .local)
+            }
+            return resolved
+        }
+
+        if !currentUsesWiFiOrEthernet || !currentHasPrivateOrLoopbackLANAddress {
+            await MainActor.run {
+                self.applyResolvedBaseURL(configuredPublic, endpoint: .public)
+            }
+            return configuredPublic
+        }
+
+        if !forceProbe,
+           let probeAt = lastLocalProbeAt,
+           lastProbeNetworkGeneration == networkGeneration {
+            let age = Date().timeIntervalSince(probeAt)
+            if lastLocalProbeSucceeded == true, age < routeDecisionTTL {
+                await MainActor.run {
+                    self.applyResolvedBaseURL(configuredLocal, endpoint: .local)
+                }
+                return configuredLocal
+            }
+            if lastLocalProbeSucceeded == false, age < localProbeFailureBackoff {
+                await MainActor.run {
+                    self.applyResolvedBaseURL(configuredPublic, endpoint: .public)
+                }
+                return configuredPublic
+            }
+        }
+
+        let probe = await pingBaseURL(configuredLocal)
+        await MainActor.run {
+            self.lastLocalProbeSucceeded = probe.success
+            self.lastLocalProbeMessage = "\(reason): \(probe.message)"
+            self.lastLocalProbeAt = Date()
+            self.lastProbeNetworkGeneration = self.networkGeneration
+            self.applyResolvedBaseURL(
+                probe.success ? configuredLocal : configuredPublic,
+                endpoint: probe.success ? .local : .public
+            )
+        }
+        return probe.success ? configuredLocal : configuredPublic
+    }
+
+    private func pingBaseURL(_ baseURL: String) async -> (success: Bool, message: String) {
+        let normalized = AuthManager.normalizedBaseURL(baseURL)
+        guard !normalized.isEmpty, let url = URL(string: normalized + "/ping") else {
+            return (false, "Invalid URL")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.timeoutInterval = 1.5
+
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return (false, "No response")
+            }
+            let body = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            if (200..<300).contains(http.statusCode) {
+                return (true, body.isEmpty ? "Success (\(http.statusCode))" : "Success (\(http.statusCode)): \(body)")
+            }
+            return (false, body.isEmpty ? "HTTP \(http.statusCode)" : "HTTP \(http.statusCode): \(body)")
+        } catch {
+            return (false, error.localizedDescription)
+        }
     }
 
     func setSyncUseCellularPhotos(_ enabled: Bool) {
@@ -823,6 +1415,11 @@ final class AuthManager: ObservableObject {
 }
 
 extension AuthManager {
+    struct ConfiguredBaseURLs {
+        let publicBaseURL: String
+        let localBaseURL: String
+    }
+
     struct ParsedBaseURL: Equatable {
         let scheme: String
         let host: String
@@ -843,24 +1440,271 @@ extension AuthManager {
         let withScheme = trimmed.contains("://") ? trimmed : "http://\(trimmed)"
         guard let comps = URLComponents(string: withScheme) else { return nil }
         let scheme = (comps.scheme ?? "http").lowercased()
-        guard let host = comps.host, !host.isEmpty else { return nil }
-        let port = comps.port ?? AuthManager.defaultServerPort
+        guard let host = comps.host, !host.isEmpty, isValidParsedHost(host) else { return nil }
+        let port = comps.port
         return ParsedBaseURL(scheme: scheme, host: host, port: port)
     }
 
     static func buildBaseURL(scheme: String, host: String, port: Int?) -> String? {
         let schemeNorm = scheme.lowercased().replacingOccurrences(of: "://", with: "")
         let hostNorm = normalizeHost(host)
-        guard !schemeNorm.isEmpty, !hostNorm.isEmpty else { return nil }
-        let resolvedPort = port ?? AuthManager.defaultServerPort
+        guard !schemeNorm.isEmpty, !hostNorm.isEmpty, isValidParsedHost(hostNorm) else { return nil }
 
         var comps = URLComponents()
         comps.scheme = schemeNorm
         comps.host = hostNorm
-        comps.port = resolvedPort
+        comps.port = port
         guard let url = comps.url else { return nil }
         var s = url.absoluteString
         while s.hasSuffix("/") { s.removeLast() }
         return s
+    }
+
+    static func normalizedBaseURL(_ raw: String?) -> String {
+        guard let raw, let parsed = parseBaseURL(raw) else { return "" }
+        return buildBaseURL(scheme: parsed.scheme, host: parsed.host, port: parsed.port) ?? ""
+    }
+
+    static func migratedLegacyServerURL(defaults: UserDefaults) -> String {
+        let persistedScheme = defaults.string(forKey: "server.scheme")
+        let persistedHost = defaults.string(forKey: "server.host")
+        let persistedPort = defaults.object(forKey: "server.port") as? Int
+        if let persistedScheme, let persistedHost,
+           let base = buildBaseURL(scheme: persistedScheme, host: persistedHost, port: persistedPort) {
+            defaults.set(base, forKey: "server.baseURL")
+            defaults.set(persistedScheme.lowercased(), forKey: "server.scheme")
+            defaults.set(normalizeHost(persistedHost), forKey: "server.host")
+            defaults.set(persistedPort ?? AuthManager.defaultServerPort, forKey: "server.port")
+            return base
+        }
+        if let persistedURL = defaults.string(forKey: "server.baseURL") {
+            return normalizedBaseURL(persistedURL)
+        }
+        return ""
+    }
+
+    static func repartitionConfiguredBaseURLs(publicBaseURL rawPublicBaseURL: String, localBaseURL rawLocalBaseURL: String) -> ConfiguredBaseURLs {
+        let normalizedPublicBaseURL = normalizedBaseURL(rawPublicBaseURL)
+        let normalizedLocalBaseURL = normalizedBaseURL(rawLocalBaseURL)
+
+        var resolvedPublicBaseURL = !normalizedPublicBaseURL.isEmpty && !isLocalEndpointURL(normalizedPublicBaseURL)
+            ? normalizedPublicBaseURL
+            : ""
+        var resolvedLocalBaseURL = !normalizedLocalBaseURL.isEmpty && isLocalEndpointURL(normalizedLocalBaseURL)
+            ? normalizedLocalBaseURL
+            : ""
+
+        if resolvedPublicBaseURL.isEmpty,
+           !normalizedLocalBaseURL.isEmpty,
+           !isLocalEndpointURL(normalizedLocalBaseURL) {
+            resolvedPublicBaseURL = normalizedLocalBaseURL
+        }
+
+        if resolvedLocalBaseURL.isEmpty,
+           !normalizedPublicBaseURL.isEmpty,
+           isLocalEndpointURL(normalizedPublicBaseURL) {
+            resolvedLocalBaseURL = normalizedPublicBaseURL
+        }
+
+        return ConfiguredBaseURLs(
+            publicBaseURL: resolvedPublicBaseURL,
+            localBaseURL: resolvedLocalBaseURL
+        )
+    }
+
+    static func isLocalEndpointURL(_ rawURL: String) -> Bool {
+        guard let parsed = parseBaseURL(rawURL) else { return false }
+        return isLocalHost(parsed.host)
+    }
+
+    static func isLocalHost(_ rawHost: String) -> Bool {
+        let host = normalizeHost(rawHost).lowercased()
+        guard !host.isEmpty else { return false }
+
+        if host == "localhost" || host == "::1" || host == "0:0:0:0:0:0:0:1" || host.hasSuffix(".local") {
+            return true
+        }
+
+        if let ipv4 = ipv4Octets(for: host) {
+            let first = ipv4[0]
+            let second = ipv4[1]
+            if first == 10 || first == 127 || first == 192 && second == 168 {
+                return true
+            }
+            if first == 172 && (16...31).contains(second) {
+                return true
+            }
+            if first == 169 && second == 254 {
+                return true
+            }
+        }
+
+        if host.contains(":") {
+            if host.hasPrefix("fe80:") || host.hasPrefix("fc") || host.hasPrefix("fd") {
+                return true
+            }
+        }
+
+        return false
+    }
+
+    private static func ipv4Octets(for host: String) -> [Int]? {
+        let components = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4 else { return nil }
+
+        var octets: [Int] = []
+        octets.reserveCapacity(4)
+        for component in components {
+            guard let octet = Int(component), (0...255).contains(octet) else { return nil }
+            octets.append(octet)
+        }
+        return octets
+    }
+
+    private static func isValidParsedHost(_ rawHost: String) -> Bool {
+        let host = normalizeHost(rawHost)
+        guard !host.isEmpty else { return false }
+
+        if host.contains(":") {
+            return true
+        }
+
+        if host.allSatisfy({ $0.isNumber || $0 == "." }) {
+            return ipv4Octets(for: host) != nil
+        }
+
+        return isValidDNSHost(host)
+    }
+
+    private static func isValidDNSHost(_ host: String) -> Bool {
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard !labels.isEmpty else { return false }
+
+        for label in labels {
+            guard !label.isEmpty, label.count <= 63 else { return false }
+            guard let first = label.first, let last = label.last else { return false }
+            guard first.isLetter || first.isNumber else { return false }
+            guard last.isLetter || last.isNumber else { return false }
+            for character in label where !(character.isLetter || character.isNumber || character == "-") {
+                return false
+            }
+        }
+
+        return true
+    }
+
+    private static func interfaceHasPrivateOrLoopbackAddress(interfaceNames: Set<String>) -> Bool {
+        var addressList: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&addressList) == 0, let firstAddress = addressList else { return false }
+        defer { freeifaddrs(addressList) }
+
+        var pointer: UnsafeMutablePointer<ifaddrs>? = firstAddress
+        while let current = pointer {
+            let interface = current.pointee
+            let interfaceName = String(cString: interface.ifa_name)
+            let shouldInspect = interfaceNames.isEmpty
+                ? isLikelyLANInterfaceName(interfaceName)
+                : interfaceNames.contains(interfaceName)
+            guard shouldInspect, let socketAddress = interface.ifa_addr else {
+                pointer = interface.ifa_next
+                continue
+            }
+
+            let family = Int32(socketAddress.pointee.sa_family)
+            if family == AF_INET || family == AF_INET6,
+               let address = numericHost(from: socketAddress),
+               isLocalHost(address) {
+                return true
+            }
+
+            pointer = interface.ifa_next
+        }
+
+        return false
+    }
+
+    private static func isLikelyLANInterfaceName(_ interfaceName: String) -> Bool {
+        interfaceName.hasPrefix("en") || interfaceName.hasPrefix("bridge")
+    }
+
+    private static func numericHost(from socketAddress: UnsafePointer<sockaddr>) -> String? {
+        let family = Int32(socketAddress.pointee.sa_family)
+        let length: socklen_t
+        switch family {
+        case AF_INET:
+            length = socklen_t(MemoryLayout<sockaddr_in>.size)
+        case AF_INET6:
+            length = socklen_t(MemoryLayout<sockaddr_in6>.size)
+        default:
+            return nil
+        }
+
+        var hostBuffer = [CChar](repeating: 0, count: Int(NI_MAXHOST))
+        let result = getnameinfo(
+            socketAddress,
+            length,
+            &hostBuffer,
+            socklen_t(hostBuffer.count),
+            nil,
+            0,
+            NI_NUMERICHOST
+        )
+        guard result == 0 else { return nil }
+        return String(cString: hostBuffer)
+    }
+
+    static func initialResolvedBaseURL(
+        publicBaseURL: String,
+        localBaseURL: String,
+        autoSwitchEnabled: Bool,
+        manualPreferredEndpoint: ManualPreferredEndpoint
+    ) -> String {
+        if autoSwitchEnabled {
+            if !publicBaseURL.isEmpty { return publicBaseURL }
+            return localBaseURL
+        }
+        return manualResolvedBaseURL(
+            publicBaseURL: publicBaseURL,
+            localBaseURL: localBaseURL,
+            manualPreferredEndpoint: manualPreferredEndpoint
+        )
+    }
+
+    static func configuredPreferredBaseURL(publicBaseURL: String, localBaseURL: String) -> String {
+        if !publicBaseURL.isEmpty {
+            return publicBaseURL
+        }
+        return localBaseURL
+    }
+
+    static func manualResolvedBaseURL(
+        publicBaseURL: String,
+        localBaseURL: String,
+        manualPreferredEndpoint: ManualPreferredEndpoint
+    ) -> String {
+        switch manualPreferredEndpoint {
+        case .public:
+            return !publicBaseURL.isEmpty ? publicBaseURL : localBaseURL
+        case .local:
+            return !localBaseURL.isEmpty ? localBaseURL : publicBaseURL
+        }
+    }
+
+    static func endpointType(
+        for baseURL: String,
+        publicBaseURL: String,
+        localBaseURL: String
+    ) -> ActiveEndpoint {
+        let normalized = normalizedBaseURL(baseURL)
+        if normalized.isEmpty {
+            return .none
+        }
+        if normalized == normalizedBaseURL(localBaseURL) {
+            return .local
+        }
+        if normalized == normalizedBaseURL(publicBaseURL) {
+            return .public
+        }
+        return .none
     }
 }

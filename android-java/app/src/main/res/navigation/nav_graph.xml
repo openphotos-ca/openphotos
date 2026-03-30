@@ -27,6 +27,11 @@
         android:label="Settings" />
 
     <fragment
+        android:id="@+id/networkSettingsFragment"
+        android:name="ca.openphotos.android.ui.NetworkSettingsFragment"
+        android:label="Advanced Network" />
+
+    <fragment
         android:id="@+id/securitySettingsFragment"
         android:name="ca.openphotos.android.ui.SecuritySettingsFragment"
         android:label="Security" />

@@ -81,9 +81,21 @@ struct SyncView: View {
                     }
                 }
                 Section("Server") {
-                    ServerAddressEditor()
-                        .environmentObject(auth)
-                        .disabled(isDemoReadOnly)
+                    NavigationLink(destination: NetworkSettingsView().environmentObject(auth)) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Advanced Network")
+                            Text(auth.currentEffectiveBaseURL().isEmpty ? "Configure a public or local server URL." : auth.currentEffectiveBaseURL())
+                                .font(.footnote)
+                                .foregroundColor(.secondary)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+                    }
+                    .disabled(isDemoReadOnly)
+
+                    Text(auth.networkStatusSummary())
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
 
                     HStack {
                         if auth.isAuthenticated {
@@ -439,6 +451,19 @@ struct SettingsView: View {
                 Section("Security") {
                     NavigationLink(destination: SecuritySettingsView().environmentObject(auth)) {
                         Text("End-to-End Encryption")
+                    }
+                    .disabled(isDemoReadOnly)
+                }
+                Section("Network") {
+                    NavigationLink(destination: NetworkSettingsView().environmentObject(auth)) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Advanced Network")
+                            Text(auth.currentEffectiveBaseURL().isEmpty ? "Configure a public or local server URL." : auth.currentEffectiveBaseURL())
+                                .foregroundColor(.secondary)
+                                .font(.footnote)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
                     }
                     .disabled(isDemoReadOnly)
                 }

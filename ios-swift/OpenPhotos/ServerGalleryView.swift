@@ -547,7 +547,10 @@ struct ServerGalleryView: View {
                         onTeamManagement: { showTeamManagement = true },
                         onShowSharing: { showSharing = true },
                         onShowSimilarMedia: { showSimilarMedia = true },
-                        onManageFaces: { showManageFaces = true }
+                        onManageFaces: { showManageFaces = true },
+                        onSignOut: {
+                            auth.logout()
+                        }
                     )
                     .padding(.top, 50)
                 }
@@ -633,7 +636,9 @@ struct ServerGalleryView: View {
                     Color.clear.preference(key: ViewHeightPreferenceKey.self, value: geo.size.height)
                 }
             )
-            .onPreferenceChange(ViewHeightPreferenceKey.self) { h in if abs(headerHeight - h) > 0.5 { headerHeight = h } }
+            .onPreferenceChange(ViewHeightPreferenceKey.self) { h in
+                scheduleHeaderHeightUpdate(h)
+            }
             .offset(y: headerIsVisible ? 0 : -headerHeight)
             .animation(.easeOut(duration: 0.18), value: headerIsVisible)
         }
@@ -1196,6 +1201,17 @@ struct ServerGalleryView: View {
         }
     }
 
+    private func scheduleHeaderHeightUpdate(_ measuredHeight: CGFloat) {
+        guard measuredHeight.isFinite else { return }
+        let nextHeight = max(0, measuredHeight)
+        guard abs(headerHeight - nextHeight) > 0.5 else { return }
+        DispatchQueue.main.async {
+            if abs(headerHeight - nextHeight) > 0.5 {
+                headerHeight = nextHeight
+            }
+        }
+    }
+
     private var headerIsVisible: Bool { showHeaders || viewModel.photos.isEmpty }
     private var headerInset: CGFloat { headerIsVisible ? headerHeight : 0 }
 }
@@ -1243,6 +1259,7 @@ private struct ServerAppBar: View {
     let onShowSharing: () -> Void
     let onShowSimilarMedia: () -> Void
     let onManageFaces: () -> Void
+    let onSignOut: () -> Void
 
     var body: some View {
         HStack(spacing: 16) {
@@ -1298,7 +1315,7 @@ private struct ServerAppBar: View {
                 }
                 Divider()
                 Button(role: .destructive) {
-                    // TODO: Implement sign out
+                    onSignOut()
                 } label: {
                     Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
                 }

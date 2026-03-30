@@ -115,7 +115,7 @@ struct GalleryView: View {
                     }
                 )
                 .onPreferenceChange(ViewHeightPreferenceKey.self) { h in
-                    if abs(headerHeight - h) > 0.5 { headerHeight = h }
+                    scheduleHeaderHeightUpdate(h)
                 }
                 .offset(y: showHeaders ? 0 : -headerHeight)
                 .animation(.easeOut(duration: 0.18), value: showHeaders)
@@ -263,6 +263,17 @@ struct GalleryView: View {
     private func openAppSettings() {
         if let settingsUrl = AppSettings.url {
             openURL(settingsUrl)
+        }
+    }
+
+    private func scheduleHeaderHeightUpdate(_ measuredHeight: CGFloat) {
+        guard measuredHeight.isFinite else { return }
+        let nextHeight = max(0, measuredHeight)
+        guard abs(headerHeight - nextHeight) > 0.5 else { return }
+        DispatchQueue.main.async {
+            if abs(headerHeight - nextHeight) > 0.5 {
+                headerHeight = nextHeight
+            }
         }
     }
 

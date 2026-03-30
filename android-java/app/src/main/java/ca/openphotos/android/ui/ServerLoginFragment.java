@@ -114,6 +114,8 @@ public class ServerLoginFragment extends Fragment {
         btnSubmit = root.findViewById(R.id.btn_login_submit);
 
         etPassword.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD);
+        btnRecentServers.setText("Advanced Network");
+        btnTestConnection.setText("Refresh Route");
     }
 
     private void bindActions() {
@@ -121,8 +123,19 @@ public class ServerLoginFragment extends Fragment {
         btnModeLogin.setOnClickListener(v -> setMode(AuthMode.LOGIN));
         btnModeRegister.setOnClickListener(v -> setMode(AuthMode.REGISTER));
         btnScheme.setOnClickListener(v -> showSchemeMenu());
-        btnRecentServers.setOnClickListener(v -> showRecentServersMenu());
-        btnTestConnection.setOnClickListener(v -> testConnection());
+        btnRecentServers.setOnClickListener(v -> {
+            auth.clearManualServerOverride();
+            NavHostFragment.findNavController(this).navigate(R.id.networkSettingsFragment);
+        });
+        btnTestConnection.setOnClickListener(v -> {
+            if (!validateAndPersistServer()) {
+                updateFormState();
+                return;
+            }
+            auth.refreshNetworkRouting();
+            loadFromAuth();
+            testConnection();
+        });
         btnSubmit.setOnClickListener(v -> submitAuth());
 
         etHost.addTextChangedListener(new SimpleTextWatcher() {
@@ -131,16 +144,16 @@ public class ServerLoginFragment extends Fragment {
                 if (suppressFieldCallbacks) return;
                 clearAuthError();
                 clearServerTestMessage();
-                String raw = s != null ? s.toString() : "";
-                if (raw.contains("://")) {
-                    AuthManager.ParsedBaseUrl parsed = AuthManager.parseBaseUrl(raw);
+                String hostValue = s == null ? "" : s.toString();
+                if (hostValue.contains("://")) {
+                    AuthManager.ParsedBaseUrl parsed = AuthManager.parseBaseUrl(hostValue);
                     if (parsed != null) {
                         applyParsedBaseUrl(parsed);
                         return;
                     }
                 }
-                if (fieldText(etPort).isEmpty()) {
-                    HostPort split = splitHostPort(raw);
+                if (fieldText(etPort).trim().isEmpty()) {
+                    HostPort split = splitHostPort(hostValue);
                     if (split != null) {
                         applyHostPortSplit(split);
                         return;
@@ -187,9 +200,30 @@ public class ServerLoginFragment extends Fragment {
     private void loadFromAuth() {
         AuthManager.ServerConfig cfg = auth.currentServerConfig();
         suppressFieldCallbacks = true;
-        selectedScheme = cfg.scheme != null && !cfg.scheme.trim().isEmpty() ? cfg.scheme : AuthManager.DEFAULT_SERVER_SCHEME;
-        etHost.setText(cfg.host);
-        etPort.setText(cfg.port == AuthManager.DEFAULT_SERVER_PORT ? "" : String.valueOf(cfg.port));
+        selectedScheme = cfg.scheme != null && !cfg.scheme.trim().isEmpty()
+                ? cfg.scheme
+                : AuthManager.DEFAULT_SERVER_SCHEME;
+        String displayHost = cfg.host;
+        int displayPort = cfg.port;
+        if ((displayHost == null || displayHost.trim().isEmpty()) && auth.getServerUrl() != null) {
+            AuthManager.ParsedBaseUrl effective = AuthManager.parseBaseUrl(auth.getServerUrl());
+            if (effective != null) {
+                if (effective.scheme != null && !effective.scheme.trim().isEmpty()) {
+                    selectedScheme = effective.scheme;
+                }
+                displayHost = effective.host;
+                displayPort = effective.port != null ? effective.port : AuthManager.DEFAULT_SERVER_PORT;
+            }
+        }
+        etHost.setText(displayHost);
+        etPort.setText(String.valueOf(displayPort));
+        if (fieldText(etEmail).trim().isEmpty()) {
+            String lastLoginEmail = auth.getLastLoginEmail();
+            if (lastLoginEmail != null && !lastLoginEmail.trim().isEmpty()) {
+                etEmail.setText(lastLoginEmail);
+                etEmail.setSelection(etEmail.getText() != null ? etEmail.getText().length() : 0);
+            }
+        }
         suppressFieldCallbacks = false;
         updateSchemeButton();
         applyDemoDefaultsIfNeeded();
@@ -236,6 +270,7 @@ public class ServerLoginFragment extends Fragment {
         menu.getMenu().add(Menu.NONE, 2, 2, "https://");
         menu.setOnMenuItemClickListener(item -> {
             selectedScheme = item.getItemId() == 2 ? "https" : "http";
+            applyDefaultPortForSchemeChange(selectedScheme);
             updateSchemeButton();
             clearServerTestMessage();
             validateAndPersistServer();
@@ -279,7 +314,7 @@ public class ServerLoginFragment extends Fragment {
         selectedScheme = parsed.scheme;
         etHost.setText(parsed.host);
         int port = parsed.port != null ? parsed.port : AuthManager.DEFAULT_SERVER_PORT;
-        etPort.setText(port == AuthManager.DEFAULT_SERVER_PORT ? "" : String.valueOf(port));
+        etPort.setText(String.valueOf(port));
         suppressFieldCallbacks = false;
         updateSchemeButton();
         clearServerTestMessage();
@@ -298,6 +333,15 @@ public class ServerLoginFragment extends Fragment {
         applyDemoDefaultsIfNeeded();
         validateAndPersistServer();
         updateFormState();
+    }
+
+    private void applyDefaultPortForSchemeChange(@NonNull String nextScheme) {
+        if (!"https".equalsIgnoreCase(nextScheme)) return;
+        if (!fieldText(etPort).trim().isEmpty()) return;
+        suppressFieldCallbacks = true;
+        etPort.setText("443");
+        etPort.setSelection(etPort.getText() != null ? etPort.getText().length() : 0);
+        suppressFieldCallbacks = false;
     }
 
     private void applyDemoDefaultsIfNeeded() {
@@ -330,9 +374,8 @@ public class ServerLoginFragment extends Fragment {
     private boolean validateAndPersistServer() {
         String hostTrim = fieldText(etHost).trim();
         String portTrim = fieldText(etPort).trim();
-
         String message = null;
-        Integer portValue = null;
+        Integer portInt = null;
 
         if (hostTrim.isEmpty()) {
             message = "Enter an IP/hostname/IPv6 address.";
@@ -346,32 +389,45 @@ public class ServerLoginFragment extends Fragment {
                 if (parsedPort < 1 || parsedPort > 65535) {
                     message = "Port must be between 1 and 65535.";
                 } else {
-                    portValue = parsedPort;
+                    portInt = parsedPort;
                 }
-            } catch (NumberFormatException e) {
+            } catch (NumberFormatException ignored) {
                 message = "Port must be a number.";
             }
         }
 
         String normalizedHost = AuthManager.normalizeHost(hostTrim).toLowerCase(Locale.US);
         boolean isDemoHost = DEMO_HOST.equals(normalizedHost);
-        String effectiveScheme = isDemoHost ? "https" : selectedScheme;
-        int effectivePort = isDemoHost ? 443 : (portValue != null ? portValue : AuthManager.DEFAULT_SERVER_PORT);
+        String effectiveScheme = isDemoHost ? "https" : (selectedScheme == null || selectedScheme.trim().isEmpty()
+                ? AuthManager.DEFAULT_SERVER_SCHEME
+                : selectedScheme);
+        int effectivePort = isDemoHost ? 443 : (portInt != null ? portInt : AuthManager.DEFAULT_SERVER_PORT);
+        String builtBaseUrl = AuthManager.buildBaseUrl(effectiveScheme, hostTrim, effectivePort);
+
+        if (message == null && AuthManager.shouldRejectLoopbackServer(builtBaseUrl)) {
+            message = "On Android, localhost points to this device. Use the server's LAN IP or public URL.";
+        }
 
         if (message == null) {
-            String built = AuthManager.buildBaseUrl(effectiveScheme, hostTrim, effectivePort);
-            if (built == null) {
-                message = "Invalid server address.";
-            } else {
-                auth.setServerConfig(effectiveScheme, hostTrim, effectivePort);
+            if (isDemoHost) {
+                suppressFieldCallbacks = true;
+                selectedScheme = "https";
+                updateSchemeButton();
+                if (!"443".equals(portTrim)) {
+                    etPort.setText("443");
+                    etPort.setSelection(etPort.getText() != null ? etPort.getText().length() : 0);
+                }
+                suppressFieldCallbacks = false;
             }
-        } else if (hostTrim.isEmpty()) {
-            auth.setServerUrl("");
+            boolean saved = builtBaseUrl != null && auth.setServerConfig(effectiveScheme, hostTrim, effectivePort);
+            if (!saved) {
+                message = "Invalid server address.";
+            }
         }
 
         serverValidationMessage = message;
         updateServerFeedback();
-        return message == null;
+        return serverValidationMessage == null;
     }
 
     private void updateServerFeedback() {
@@ -410,11 +466,11 @@ public class ServerLoginFragment extends Fragment {
 
     private void updateFormState() {
         boolean register = mode == AuthMode.REGISTER;
-        boolean hasHost = !fieldText(etHost).trim().isEmpty();
+        boolean hasServer = auth.getServerUrl() != null && !auth.getServerUrl().trim().isEmpty();
         boolean hasEmail = !fieldText(etEmail).trim().isEmpty();
         boolean hasPassword = !fieldText(etPassword).isEmpty();
         boolean hasName = !fieldText(etFullName).trim().isEmpty();
-        boolean canSubmit = !isLoading && !isTesting && serverValidationMessage == null && hasHost && hasEmail && hasPassword && (!register || hasName);
+        boolean canSubmit = !isLoading && !isTesting && serverValidationMessage == null && hasServer && hasEmail && hasPassword && (!register || hasName);
 
         progress.setVisibility(isLoading ? View.VISIBLE : View.GONE);
         btnSubmit.setEnabled(canSubmit);
@@ -423,12 +479,12 @@ public class ServerLoginFragment extends Fragment {
         btnClose.setEnabled(!isLoading);
         btnModeLogin.setEnabled(!isLoading);
         btnModeRegister.setEnabled(!isLoading);
-        btnScheme.setEnabled(!isLoading);
+        btnScheme.setEnabled(!isLoading && !isTesting);
         btnRecentServers.setEnabled(!isLoading);
         btnTestConnection.setEnabled(!isLoading && !isTesting);
-        btnTestConnection.setText(isTesting ? "Testing…" : "Test Connection");
-        etHost.setEnabled(!isLoading);
-        etPort.setEnabled(!isLoading);
+        btnTestConnection.setText(isTesting ? "Refreshing…" : "Refresh Route");
+        etHost.setEnabled(!isLoading && !isTesting);
+        etPort.setEnabled(!isLoading && !isTesting);
         etFullName.setEnabled(!isLoading);
         etEmail.setEnabled(!isLoading);
         etPassword.setEnabled(!isLoading);
@@ -510,12 +566,12 @@ public class ServerLoginFragment extends Fragment {
 
         new Thread(() -> {
             try {
-                auth.setServerUrl(serverUrl);
                 if (doRegister) {
                     auth.register(fullName, email, password);
                 } else {
                     auth.login(email, password);
                 }
+                auth.commitManualServerOverride();
                 auth.addRecentServer(auth.getServerUrl());
                 if (!isAdded()) return;
                 requireActivity().runOnUiThread(() -> {
@@ -526,6 +582,10 @@ public class ServerLoginFragment extends Fragment {
                     openServerHome();
                 });
             } catch (Exception e) {
+                try {
+                    android.util.Log.e("OpenPhotos", "[AUTH] submit failed", e);
+                } catch (Exception ignored) {
+                }
                 if (!isAdded()) return;
                 requireActivity().runOnUiThread(() -> {
                     isLoading = false;
@@ -550,6 +610,7 @@ public class ServerLoginFragment extends Fragment {
     }
 
     private void closeScreen() {
+        auth.clearManualServerOverride();
         NavController nav = NavHostFragment.findNavController(this);
         boolean popped = nav.popBackStack();
         if (popped) {
@@ -567,6 +628,14 @@ public class ServerLoginFragment extends Fragment {
             } catch (Exception ignored) {
             }
         }
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        loadFromAuth();
+        validateAndPersistServer();
+        updateFormState();
     }
 
     private void syncBottomNavSelection(int destinationId) {

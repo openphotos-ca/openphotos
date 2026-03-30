@@ -853,7 +853,7 @@ public class PhotosHomeFragment extends Fragment {
 
     private void performSignOut() {
         try {
-            AuthManager.get(requireContext()).logoutAndForgetCredentials();
+            AuthManager.get(requireContext()).logoutPreservingLoginEmail();
             setSelectionMode(false, true);
             android.widget.Toast.makeText(requireContext(), "Signed out", android.widget.Toast.LENGTH_SHORT).show();
             androidx.navigation.fragment.NavHostFragment.findNavController(this).navigate(R.id.serverLoginFragment);
