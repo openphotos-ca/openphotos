@@ -13,6 +13,7 @@ import androidx.navigation.NavController;
 import androidx.navigation.fragment.NavHostFragment;
 import androidx.navigation.ui.NavigationUI;
 import ca.openphotos.android.prefs.AppearancePreferences;
+import ca.openphotos.android.core.AppUpdateService;
 import ca.openphotos.android.util.ForegroundUploadScreenController;
 import ca.openphotos.android.util.PermissionsHelper;
 
@@ -70,6 +71,10 @@ public class MainActivity extends AppCompatActivity {
         // Trigger auto-start whenever app becomes foregrounded.
         try {
             ca.openphotos.android.sync.SyncService.get(this).onAppOpen();
+        } catch (Exception ignored) {
+        }
+        try {
+            AppUpdateService.maybeCheckIfStale(this);
         } catch (Exception ignored) {
         }
     }

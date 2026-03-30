@@ -6,6 +6,8 @@ public final class AppLinks {
     public static final String PRIVACY_POLICY = "https://openphotos.ca/privacy/index.html";
     public static final String TERMS = "https://openphotos.ca/terms/index.html";
     public static final String GITHUB = "https://github.com/openphotos-ca/openphotos";
+    public static final String GITHUB_RELEASES = "https://github.com/openphotos-ca/openphotos/releases";
+    public static final String GITHUB_LATEST_RELEASE_API = "https://api.github.com/repos/openphotos-ca/openphotos/releases/latest";
     public static final String SUPPORT_EMAIL = "support@openphotos.ca";
     public static final String SUPPORT_SUBJECT = "OpenPhotos Android Support";
 

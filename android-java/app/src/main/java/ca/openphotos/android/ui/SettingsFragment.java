@@ -22,6 +22,7 @@ import androidx.fragment.app.Fragment;
 import androidx.navigation.fragment.NavHostFragment;
 
 import ca.openphotos.android.R;
+import ca.openphotos.android.core.AppUpdateService;
 import ca.openphotos.android.core.AppLinks;
 import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.core.CapabilitiesService;
@@ -35,6 +36,8 @@ import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
 
 import java.io.File;
+import java.text.DateFormat;
+import java.util.Date;
 import java.util.Locale;
 
 /** Settings screen with grouped Appearance/Cache/Security/Account/About sections. */
@@ -78,9 +81,20 @@ public class SettingsFragment extends Fragment {
     private TextView tvServerUpdateCurrentVersion;
     private TextView tvServerUpdateLatestVersion;
     private TextView tvServerUpdateMessage;
+    private View cardAppUpdate;
+    private TextView tvAppUpdateStatus;
+    private TextView tvAppUpdateCurrentVersion;
+    private TextView tvAppUpdateLatestVersion;
+    private TextView tvAppUpdateLastChecked;
+    private TextView tvAppUpdateMessage;
+    private MaterialButton btnAppUpdateCheckNow;
+    private MaterialButton btnAppUpdateReleaseNotes;
+    private MaterialButton btnAppUpdateDownload;
     private TextView tvAboutVersion;
     private View rowAboutSupport;
     private View rowNetworkSettings;
+    @Nullable private AppUpdateService.Status appUpdateStatus;
+    private boolean appUpdateRefreshInProgress = false;
 
     @Nullable
     @Override
@@ -123,6 +137,15 @@ public class SettingsFragment extends Fragment {
         tvServerUpdateCurrentVersion = view.findViewById(R.id.tv_server_update_current_version);
         tvServerUpdateLatestVersion = view.findViewById(R.id.tv_server_update_latest_version);
         tvServerUpdateMessage = view.findViewById(R.id.tv_server_update_message);
+        cardAppUpdate = view.findViewById(R.id.card_app_update);
+        tvAppUpdateStatus = view.findViewById(R.id.tv_app_update_status);
+        tvAppUpdateCurrentVersion = view.findViewById(R.id.tv_app_update_current_version);
+        tvAppUpdateLatestVersion = view.findViewById(R.id.tv_app_update_latest_version);
+        tvAppUpdateLastChecked = view.findViewById(R.id.tv_app_update_last_checked);
+        tvAppUpdateMessage = view.findViewById(R.id.tv_app_update_message);
+        btnAppUpdateCheckNow = view.findViewById(R.id.btn_app_update_check_now);
+        btnAppUpdateReleaseNotes = view.findViewById(R.id.btn_app_update_release_notes);
+        btnAppUpdateDownload = view.findViewById(R.id.btn_app_update_download);
         tvAboutVersion = view.findViewById(R.id.tv_about_version);
         rowAboutSupport = view.findViewById(R.id.row_about_support);
         rowNetworkSettings = view.findViewById(R.id.row_network_settings);
@@ -138,10 +161,24 @@ public class SettingsFragment extends Fragment {
         rowSecurity.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.securitySettingsFragment));
         rowChangePassword.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.changePasswordFragment));
         rowNetworkSettings.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.networkSettingsFragment));
+        btnAppUpdateCheckNow.setOnClickListener(v -> refreshAppUpdate(true));
+        btnAppUpdateReleaseNotes.setOnClickListener(v -> {
+            if (appUpdateStatus != null) {
+                openExternalUrl(appUpdateStatus.releaseNotesUrl);
+            }
+        });
+        btnAppUpdateDownload.setOnClickListener(v -> {
+            if (appUpdateStatus != null) {
+                openExternalUrl(appUpdateStatus.downloadUrl);
+            }
+        });
 
         bindAccountSummary();
         refreshServerVersion();
         refreshServerUpdate();
+        appUpdateStatus = AppUpdateService.getCachedStatus(appContext);
+        bindAppUpdate(appUpdateStatus, false);
+        refreshAppUpdate(false);
         tvAboutVersion.setText(getVersionString());
         view.findViewById(R.id.btn_about_website).setOnClickListener(v -> openExternalUrl(AppLinks.WEBSITE));
         view.findViewById(R.id.btn_about_privacy).setOnClickListener(v -> openExternalUrl(AppLinks.PRIVACY_POLICY));
@@ -165,6 +202,9 @@ public class SettingsFragment extends Fragment {
         bindAccountSummary();
         refreshServerVersion();
         refreshServerUpdate();
+        appUpdateStatus = AppUpdateService.getCachedStatus(appContext);
+        bindAppUpdate(appUpdateStatus, false);
+        refreshAppUpdate(false);
         boolean demoReadOnly = auth != null && auth.isDemoUser();
         cardDemoReadonly.setVisibility(demoReadOnly ? View.VISIBLE : View.GONE);
         setMutatingEnabled(!demoReadOnly);
@@ -301,6 +341,113 @@ public class SettingsFragment extends Fragment {
         tvServerUpdateCurrentVersion.setText("Current version: " + currentVersion);
         tvServerUpdateLatestVersion.setText("Latest version: " + latestVersion);
         tvServerUpdateMessage.setText(message);
+    }
+
+    private void refreshAppUpdate(boolean forceRefresh) {
+        if (cardAppUpdate == null || appContext == null) return;
+        if (forceRefresh && appUpdateRefreshInProgress) return;
+        if (forceRefresh) {
+            appUpdateRefreshInProgress = true;
+            if (appUpdateStatus == null) {
+                appUpdateStatus = AppUpdateService.getCachedStatus(appContext);
+            }
+            bindAppUpdate(appUpdateStatus, true);
+        }
+        new Thread(() -> {
+            AppUpdateService.Status status = AppUpdateService.getStatus(appContext, forceRefresh);
+            if (!isAdded()) return;
+            requireActivity().runOnUiThread(() -> {
+                if (!isAdded()) return;
+                appUpdateRefreshInProgress = false;
+                appUpdateStatus = status;
+                bindAppUpdate(status, false);
+            });
+        }).start();
+    }
+
+    private void bindAppUpdate(@Nullable AppUpdateService.Status status, boolean checking) {
+        if (cardAppUpdate == null || tvAppUpdateStatus == null || tvAppUpdateCurrentVersion == null
+                || tvAppUpdateLatestVersion == null || tvAppUpdateLastChecked == null
+                || tvAppUpdateMessage == null || btnAppUpdateCheckNow == null
+                || btnAppUpdateReleaseNotes == null || btnAppUpdateDownload == null) {
+            return;
+        }
+
+        cardAppUpdate.setVisibility(View.VISIBLE);
+        String currentVersion = "Unavailable";
+        String latestVersion = "Unavailable";
+        String stateLabel = "Never checked";
+        String message = "OpenPhotos checks GitHub releases for Android app updates.";
+        String releaseNotesUrl = null;
+        String downloadUrl = null;
+        long checkedAtEpochMs = 0L;
+
+        if (status != null) {
+            if (status.currentVersion != null && !status.currentVersion.trim().isEmpty()) {
+                currentVersion = status.currentVersion.trim();
+            }
+            if (status.latestVersion != null && !status.latestVersion.trim().isEmpty()) {
+                latestVersion = status.latestVersion.trim();
+            }
+            releaseNotesUrl = status.releaseNotesUrl;
+            downloadUrl = status.downloadUrl;
+            checkedAtEpochMs = status.checkedAtEpochMs;
+            if (checking) {
+                stateLabel = "Checking…";
+                message = "Checking the latest GitHub release for Android app updates.";
+            } else {
+                switch (status.status) {
+                    case AppUpdateService.STATUS_OK:
+                        stateLabel = status.available ? "Update available" : "Up to date";
+                        message = status.available
+                                ? "A newer Android app version is available. Open release notes or download the APK in your browser."
+                                : "This Android app is up to date.";
+                        break;
+                    case AppUpdateService.STATUS_ASSET_MISSING:
+                        stateLabel = "Release missing APK";
+                        message = "A newer Android app version exists, but the latest GitHub release is missing the Android APK asset.";
+                        break;
+                    case AppUpdateService.STATUS_CHECK_FAILED:
+                        stateLabel = "Check failed";
+                        message = status.lastError != null && !status.lastError.trim().isEmpty()
+                                ? status.lastError.trim()
+                                : "Failed to check GitHub for Android app updates.";
+                        break;
+                    default:
+                        stateLabel = "Never checked";
+                        message = "OpenPhotos checks GitHub releases for Android app updates.";
+                        break;
+                }
+            }
+        } else if (checking) {
+            stateLabel = "Checking…";
+            message = "Checking the latest GitHub release for Android app updates.";
+        }
+
+        tvAppUpdateStatus.setText(stateLabel);
+        tvAppUpdateCurrentVersion.setText("Current version: " + currentVersion);
+        tvAppUpdateLatestVersion.setText("Latest version: " + latestVersion);
+        tvAppUpdateLastChecked.setText("Last checked: " + formatCheckedAt(checkedAtEpochMs));
+        tvAppUpdateMessage.setText(message);
+        btnAppUpdateCheckNow.setEnabled(!checking);
+
+        boolean hasReleaseNotes = releaseNotesUrl != null && !releaseNotesUrl.trim().isEmpty();
+        btnAppUpdateReleaseNotes.setVisibility(hasReleaseNotes ? View.VISIBLE : View.GONE);
+
+        boolean hasDownload = status != null
+                && status.available
+                && downloadUrl != null
+                && !downloadUrl.trim().isEmpty();
+        btnAppUpdateDownload.setVisibility(hasDownload ? View.VISIBLE : View.GONE);
+    }
+
+    @NonNull
+    private String formatCheckedAt(long checkedAtEpochMs) {
+        if (checkedAtEpochMs <= 0L) {
+            return "Never";
+        }
+        DateFormat dateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.getDefault());
+        return dateFormat.format(new Date(checkedAtEpochMs));
     }
 
     private void refreshCacheUsage() {
