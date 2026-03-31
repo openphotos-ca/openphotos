@@ -1,0 +1,23 @@
+services:
+  openphotos:
+    image: ${OPENPHOTOS_IMAGE:-ghcr.io/openphotos-ca/openphotos:latest}
+    container_name: openphotos
+    restart: unless-stopped
+    ports:
+      - "${OPENPHOTOS_PORT:-3003}:3003"
+    environment:
+      TZ: ${TZ:-UTC}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      OCR_ENABLED: ${OCR_ENABLED:-false}
+      RUSTUS_FORCE_FSYNC: ${RUSTUS_FORCE_FSYNC:-false}
+    volumes:
+      - "${OPENPHOTOS_DATA_MOUNT:-openphotos-data:/data}"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:3003/ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 45s
+
+volumes:
+  openphotos-data:
