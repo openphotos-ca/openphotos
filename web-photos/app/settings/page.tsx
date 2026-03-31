@@ -43,7 +43,7 @@ interface ServerUpdateStatus {
   channel: string;
   checked_at?: string | null;
   status: 'disabled' | 'never_checked' | 'ok' | 'check_failed' | 'unsupported_install_mode';
-  install_mode: 'linux-deb' | 'macos-pkg' | 'windows-nsis' | 'unknown';
+  install_mode: 'docker' | 'linux-deb' | 'macos-pkg' | 'windows-nsis' | 'unknown';
   install_arch: string;
   install_supported: boolean;
   release_notes_url?: string | null;
@@ -703,7 +703,7 @@ export default function SettingsPage() {
           <Card className="mb-8">
             <CardHeader>
               <CardTitle>Server Update</CardTitle>
-              <CardDescription>Admin-only server release status and guided install steps.</CardDescription>
+              <CardDescription>Admin-only server release status and install steps for native or Docker deployments.</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
@@ -780,7 +780,7 @@ export default function SettingsPage() {
                 )}
               </div>
               <p className="text-sm text-muted-foreground">
-                Install this update from the web admin UI or directly on the server host.
+                Apply updates directly on the server or Docker host using the instructions above.
               </p>
             </CardContent>
           </Card>

@@ -113,7 +113,15 @@ pub async fn upload_multipart(
     let mut results: Vec<UploadResultItem> = Vec::new();
 
     // Prepare uploads staging dir
-    let base_dir = Path::new("data").join("uploads");
+    let base_dir = std::env::var_os("RUSTUS_DATA_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("DATABASE_PATH")
+                .filter(|value| !value.is_empty())
+                .map(|value| PathBuf::from(value).join("uploads"))
+        })
+        .unwrap_or_else(|| Path::new("data").join("uploads"));
     if let Err(e) = tokio::fs::create_dir_all(&base_dir).await {
         tracing::error!(target = "upload", "create uploads dir failed: {}", e);
         return (

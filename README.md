@@ -26,6 +26,8 @@ Download the iOS app from the App Store: [OpenPhotos](https://apps.apple.com/us/
 - Static web app: `web-photos`
 - Android app source: `android-java`
 - Android release helper: `scripts/build_android_installer.sh`
+- Docker / NAS deployment files: `Dockerfile`, `compose.yaml`, `docker/`, `docs/docker.md`
+- GitHub Actions workflow for multi-arch GHCR publishing: `.github/workflows/docker-release.yml`
 
 ## Download Models (Before Build)
 
@@ -85,6 +87,37 @@ Build outputs:
 Build output:
 
 - `web-photos/out`
+
+## Docker / NAS Deployment
+
+Build and run the official single-container Docker image locally:
+
+```bash
+cp docker/openphotos.env.example .env
+docker buildx build --load --platform linux/amd64 -t openphotos:local .
+OPENPHOTOS_IMAGE=openphotos:local docker compose up -d
+```
+
+For ARM NAS devices, switch the build platform to `linux/arm64`.
+
+The Compose deployment stores all persistent app data under `/data` in the container. Change `OPENPHOTOS_DATA_MOUNT` in `.env` to use a NAS bind mount instead of the default named volume.
+
+Additional Docker / NAS notes are in:
+
+- `docs/docker.md`
+
+## Publish Docker Image To GHCR
+
+The exported repo includes a GitHub Actions workflow that publishes multi-arch images to `ghcr.io/openphotos-ca/openphotos` when you push a `v*.*.*` tag.
+
+Example:
+
+```bash
+git tag v0.4.0
+git push origin v0.4.0
+```
+
+After the first successful push, set the GHCR package visibility to public if you want users to run `docker compose pull` without logging in.
 
 ## Build Android App
 
