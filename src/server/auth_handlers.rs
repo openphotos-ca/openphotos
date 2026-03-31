@@ -4213,7 +4213,7 @@ pub(crate) async fn index_video_for_user(
         use face_normalizer::{
             FaceData, FaceDetector, FaceNormalizer, FaceRecognizer, SIMILARITY_THRESHOLD,
         };
-        let models_dir = std::path::Path::new("models/face");
+        let models_dir = state.model_file("face");
         let detector = FaceDetector::new(&models_dir.join("det_10g.onnx").to_string_lossy())?;
         let normalizer = FaceNormalizer::new();
         let recognizer = FaceRecognizer::new(&models_dir.join("w600k_r50.onnx").to_string_lossy())?;

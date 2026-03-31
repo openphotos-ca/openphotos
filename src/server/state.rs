@@ -13,6 +13,7 @@ use chrono::Utc;
 use ort::execution_providers::CPUExecutionProvider;
 use parking_lot::RwLock;
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::Arc as StdArc;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Semaphore};
@@ -23,6 +24,7 @@ pub struct AppState {
     pub yolo_detector: Arc<YoloDetector>,
     pub face_service: Arc<FaceService>,
     pub default_model: String,
+    pub model_path: PathBuf,
     pub model_configs: HashMap<String, ClipConfig>,
     pub auth_service: Arc<AuthService>,
     pub oauth_service: Option<Arc<OAuthService>>,
@@ -122,6 +124,11 @@ impl AppState {
         // Database creation is handled per-user by MultiTenantDatabase
         // Use the configured data directory from CLI/env
 
+        let model_path = model_configs
+            .first()
+            .map(|config| PathBuf::from(&config.model_path))
+            .unwrap_or_else(|| PathBuf::from("models"));
+
         // Load models
         let mut visual_encoders = HashMap::new();
         let mut textual_encoders = HashMap::new();
@@ -168,8 +175,8 @@ impl AppState {
         }
 
         // Initialize YOLO detector
-        let yolo_path = std::path::Path::new("models/yolov8m-oiv7.onnx");
-        let yolo_detector = Arc::new(YoloDetector::new(Some(yolo_path))?);
+        let yolo_path = model_path.join("yolov8m-oiv7.onnx");
+        let yolo_detector = Arc::new(YoloDetector::new(Some(&yolo_path))?);
 
         // Optional Postgres embeddings backend (connect early so face service can use it)
         let pg_client = if std::env::var("EMBEDDINGS_BACKEND")
@@ -201,8 +208,11 @@ impl AppState {
         };
 
         // Initialize face service (inject optional PG client)
-        let face_models_dir = std::path::Path::new("models/face");
-        let face_service = Arc::new(FaceService::new(Some(face_models_dir), pg_client.clone())?);
+        let face_models_dir = model_path.join("face");
+        let face_service = Arc::new(FaceService::new(
+            Some(face_models_dir.as_path()),
+            pg_client.clone(),
+        )?);
 
         // Initialize multi-tenant database only in DuckDB mode
         let data_dir = std::path::Path::new(db_path);
@@ -461,6 +471,7 @@ impl AppState {
             yolo_detector,
             face_service,
             default_model,
+            model_path,
             model_configs: config_map,
             auth_service,
             oauth_service,
@@ -491,6 +502,10 @@ impl AppState {
             meta,
             update_service,
         })
+    }
+
+    pub fn model_file(&self, relative_path: impl AsRef<Path>) -> PathBuf {
+        self.model_path.join(relative_path)
     }
 
     /// Get or create an upload events broadcast channel for a user

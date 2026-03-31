@@ -6,7 +6,7 @@ use ort::{
     value::Value,
 };
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::{info, warn};
 
@@ -699,16 +699,22 @@ pub enum ModelType {
 }
 
 impl YoloDetector {
+    fn oiv7_class_file_for_model(model_path: Option<&Path>) -> PathBuf {
+        model_path
+            .and_then(|path| path.parent().map(|parent| parent.join("oiv7_classes.txt")))
+            .unwrap_or_else(|| PathBuf::from("models/oiv7_classes.txt"))
+    }
+
     /// Load OIV7 class names from file
-    fn load_oiv7_classes() -> Result<Vec<String>> {
-        let class_file = Path::new("models/oiv7_classes.txt");
+    fn load_oiv7_classes(model_path: Option<&Path>) -> Result<Vec<String>> {
+        let class_file = Self::oiv7_class_file_for_model(model_path);
         if class_file.exists() {
-            let content = fs::read_to_string(class_file)?;
+            let content = fs::read_to_string(&class_file)?;
             let classes: Vec<String> = content.lines().map(|s| s.to_string()).collect();
             info!("Loaded {} OIV7 class names", classes.len());
             Ok(classes)
         } else {
-            warn!("OIV7 class file not found at models/oiv7_classes.txt");
+            warn!("OIV7 class file not found at {}", class_file.display());
             Err(anyhow::anyhow!("OIV7 class file not found"))
         }
     }
@@ -749,7 +755,7 @@ impl YoloDetector {
 
         // Load OIV7 classes if needed
         let oiv7_classes = if matches!(model_type, ModelType::Oiv7) {
-            Self::load_oiv7_classes().ok()
+            Self::load_oiv7_classes(model_path).ok()
         } else {
             None
         };
@@ -1147,5 +1153,22 @@ mod tests {
 
         let iou = detector.calculate_iou(&box1, &box2);
         assert!((iou - 0.142857).abs() < 0.01); // 2500 / 17500
+    }
+
+    #[test]
+    fn test_oiv7_class_file_follows_model_directory() {
+        let class_file = YoloDetector::oiv7_class_file_for_model(Some(Path::new(
+            "/tmp/custom-models/yolov8m-oiv7.onnx",
+        )));
+        assert_eq!(
+            class_file,
+            PathBuf::from("/tmp/custom-models/oiv7_classes.txt")
+        );
+    }
+
+    #[test]
+    fn test_oiv7_class_file_defaults_to_models_dir() {
+        let class_file = YoloDetector::oiv7_class_file_for_model(None);
+        assert_eq!(class_file, PathBuf::from("models/oiv7_classes.txt"));
     }
 }
