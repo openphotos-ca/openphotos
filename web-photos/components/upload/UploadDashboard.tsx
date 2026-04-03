@@ -55,10 +55,17 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
   const uppyRef = React.useRef<any>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const onCloseRef = React.useRef(onClose);
+  const onCompleteRef = React.useRef(onComplete);
+  const moderationEnabledRef = React.useRef(moderationEnabled);
+  const isOwnerRef = React.useRef(isOwner);
+  const tokenRef = React.useRef(token);
+  const toastRef = React.useRef(toast);
 
   // Album selection state (persisted)
   const [pickerOpen, setPickerOpen] = React.useState(false);
   const [selectedAlbumId, setSelectedAlbumId] = React.useState<number | undefined>(undefined);
+  const selectedAlbumIdRef = React.useRef<number | undefined>(undefined);
 
   // Load albums (for picker)
   const { data: albums, isError: albumsError, isFetching: albumsFetching, refetch: refetchAlbums } = useQuery<Album[]>({
@@ -73,6 +80,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
   const [lockedUpload, setLockedUpload] = React.useState<boolean>(() => {
     try { return localStorage.getItem('bulkUpload.locked') === '1'; } catch { return false; }
   });
+  const lockedUploadRef = React.useRef(lockedUpload);
   const e2ee = useE2EEStore();
   const isUnlocked = e2ee.isUnlocked;
   const canEncrypt = e2ee.canEncrypt;
@@ -131,6 +139,15 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
     setUnlockOpen(true);
     return await new Promise<boolean>((resolve) => { unlockResolverRef.current = resolve; });
   }, [token, toast]);
+
+  React.useEffect(() => { onCloseRef.current = onClose; }, [onClose]);
+  React.useEffect(() => { onCompleteRef.current = onComplete; }, [onComplete]);
+  React.useEffect(() => { moderationEnabledRef.current = moderationEnabled; }, [moderationEnabled]);
+  React.useEffect(() => { isOwnerRef.current = isOwner; }, [isOwner]);
+  React.useEffect(() => { tokenRef.current = token; }, [token]);
+  React.useEffect(() => { toastRef.current = toast; }, [toast]);
+  React.useEffect(() => { selectedAlbumIdRef.current = selectedAlbumId; }, [selectedAlbumId]);
+  React.useEffect(() => { lockedUploadRef.current = lockedUpload; }, [lockedUpload]);
 
   // Initialize selectedAlbumId from localStorage when opening
   React.useEffect(() => {
@@ -242,7 +259,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
         if (!isImage && !isVideo) {
           // Remove non-photo/video files
           uppy.removeFile(file.id);
-          toast({
+          toastRef.current?.({
             title: "File type not supported",
             description: `Only photos and videos are allowed. "${file.name}" was removed.`,
             variant: "destructive"
@@ -254,7 +271,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
         if (!stem) return;
         let cid = cidByStem.get(stem);
         if (!cid) { cid = genCID(); cidByStem.set(stem, cid); }
-        const albumIdStr = (selectedAlbumId != null) ? String(selectedAlbumId) : '';
+        const albumIdStr = (selectedAlbumIdRef.current != null) ? String(selectedAlbumIdRef.current) : '';
         uppy.setFileMeta(file.id, { content_id: cid, filename: file?.name, albumId: albumIdStr });
       } catch {}
       // If locked uploads are enabled and UMK is unlocked, encrypt immediately on add.
@@ -262,7 +279,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
         try {
           const e2 = require('@/lib/stores/e2ee');
           const st = e2.useE2EEStore.getState();
-          const canDo = lockedUpload && st.isUnlocked && st.canEncrypt;
+          const canDo = lockedUploadRef.current && st.isUnlocked && st.canEncrypt;
           if (!canDo) return;
           if (file?.meta?.alreadyEncrypted) return;
           const { encryptV3WithWorker, fileToArrayBuffer, generateImageThumb, generateVideoThumb, umkToHex } = await import('@/lib/e2eeClient');
@@ -360,7 +377,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
           try {
             const e2 = require('@/lib/stores/e2ee');
             const st = e2.useE2EEStore.getState();
-            const canDo = lockedUpload && st.isUnlocked && st.canEncrypt;
+            const canDo = lockedUploadRef.current && st.isUnlocked && st.canEncrypt;
             // Only touch counters for locked HEIC flow
             if (canDo) {
               const originalBlob: File = file.data;
@@ -403,7 +420,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
       proudlyDisplayPoweredByUppy: false,
       showProgressDetails: true,
       note: 'Only photos and videos are supported',
-      hideUploadButton: (lockedUpload && (heicTotal > 0) && (heicDone < heicTotal)),
+      hideUploadButton: false,
       restrictions: {
         allowedFileTypes: allowedFileTypes,
       },
@@ -413,9 +430,13 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
       endpoint: '/files/',
       chunkSize: 10 * 1024 * 1024,
       retryDelays: [0, 1000, 3000, 5000],
-      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      headers: () => {
+        const currentToken = tokenRef.current;
+        return currentToken ? { Authorization: `Bearer ${currentToken}` } : undefined;
+      },
       onBeforeRequest: (req: any) => {
-        if (!token) {
+        const currentToken = tokenRef.current;
+        if (!currentToken) {
           try {
             const xhr: any = req?.getUnderlyingObject?.();
             if (xhr && 'withCredentials' in xhr) { xhr.withCredentials = true; }
@@ -426,7 +447,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
           const add = useUploadDebugStore.getState().add;
           const method = req?.getMethod?.();
           const url = req?.getURL?.();
-          add({ id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`, ts: Date.now(), source: 'uppy-tus', method, url, reqHeaders: { Authorization: token ? 'Bearer …' : undefined } });
+          add({ id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`, ts: Date.now(), source: 'uppy-tus', method, url, reqHeaders: { Authorization: currentToken ? 'Bearer …' : undefined } });
         } catch {}
       },
       onAfterResponse: (req: any, res: any) => {
@@ -450,14 +471,14 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
     } as any);
 
     uppy.on('complete', () => {
-      try { onComplete?.(); } catch {}
+      try { onCompleteRef.current?.(); } catch {}
       try {
-        if (!token && moderationEnabled && !isOwner) {
-          toast({ title: 'Upload submitted', description: 'Your uploads will be visible after the link owner approves them.', variant: 'default' });
+        if (!tokenRef.current && moderationEnabledRef.current && !isOwnerRef.current) {
+          toastRef.current?.({ title: 'Upload submitted', description: 'Your uploads will be visible after the link owner approves them.', variant: 'default' });
         }
       } catch {}
       // Close after a short delay to let uploads finish UI updates
-      setTimeout(() => onClose(), 500);
+      setTimeout(() => onCloseRef.current?.(), 500);
     });
 
     uppyRef.current = uppy;
@@ -466,8 +487,8 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
       console.debug('[LOCKED-UPLOAD] preprocessor start', { fileIDs: [...fileIDs] });
       const e2 = require('@/lib/stores/e2ee');
       const st = e2.useE2EEStore.getState();
-      const canDo = lockedUpload && st.isUnlocked && st.canEncrypt;
-      if (!canDo) { console.debug('[LOCKED-UPLOAD] preprocessor skip: canDo=false', { lockedUpload, isUnlocked: st.isUnlocked, canEncrypt: st.canEncrypt }); return; }
+      const canDo = lockedUploadRef.current && st.isUnlocked && st.canEncrypt;
+      if (!canDo) { console.debug('[LOCKED-UPLOAD] preprocessor skip: canDo=false', { lockedUpload: lockedUploadRef.current, isUnlocked: st.isUnlocked, canEncrypt: st.canEncrypt }); return; }
       // Ensure envelope freshness prior to encrypting
       try {
         const res = await (await import('@/lib/api/crypto')).cryptoApi.getEnvelope();
@@ -545,7 +566,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
           }
         } catch (e) {
           console.warn('[Uppy] Encryption failed for file', f?.name, e);
-          try { toast({ title: 'Encryption failed', description: `Uploaded plaintext for ${f?.name || 'file'}`, variant: 'destructive' }); } catch {}
+          try { toastRef.current?.({ title: 'Encryption failed', description: `Uploaded plaintext for ${f?.name || 'file'}`, variant: 'destructive' }); } catch {}
         }
       }
     };
@@ -575,7 +596,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
 
         const ids = Array.from(new Set(Array.from(idByFile.values())));
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
-        if (token) headers.Authorization = `Bearer ${token}`;
+        if (tokenRef.current) headers.Authorization = `Bearer ${tokenRef.current}`;
         const res = await fetch('/api/photos/exists', {
           method: 'POST',
           headers,
@@ -593,7 +614,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
           try { uppy.removeFile(fid); skipped++; } catch {}
         }
         if (skipped > 0) {
-          toast({
+          toastRef.current?.({
             title: 'Skipped existing uploads',
             description: `${skipped} file${skipped === 1 ? '' : 's'} already exist on the server.`,
           });
@@ -605,11 +626,11 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
     uppy.addPreProcessor(preflightSkipExisting);
 
     return () => {
-      try { (uppyRef.current as any)?.close?.({ reason: 'unmount' }); } catch {}
-      try { (uppyRef.current as any)?.destroy?.(); } catch {}
-      uppyRef.current = null;
+      try { uppy?.close?.({ reason: 'unmount' }); } catch {}
+      try { uppy?.destroy?.(); } catch {}
+      if (uppyRef.current === uppy) uppyRef.current = null;
     };
-  }, [open, token, onClose, selectedAlbumId, lockedUpload]);
+  }, [open]);
 
   // Dynamically toggle the Dashboard upload button based on conversion progress
   React.useEffect(() => {
