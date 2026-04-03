@@ -1,3 +1,5 @@
+name: openphotos
+
 services:
   openphotos:
     image: ${OPENPHOTOS_IMAGE:-ghcr.io/openphotos-ca/openphotos:latest}
