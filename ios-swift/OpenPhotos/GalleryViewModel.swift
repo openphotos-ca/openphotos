@@ -64,7 +64,7 @@ enum LayoutOption: String, CaseIterable {
 }
 
 enum FilterType: CaseIterable {
-    case timeRange, screenshots, livePhotos, missingInCloud
+    case timeRange, screenshots, livePhotos, missingInCloud, deletedInCloud
     
     var displayName: String {
         switch self {
@@ -72,6 +72,7 @@ enum FilterType: CaseIterable {
         case .screenshots: return "Screenshots"
         case .livePhotos: return "Live Photos"
         case .missingInCloud: return "Missing in Cloud"
+        case .deletedInCloud: return "Deleted in Cloud"
         }
     }
 }
@@ -123,6 +124,7 @@ enum TimeRangePreset {
 enum CloudCheckScope {
     case allPhotos
     case currentSelection
+    case listDeleted
 }
 
 class GalleryViewModel: ObservableObject {
@@ -171,7 +173,13 @@ class GalleryViewModel: ObservableObject {
         }
     }
     @Published var selectedFilter: FilterType? = nil {
-        didSet { invalidateFilteredMediaCaches() }
+        didSet {
+            if selectedFilter != .deletedInCloud && listDeletedResultsModeActive {
+                listDeletedResultsModeActive = false
+                listDeletedRunLocalIdentifiers = []
+            }
+            invalidateFilteredMediaCaches()
+        }
     }
     // Layout (persisted)
     @AppStorage("galleryLayout") private var layoutRawValue: String = LayoutOption.grid.rawValue
@@ -205,6 +213,20 @@ class GalleryViewModel: ObservableObject {
             }
         }
     }
+    @Published private(set) var cloudDeletedLocalIdentifiers: Set<String> = [] {
+        didSet {
+            if selectedFilter == .deletedInCloud {
+                invalidateFilteredMediaCaches()
+            }
+        }
+    }
+    @Published private(set) var listDeletedRunLocalIdentifiers: Set<String> = [] {
+        didSet {
+            if listDeletedResultsModeActive && selectedFilter == .deletedInCloud {
+                invalidateFilteredMediaCaches()
+            }
+        }
+    }
     @Published var isCloudCheckRunning: Bool = false
     // Deprecated: system albums (kept for backward compatibility)
     @Published var albums: [AlbumInfo] = []
@@ -231,6 +253,7 @@ class GalleryViewModel: ObservableObject {
     private var filteredMediaWithoutTypeCache: [PHAsset] = []
     private var cachedLockStateByLocalIdentifier: [String: Bool] = [:]
     private var cachedLockScopeSelectedOnly: Bool?
+    private var listDeletedResultsModeActive: Bool = false
     
     // Full-screen viewer properties
     @Published var showingFullScreenViewer = false
@@ -248,6 +271,7 @@ class GalleryViewModel: ObservableObject {
         // Load cached cloud statuses once; subsequent changes are applied incrementally via notification.
         refreshCloudBackedUp()
         refreshCloudMissing()
+        refreshCloudDeleted()
         // Don't initialize here - wait for photo permissions
     }
 
@@ -309,19 +333,33 @@ class GalleryViewModel: ObservableObject {
                 guard
                     let userInfo = note.userInfo,
                     let localId = userInfo[SyncRepository.CloudStatusUserInfoKey.localIdentifier] as? String,
-                    let num = userInfo[SyncRepository.CloudStatusUserInfoKey.backedUp] as? NSNumber
+                    let num = userInfo[SyncRepository.CloudStatusUserInfoKey.cloudStatus] as? NSNumber,
+                    let status = CloudItemStatus(rawValue: num.intValue)
                 else { return }
                 var next = self.cloudBackedUpLocalIdentifiers
                 var missingNext = self.cloudMissingLocalIdentifiers
-                if num.boolValue {
+                var deletedNext = self.cloudDeletedLocalIdentifiers
+                switch status {
+                case .backedUp:
                     next.insert(localId)
                     missingNext.remove(localId)
-                } else {
+                    deletedNext.remove(localId)
+                case .deletedInCloud:
+                    next.remove(localId)
+                    missingNext.remove(localId)
+                    deletedNext.insert(localId)
+                case .missing:
                     next.remove(localId)
                     missingNext.insert(localId)
+                    deletedNext.remove(localId)
+                case .unknown:
+                    next.remove(localId)
+                    missingNext.remove(localId)
+                    deletedNext.remove(localId)
                 }
                 self.cloudBackedUpLocalIdentifiers = next
                 self.cloudMissingLocalIdentifiers = missingNext
+                self.cloudDeletedLocalIdentifiers = deletedNext
             }
             .store(in: &cancellables)
 
@@ -331,6 +369,7 @@ class GalleryViewModel: ObservableObject {
             .sink { [weak self] _ in
                 self?.refreshCloudBackedUp()
                 self?.refreshCloudMissing()
+                self?.refreshCloudDeleted()
             }
             .store(in: &cancellables)
     }
@@ -377,6 +416,15 @@ class GalleryViewModel: ObservableObject {
         }
     }
 
+    func refreshCloudDeleted() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let set = SyncRepository.shared.getAllCloudDeletedLocalIdentifiers()
+            DispatchQueue.main.async {
+                self?.cloudDeletedLocalIdentifiers = set
+            }
+        }
+    }
+
     private func invalidateFilteredMediaCaches(clearLockCache: Bool = false) {
         filterInputsVersion &+= 1
         filteredMediaCacheVersion = -1
@@ -416,6 +464,11 @@ class GalleryViewModel: ObservableObject {
             snapshot = allPhotos
         case .currentSelection:
             snapshot = filteredMedia
+        case .listDeleted:
+            if AuthManager.shared.syncScope == .selectedAlbums {
+                AlbumService.shared.refreshSystemAlbumMemberships()
+            }
+            snapshot = SyncService.shared.resolveAssetsForCurrentSyncScope(preferLiveFetch: true)
         }
 
         guard !snapshot.isEmpty else {
@@ -424,8 +477,14 @@ class GalleryViewModel: ObservableObject {
                 ToastManager.shared.show("No photos to check")
             case .currentSelection:
                 ToastManager.shared.show("No photos in current selection")
+            case .listDeleted:
+                ToastManager.shared.show("No photos in sync scope")
             }
             return
+        }
+
+        if scope == .listDeleted {
+            prepareDeletedCloudResultsPresentation()
         }
 
         isCloudCheckRunning = true
@@ -435,6 +494,29 @@ class GalleryViewModel: ObservableObject {
         let task = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
             do {
+                if scope == .listDeleted {
+                    let result = try await CloudBackupCheckService.shared.runDeletedOnlyList(
+                        assets: snapshot,
+                        onProgress: { _, _ in },
+                        onMatchesUpdated: { deletedLocalIdentifiers in
+                            Task { @MainActor [weak self] in
+                                self?.updateDeletedCloudListProgress(localIdentifiers: deletedLocalIdentifiers)
+                            }
+                        }
+                    )
+                    await MainActor.run {
+                        self.cloudCheckTask = nil
+                        self.isCloudCheckRunning = false
+                        self.refreshCloudDeleted()
+                        self.applyDeletedCloudList(localIdentifiers: result.deletedLocalIdentifiers)
+                        let strategy = result.usedServerFirst ? "server-first" : "local-first"
+                        ToastManager.shared.showPinned(
+                            "List Deleted: \(result.deleted) deleted, \(result.scanned) scanned, \(result.skipped) skipped (\(strategy))"
+                        )
+                    }
+                    return
+                }
+
                 let result = try await CloudBackupCheckService.shared.runCloudCheck(
                     assets: snapshot,
                     onProgress: { _, _ in }
@@ -444,20 +526,30 @@ class GalleryViewModel: ObservableObject {
                     self.isCloudCheckRunning = false
                     self.refreshCloudBackedUp()
                     self.refreshCloudMissing()
-                    ToastManager.shared.showPinned("Cloud check: \(result.backedUp) backed up, \(result.missing) missing, \(result.skipped) not checked")
+                    self.refreshCloudDeleted()
+                    ToastManager.shared.showPinned(
+                        "Cloud check: \(result.backedUp) backed up, \(result.deleted) deleted, \(result.missing) missing, \(result.skipped) not checked"
+                    )
                 }
             } catch is CancellationError {
                 await MainActor.run {
                     self.cloudCheckTask = nil
                     self.isCloudCheckRunning = false
+                    if scope == .listDeleted {
+                        self.clearDeletedCloudResultsPresentation()
+                    }
                     self.refreshCloudBackedUp()
                     self.refreshCloudMissing()
+                    self.refreshCloudDeleted()
                     ToastManager.shared.show("Cloud check stopped")
                 }
             } catch {
                 await MainActor.run {
                     self.cloudCheckTask = nil
                     self.isCloudCheckRunning = false
+                    if scope == .listDeleted {
+                        self.clearDeletedCloudResultsPresentation()
+                    }
                     ToastManager.shared.showPinned("Cloud check failed: \(error.localizedDescription)")
                 }
             }
@@ -467,10 +559,56 @@ class GalleryViewModel: ObservableObject {
     }
 
     @MainActor
+    private func applyDeletedCloudList(localIdentifiers: Set<String>) {
+        guard !localIdentifiers.isEmpty else {
+            exitSelectionMode()
+            clearDeletedCloudResultsPresentation()
+            ToastManager.shared.show("No local items were deleted in the cloud")
+            return
+        }
+        listDeletedResultsModeActive = true
+        listDeletedRunLocalIdentifiers = localIdentifiers
+        isSelectionMode = true
+        selectedPhotos = Set(filteredMedia.filter { localIdentifiers.contains($0.localIdentifier) })
+    }
+
+    @MainActor
     func stopCloudCheck() {
         guard isCloudCheckRunning, let task = cloudCheckTask else { return }
         ToastManager.shared.show("Stopping cloud check…", duration: 1.5)
         task.cancel()
+    }
+
+    @MainActor
+    private func prepareDeletedCloudResultsPresentation() {
+        listDeletedResultsModeActive = true
+        listDeletedRunLocalIdentifiers = []
+        selectedMediaType = .all
+        selectedAlbum = nil
+        selectedAlbumId = nil
+        selectedAlbumIds = []
+        showFavoritesOnly = false
+        selectedTimeRange = .allTime
+        customStartDate = nil
+        customEndDate = nil
+        selectedFilter = .deletedInCloud
+        exitSelectionMode()
+    }
+
+    @MainActor
+    private func updateDeletedCloudListProgress(localIdentifiers: Set<String>) {
+        listDeletedResultsModeActive = true
+        listDeletedRunLocalIdentifiers = localIdentifiers
+    }
+
+    @MainActor
+    private func clearDeletedCloudResultsPresentation() {
+        listDeletedResultsModeActive = false
+        listDeletedRunLocalIdentifiers = []
+        if selectedFilter == .deletedInCloud {
+            selectedFilter = nil
+        }
+        exitSelectionMode()
     }
     
     private func handleAuthorizationChange(_ status: PHAuthorizationStatus) {
@@ -876,6 +1014,9 @@ class GalleryViewModel: ObservableObject {
             case .missingInCloud:
                 let missing = cloudMissingLocalIdentifiers
                 assets = assets.filter { missing.contains($0.localIdentifier) }
+            case .deletedInCloud:
+                let deleted = listDeletedResultsModeActive ? listDeletedRunLocalIdentifiers : cloudDeletedLocalIdentifiers
+                assets = assets.filter { deleted.contains($0.localIdentifier) }
             }
         }
         
@@ -995,6 +1136,9 @@ class GalleryViewModel: ObservableObject {
             case .missingInCloud:
                 let missing = cloudMissingLocalIdentifiers
                 assets = assets.filter { missing.contains($0.localIdentifier) }
+            case .deletedInCloud:
+                let deleted = listDeletedResultsModeActive ? listDeletedRunLocalIdentifiers : cloudDeletedLocalIdentifiers
+                assets = assets.filter { deleted.contains($0.localIdentifier) }
             }
         }
         filteredMediaWithoutTypeCache = assets
@@ -1019,6 +1163,8 @@ class GalleryViewModel: ObservableObject {
             case .timeRange:
                 break
             case .missingInCloud:
+                break
+            case .deletedInCloud:
                 break
             }
         }

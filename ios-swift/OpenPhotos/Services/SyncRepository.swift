@@ -2,6 +2,13 @@ import Foundation
 import SQLite3
 import CryptoKit
 
+enum CloudItemStatus: Int {
+    case unknown = 0
+    case backedUp = 1
+    case deletedInCloud = 2
+    case missing = 3
+}
+
 final class SyncRepository {
     static let shared = SyncRepository()
     private let db = DatabaseManager.shared
@@ -33,8 +40,8 @@ final class SyncRepository {
 
     enum CloudStatusUserInfoKey {
         static let localIdentifier = "localIdentifier"
-        // Value type: NSNumber(Bool)
-        static let backedUp = "backedUp"
+        // Value type: NSNumber(Int)
+        static let cloudStatus = "cloudStatus"
     }
 
     private func scheduleStatsChangedNotification() {
@@ -234,16 +241,33 @@ final class SyncRepository {
 
     // MARK: - Cloud Backup Status
 
-    /// Sets whether a photo/video is fully backed up on the server for the current account.
+    /// Sets the cached server-side cloud status for a local asset.
     ///
-    /// This is keyed by `PHAsset.localIdentifier` so it can be used for UI badges even when the
-    /// asset has never been synced by this device (we create a minimal row if needed).
-    func setCloudBackedUpForLocalIdentifier(_ localIdentifier: String, backedUp: Bool, checkedAt: Int64? = nil, emitNotification: Bool = true) {
+    /// This is keyed by `PHAsset.localIdentifier` so it can be used for UI badges and Local-tab
+    /// cleanup flows even when the asset has never been uploaded by this device.
+    func setCloudStatusForLocalIdentifier(
+        _ localIdentifier: String,
+        status: CloudItemStatus,
+        checkedAt: Int64? = nil,
+        emitNotification: Bool = true
+    ) {
         ensurePhotoRow(localIdentifier: localIdentifier)
-        let ts = checkedAt ?? Int64(Date().timeIntervalSince1970)
+        let ts: Any
+        let backedUp: Any
+        switch status {
+        case .unknown:
+            ts = NSNull()
+            backedUp = NSNull()
+        case .backedUp:
+            ts = checkedAt ?? Int64(Date().timeIntervalSince1970)
+            backedUp = true
+        case .deletedInCloud, .missing:
+            ts = checkedAt ?? Int64(Date().timeIntervalSince1970)
+            backedUp = false
+        }
         _ = db.executeQuery(
-            "UPDATE photos SET cloud_backed_up = ?, cloud_checked_at = ? WHERE local_identifier = ?",
-            parameters: [backedUp, ts, localIdentifier]
+            "UPDATE photos SET cloud_status = ?, cloud_backed_up = ?, cloud_checked_at = ? WHERE local_identifier = ?",
+            parameters: [status.rawValue, backedUp, ts, localIdentifier]
         )
         guard emitNotification else { return }
         DispatchQueue.main.async {
@@ -252,10 +276,85 @@ final class SyncRepository {
                 object: nil,
                 userInfo: [
                     CloudStatusUserInfoKey.localIdentifier: localIdentifier,
-                    CloudStatusUserInfoKey.backedUp: NSNumber(value: backedUp)
+                    CloudStatusUserInfoKey.cloudStatus: NSNumber(value: status.rawValue)
                 ]
             )
         }
+    }
+
+    /// Backward-compatible helper for callers that only distinguish backed-up vs missing.
+    func setCloudBackedUpForLocalIdentifier(
+        _ localIdentifier: String,
+        backedUp: Bool,
+        checkedAt: Int64? = nil,
+        emitNotification: Bool = true
+    ) {
+        setCloudStatusForLocalIdentifier(
+            localIdentifier,
+            status: backedUp ? .backedUp : .missing,
+            checkedAt: checkedAt,
+            emitNotification: emitNotification
+        )
+    }
+
+    @discardableResult
+    func setCloudStatusForLocalIdentifiers(
+        _ localIdentifiers: Set<String>,
+        status: CloudItemStatus,
+        checkedAt: Int64? = nil,
+        emitNotification: Bool = true
+    ) -> Int {
+        guard !localIdentifiers.isEmpty else { return 0 }
+        let ids = Array(localIdentifiers)
+        let chunkSize = 300
+        let timestamp = checkedAt ?? Int64(Date().timeIntervalSince1970)
+        var index = 0
+        while index < ids.count {
+            let end = min(index + chunkSize, ids.count)
+            let chunk = Array(ids[index..<end])
+            for localId in chunk {
+                ensurePhotoRow(localIdentifier: localId)
+            }
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql: String
+            var params: [Any] = []
+            switch status {
+            case .unknown:
+                sql = """
+                UPDATE photos
+                SET cloud_status = ?, cloud_backed_up = NULL, cloud_checked_at = NULL
+                WHERE local_identifier IN (\(placeholders))
+                """
+                params.append(status.rawValue)
+            case .backedUp:
+                sql = """
+                UPDATE photos
+                SET cloud_status = ?, cloud_backed_up = 1, cloud_checked_at = ?
+                WHERE local_identifier IN (\(placeholders))
+                """
+                params.append(status.rawValue)
+                params.append(timestamp)
+            case .deletedInCloud, .missing:
+                sql = """
+                UPDATE photos
+                SET cloud_status = ?, cloud_backed_up = 0, cloud_checked_at = ?
+                WHERE local_identifier IN (\(placeholders))
+                """
+                params.append(status.rawValue)
+                params.append(timestamp)
+            }
+            params.append(contentsOf: chunk)
+            _ = db.executeQuery(sql, parameters: params)
+            index = end
+        }
+        guard emitNotification else { return ids.count }
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: SyncRepository.cloudBulkStatusChangedNotification,
+                object: nil
+            )
+        }
+        return ids.count
     }
 
     /// Loads all known "backed up" items (local_identifier -> true).
@@ -267,7 +366,7 @@ final class SyncRepository {
             SELECT local_identifier
             FROM photos
             WHERE local_identifier IS NOT NULL AND local_identifier <> ''
-              AND cloud_backed_up = 1
+              AND cloud_status = 1
             """
         ) { stmt in
             guard let ptr = sqlite3_column_text(stmt, 0) else { return nil }
@@ -276,17 +375,29 @@ final class SyncRepository {
         return Set(rows)
     }
 
-    /// Loads all known "checked but NOT backed up" items (local_identifier -> true).
-    ///
-    /// This is based on `cloud_checked_at` having been set by cloud-check, and `cloud_backed_up != 1`.
+    /// Loads all known "checked but not present and not deleted in cloud" items.
     func getAllCloudMissingLocalIdentifiers() -> Set<String> {
         let rows: [String] = db.executeSelect(
             """
             SELECT local_identifier
             FROM photos
             WHERE local_identifier IS NOT NULL AND local_identifier <> ''
-              AND cloud_checked_at IS NOT NULL AND cloud_checked_at > 0
-              AND (cloud_backed_up IS NULL OR cloud_backed_up = 0)
+              AND cloud_status = 3
+            """
+        ) { stmt in
+            guard let ptr = sqlite3_column_text(stmt, 0) else { return nil }
+            return String(cString: ptr)
+        }
+        return Set(rows)
+    }
+
+    func getAllCloudDeletedLocalIdentifiers() -> Set<String> {
+        let rows: [String] = db.executeSelect(
+            """
+            SELECT local_identifier
+            FROM photos
+            WHERE local_identifier IS NOT NULL AND local_identifier <> ''
+              AND cloud_status = 2
             """
         ) { stmt in
             guard let ptr = sqlite3_column_text(stmt, 0) else { return nil }
@@ -311,7 +422,32 @@ final class SyncRepository {
             SELECT DISTINCT local_identifier
             FROM photos
             WHERE local_identifier IN (\(placeholders))
-              AND cloud_backed_up = 1
+              AND cloud_status = 1
+            """
+            let rows: [String] = db.executeSelect(sql, parameters: chunk) { stmt in
+                guard let ptr = sqlite3_column_text(stmt, 0) else { return nil }
+                return String(cString: ptr)
+            }
+            result.formUnion(rows)
+            index = end
+        }
+        return result
+    }
+
+    func getCloudDeletedLocalIdentifiers(in localIdentifiers: [String]) -> Set<String> {
+        guard !localIdentifiers.isEmpty else { return [] }
+        let chunkSize = 300
+        var result: Set<String> = []
+        var index = 0
+        while index < localIdentifiers.count {
+            let end = min(index + chunkSize, localIdentifiers.count)
+            let chunk = Array(localIdentifiers[index..<end])
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+            SELECT DISTINCT local_identifier
+            FROM photos
+            WHERE local_identifier IN (\(placeholders))
+              AND cloud_status = 2
             """
             let rows: [String] = db.executeSelect(sql, parameters: chunk) { stmt in
                 guard let ptr = sqlite3_column_text(stmt, 0) else { return nil }

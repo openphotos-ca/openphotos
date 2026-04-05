@@ -201,7 +201,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private struct DeferredVerifyEntry {
         let contentId: String
         let filename: String
-        let assetId: String
+        let localIdentifier: String?
+        let verificationKind: VerificationLookupKind
+        let verificationValue: String
         let waitForLivePairing: Bool
         var attempts: Int
         let queuedAtUptime: TimeInterval
@@ -213,6 +215,11 @@ final class HybridUploadManager: NSObject, ObservableObject {
         case immediateOk
         case deferredQueued
         case failed
+    }
+
+    private enum VerificationLookupKind: String {
+        case assetId = "asset_id"
+        case backupId = "backup_id"
     }
 
     private struct TusUploadProfile {
@@ -1134,30 +1141,41 @@ final class HybridUploadManager: NSObject, ObservableObject {
             finish([])
             return
         }
-        // Build unique lookup IDs from locked/unlocked items.
-        var lookupIds: Set<String> = []
+        var assetLookupIds: Set<String> = []
+        var backupLookupIds: Set<String> = []
         for item in exported {
-            let aid = preflightAssetId(for: item)
-            if let aid, !aid.isEmpty {
-                lookupIds.insert(aid)
+            if let lookup = verificationLookup(for: item) {
+                switch lookup.kind {
+                case .assetId:
+                    assetLookupIds.insert(lookup.value)
+                case .backupId:
+                    backupLookupIds.insert(lookup.value)
+                }
             }
         }
-        if lookupIds.isEmpty {
+        if assetLookupIds.isEmpty && backupLookupIds.isEmpty {
             finish(exported)
             return
         }
 
         Task(priority: .utility) {
-            let present: Set<String>
+            let matches: CloudExistsMatches
             do {
-                present = try await self.existsAssetIdsWithRetry(Array(lookupIds))
+                matches = try await self.existsCloudMatchesWithRetry(
+                    assetIds: Array(assetLookupIds),
+                    backupIds: Array(backupLookupIds),
+                    includeDeletedMatches: true
+                )
             } catch {
                 print("[UPLOAD] preflight exists failed; continuing uploads without skip: \(error.localizedDescription)")
                 finish(exported)
                 return
             }
 
-            if present.isEmpty {
+            if matches.presentAssetIds.isEmpty &&
+                matches.presentBackupIds.isEmpty &&
+                matches.deletedAssetIds.isEmpty &&
+                matches.deletedBackupIds.isEmpty {
                 finish(exported)
                 return
             }
@@ -1167,7 +1185,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
             var skipped = 0
 
             for item in exported {
-                guard let aid = self.preflightAssetId(for: item), present.contains(aid) else {
+                guard let lookup = self.verificationLookup(for: item) else {
+                    filtered.append(item)
+                    continue
+                }
+                let isPresent = self.cloudMatches(matches, contain: lookup)
+                let isDeleted = self.cloudDeletedMatches(matches, contain: lookup)
+                guard isPresent || isDeleted else {
                     filtered.append(item)
                     continue
                 }
@@ -1176,10 +1200,19 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     SyncRepository.shared.setLocked(contentId: item.contentId, locked: item.isLocked)
                 }
                 if self.shouldMarkSyncedInRepository(for: item) {
+                    let status: CloudItemStatus = isDeleted ? .deletedInCloud : .backedUp
+                    SyncRepository.shared.setCloudStatusForLocalIdentifier(
+                        item.assetLocalIdentifier,
+                        status: status
+                    )
+                }
+                if self.shouldMarkSyncedInRepository(for: item) {
                     SyncRepository.shared.markSynced(contentId: item.contentId)
                 }
                 try? FileManager.default.removeItem(at: item.tempFileURL)
-                print("[UPLOAD] preflight skip existing asset_id=\(aid) file=\(item.filename)")
+                print(
+                    "[UPLOAD] preflight skip \(isDeleted ? "deleted" : "existing") \(lookup.kind.rawValue)=\(lookup.value) file=\(item.filename)"
+                )
             }
 
             if skipped > 0 {
@@ -1194,6 +1227,40 @@ final class HybridUploadManager: NSObject, ObservableObject {
             return item.assetIdB58
         }
         return item.assetId ?? computeAssetId(fileURL: item.tempFileURL)
+    }
+
+    private func preflightBackupId(for item: UploadItem) -> String? {
+        if let backupId = item.backupId, !backupId.isEmpty {
+            return backupId
+        }
+        guard !item.isLocked else { return nil }
+        return computeBackupId(fileURL: item.tempFileURL)
+    }
+
+    private func verificationLookup(for item: UploadItem) -> (kind: VerificationLookupKind, value: String)? {
+        if let bid = preflightBackupId(for: item), !bid.isEmpty {
+            return (.backupId, bid)
+        }
+        guard let aid = preflightAssetId(for: item), !aid.isEmpty else { return nil }
+        return (.assetId, aid)
+    }
+
+    private func cloudMatches(_ matches: CloudExistsMatches, contain lookup: (kind: VerificationLookupKind, value: String)) -> Bool {
+        switch lookup.kind {
+        case .assetId:
+            return matches.presentAssetIds.contains(lookup.value)
+        case .backupId:
+            return matches.presentBackupIds.contains(lookup.value)
+        }
+    }
+
+    private func cloudDeletedMatches(_ matches: CloudExistsMatches, contain lookup: (kind: VerificationLookupKind, value: String)) -> Bool {
+        switch lookup.kind {
+        case .assetId:
+            return matches.deletedAssetIds.contains(lookup.value)
+        case .backupId:
+            return matches.deletedBackupIds.contains(lookup.value)
+        }
     }
 
     private func existsAssetIdsWithRetry(_ assetIds: [String]) async throws -> Set<String> {
@@ -1218,6 +1285,75 @@ final class HybridUploadManager: NSObject, ObservableObject {
             i = end
         }
         return present
+    }
+
+    private func existsCloudMatchesWithRetry(
+        assetIds: [String] = [],
+        backupIds: [String] = [],
+        includeDeletedMatches: Bool
+    ) async throws -> CloudExistsMatches {
+        let chunkSize = 200
+        var merged = CloudExistsMatches.empty
+
+        var assetIndex = 0
+        while assetIndex < assetIds.count {
+            let end = min(assetIndex + chunkSize, assetIds.count)
+            let chunk = Array(assetIds[assetIndex..<end])
+            do {
+                let found = try await existsCloudMatchesChunk(assetIds: chunk, includeDeletedMatches: includeDeletedMatches)
+                merged = merged.union(found)
+            } catch {
+                if isRetryableNetworkError(error) {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    let found = try await existsCloudMatchesChunk(assetIds: chunk, includeDeletedMatches: includeDeletedMatches)
+                    merged = merged.union(found)
+                } else {
+                    throw error
+                }
+            }
+            assetIndex = end
+        }
+
+        var backupIndex = 0
+        while backupIndex < backupIds.count {
+            let end = min(backupIndex + chunkSize, backupIds.count)
+            let chunk = Array(backupIds[backupIndex..<end])
+            do {
+                let found = try await existsCloudMatchesChunk(backupIds: chunk, includeDeletedMatches: includeDeletedMatches)
+                merged = merged.union(found)
+            } catch {
+                if isRetryableNetworkError(error) {
+                    try? await Task.sleep(nanoseconds: 700_000_000)
+                    let found = try await existsCloudMatchesChunk(backupIds: chunk, includeDeletedMatches: includeDeletedMatches)
+                    merged = merged.union(found)
+                } else {
+                    throw error
+                }
+            }
+            backupIndex = end
+        }
+
+        return merged
+    }
+
+    private func existsCloudMatchesChunk(
+        assetIds: [String] = [],
+        backupIds: [String] = [],
+        includeDeletedMatches: Bool
+    ) async throws -> CloudExistsMatches {
+        let started = perfNow()
+        do {
+            let found = try await ServerPhotosService.shared.existsMatches(
+                assetIds: assetIds,
+                backupIds: backupIds,
+                includeDeletedMatches: includeDeletedMatches
+            )
+            perfRecordExistsCall(max(0, perfNow() - started))
+            return found
+        } catch {
+            perfRecordExistsCall(max(0, perfNow() - started))
+            throw error
+        }
     }
 
     private func existsAssetIdsChunk(_ assetIds: [String]) async throws -> Set<String> {
@@ -1301,6 +1437,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
             contentId: item.contentId,
             filename: item.filename,
             assetId: aid,
+            backupId: item.backupId,
+            localIdentifier: item.assetLocalIdentifier,
             preferDeferred: preferDeferred,
             preferDeferredReason: preferDeferredReason,
             waitForLivePairing: waitForLivePairing
@@ -1340,7 +1478,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private func queueDeferredServerVerification(
         contentId: String,
         filename: String,
-        assetId: String,
+        localIdentifier: String?,
+        verificationKind: VerificationLookupKind,
+        verificationValue: String,
         waitForLivePairing: Bool = false
     ) {
         deferredVerifyStateQueue.async {
@@ -1348,7 +1488,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 let entry = DeferredVerifyEntry(
                     contentId: contentId,
                     filename: filename,
-                    assetId: assetId,
+                    localIdentifier: localIdentifier,
+                    verificationKind: verificationKind,
+                    verificationValue: verificationValue,
                     waitForLivePairing: waitForLivePairing,
                     attempts: 0,
                     queuedAtUptime: self.perfNow(),
@@ -1358,7 +1500,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 self.deferredVerifyEntriesByContentId[contentId] = entry
                 AppLog.debug(
                     AppLog.upload,
-                    "[PERF] verify-deferred-enqueue content_id=\(contentId) asset_id=\(assetId) pending_entries=\(self.deferredVerifyEntriesByContentId.count)"
+                    "[PERF] verify-deferred-enqueue content_id=\(contentId) \(verificationKind.rawValue)=\(verificationValue) pending_entries=\(self.deferredVerifyEntriesByContentId.count)"
                 )
             }
             self.ensureDeferredVerifierLoopRunningLocked()
@@ -1454,11 +1596,28 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 continue
             }
 
-            let uniqueAssetIds = Array(Set(snapshot.map { $0.assetId }))
-            var present: Set<String> = []
+            let uniqueAssetIds = Array(
+                Set(
+                    snapshot.compactMap { entry in
+                        entry.verificationKind == .assetId ? entry.verificationValue : nil
+                    }
+                )
+            )
+            let uniqueBackupIds = Array(
+                Set(
+                    snapshot.compactMap { entry in
+                        entry.verificationKind == .backupId ? entry.verificationValue : nil
+                    }
+                )
+            )
+            var matches = CloudExistsMatches.empty
             var pollFailed = false
             do {
-                present = try await existsAssetIdsWithRetry(uniqueAssetIds)
+                matches = try await existsCloudMatchesWithRetry(
+                    assetIds: uniqueAssetIds,
+                    backupIds: uniqueBackupIds,
+                    includeDeletedMatches: true
+                )
             } catch {
                 pollFailed = true
                 AppLog.debug(
@@ -1468,6 +1627,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             }
 
             var confirmed: [DeferredVerifyEntry] = []
+            var deletedConfirmed: [DeferredVerifyEntry] = []
             var timedOut: [DeferredVerifyEntry] = []
             let now = perfNow()
             deferredVerifyStateQueue.sync {
@@ -1478,9 +1638,15 @@ final class HybridUploadManager: NSObject, ObservableObject {
                         continue
                     }
                     entry.lastPolledAtUptime = now
-                    if present.contains(entry.assetId) {
+                    let lookup = (kind: entry.verificationKind, value: entry.verificationValue)
+                    if cloudMatches(matches, contain: lookup) {
                         deferredVerifyEntriesByContentId.removeValue(forKey: entry.contentId)
                         confirmed.append(entry)
+                        continue
+                    }
+                    if cloudDeletedMatches(matches, contain: lookup) {
+                        deferredVerifyEntriesByContentId.removeValue(forKey: entry.contentId)
+                        deletedConfirmed.append(entry)
                         continue
                     }
                     if pollFailed {
@@ -1505,22 +1671,39 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
             for entry in confirmed {
                 SyncRepository.shared.markSynced(contentId: entry.contentId)
+                if let localId = entry.localIdentifier {
+                    SyncRepository.shared.setCloudStatusForLocalIdentifier(localId, status: .backedUp)
+                }
                 perfRecordVerifyDeferredConfirmed()
                 let waited = max(0, perfNow() - entry.queuedAtUptime)
                 let recoveredAfterTimeout = (entry.timedOutAtUptime != nil) ? 1 : 0
-                print("[UPLOAD] deferred verify confirmed asset_id=\(entry.assetId) file=\(entry.filename) attempts=\(entry.attempts + 1)")
+                print("[UPLOAD] deferred verify confirmed \(entry.verificationKind.rawValue)=\(entry.verificationValue) file=\(entry.filename) attempts=\(entry.attempts + 1)")
                 AppLog.debug(
                     AppLog.upload,
-                    "[PERF] verify-deferred-confirmed content_id=\(entry.contentId) asset_id=\(entry.assetId) attempts=\(entry.attempts + 1) waited_ms=\(perfMs(waited)) recovered_after_timeout=\(recoveredAfterTimeout)"
+                    "[PERF] verify-deferred-confirmed content_id=\(entry.contentId) \(entry.verificationKind.rawValue)=\(entry.verificationValue) attempts=\(entry.attempts + 1) waited_ms=\(perfMs(waited)) recovered_after_timeout=\(recoveredAfterTimeout)"
+                )
+            }
+            for entry in deletedConfirmed {
+                SyncRepository.shared.markSynced(contentId: entry.contentId)
+                if let localId = entry.localIdentifier {
+                    SyncRepository.shared.setCloudStatusForLocalIdentifier(localId, status: .deletedInCloud)
+                }
+                perfRecordVerifyDeferredConfirmed()
+                let waited = max(0, perfNow() - entry.queuedAtUptime)
+                let recoveredAfterTimeout = (entry.timedOutAtUptime != nil) ? 1 : 0
+                print("[UPLOAD] deferred verify skipped deleted \(entry.verificationKind.rawValue)=\(entry.verificationValue) file=\(entry.filename) attempts=\(entry.attempts + 1)")
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-deferred-confirmed content_id=\(entry.contentId) \(entry.verificationKind.rawValue)=\(entry.verificationValue) state=deleted_in_cloud attempts=\(entry.attempts + 1) waited_ms=\(perfMs(waited)) recovered_after_timeout=\(recoveredAfterTimeout)"
                 )
             }
             for entry in timedOut {
                 perfRecordVerifyDeferredTimedOut()
                 let waited = max(0, perfNow() - entry.queuedAtUptime)
-                print("[UPLOAD] deferred verify timed out asset_id=\(entry.assetId) file=\(entry.filename); remains pending and will be rechecked")
+                print("[UPLOAD] deferred verify timed out \(entry.verificationKind.rawValue)=\(entry.verificationValue) file=\(entry.filename); remains pending and will be rechecked")
                 AppLog.info(
                     AppLog.upload,
-                    "[PERF] verify-deferred-timeout content_id=\(entry.contentId) asset_id=\(entry.assetId) attempts=\(entry.attempts) waited_ms=\(perfMs(waited)) will_retry=1"
+                    "[PERF] verify-deferred-timeout content_id=\(entry.contentId) \(entry.verificationKind.rawValue)=\(entry.verificationValue) attempts=\(entry.attempts) waited_ms=\(perfMs(waited)) will_retry=1"
                 )
             }
 
@@ -1563,14 +1746,25 @@ final class HybridUploadManager: NSObject, ObservableObject {
         contentId: String,
         filename: String,
         assetId: String?,
+        backupId: String? = nil,
+        localIdentifier: String? = nil,
         preferDeferred: Bool = false,
         preferDeferredReason: String? = nil,
         waitForLivePairing: Bool = false
     ) async -> VerifyResult {
-        guard let aid = assetId, !aid.isEmpty else {
-            let msg = "Upload completed but missing asset_id for verification"
+        let lookup: (kind: VerificationLookupKind, value: String)?
+        if let bid = backupId, !bid.isEmpty {
+            lookup = (.backupId, bid)
+        } else if let aid = assetId, !aid.isEmpty {
+            lookup = (.assetId, aid)
+        } else {
+            lookup = nil
+        }
+
+        guard let lookup else {
+            let msg = "Upload completed but missing verification key"
             SyncRepository.shared.markFailed(contentId: contentId, error: msg)
-            print("[UPLOAD] verify failed missing-asset-id file=\(filename)")
+            print("[UPLOAD] verify failed missing-verification-key file=\(filename)")
             return .failed
         }
 
@@ -1582,26 +1776,54 @@ final class HybridUploadManager: NSObject, ObservableObject {
             queueDeferredServerVerification(
                 contentId: contentId,
                 filename: filename,
-                assetId: aid,
+                localIdentifier: localIdentifier,
+                verificationKind: lookup.kind,
+                verificationValue: lookup.value,
                 waitForLivePairing: waitForLivePairing
             )
-            print("[UPLOAD] verify deferred by policy asset_id=\(aid) file=\(filename) reason=\(preferDeferredReason ?? "unspecified")")
+            print("[UPLOAD] verify deferred by policy \(lookup.kind.rawValue)=\(lookup.value) file=\(filename) reason=\(preferDeferredReason ?? "unspecified")")
             AppLog.debug(
                 AppLog.upload,
-                "[PERF] verify-deferred-queued content_id=\(contentId) asset_id=\(aid) mode=fast_deferred reason=policy_\(preferDeferredReason ?? "unspecified")"
+                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred reason=policy_\(preferDeferredReason ?? "unspecified")"
             )
             return .deferredQueued
         }
 
         do {
-            let present = try await existsAssetIdsWithRetry([aid])
-            if present.contains(aid) {
+            let matches = try await existsCloudMatchesWithRetry(
+                assetIds: lookup.kind == .assetId ? [lookup.value] : [],
+                backupIds: lookup.kind == .backupId ? [lookup.value] : [],
+                includeDeletedMatches: true
+            )
+            if cloudMatches(matches, contain: lookup) {
                 SyncRepository.shared.markSynced(contentId: contentId)
+                if let localIdentifier {
+                    SyncRepository.shared.setCloudStatusForLocalIdentifier(
+                        localIdentifier,
+                        status: .backedUp
+                    )
+                }
                 perfRecordVerifyImmediateOk()
                 recordImmediateVerifyHit()
                 AppLog.debug(
                     AppLog.upload,
-                    "[PERF] verify-immediate-ok content_id=\(contentId) asset_id=\(aid) mode=fast_deferred"
+                    "[PERF] verify-immediate-ok content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred"
+                )
+                return .immediateOk
+            }
+            if cloudDeletedMatches(matches, contain: lookup) {
+                SyncRepository.shared.markSynced(contentId: contentId)
+                if let localIdentifier {
+                    SyncRepository.shared.setCloudStatusForLocalIdentifier(
+                        localIdentifier,
+                        status: .deletedInCloud
+                    )
+                }
+                perfRecordVerifyImmediateOk()
+                recordImmediateVerifyHit()
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-immediate-ok content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) state=deleted_in_cloud mode=fast_deferred"
                 )
                 return .immediateOk
             }
@@ -1612,13 +1834,15 @@ final class HybridUploadManager: NSObject, ObservableObject {
             queueDeferredServerVerification(
                 contentId: contentId,
                 filename: filename,
-                assetId: aid,
+                localIdentifier: localIdentifier,
+                verificationKind: lookup.kind,
+                verificationValue: lookup.value,
                 waitForLivePairing: waitForLivePairing
             )
-            print("[UPLOAD] verify deferred ingest-confirmation asset_id=\(aid) file=\(filename)")
+            print("[UPLOAD] verify deferred ingest-confirmation \(lookup.kind.rawValue)=\(lookup.value) file=\(filename)")
             AppLog.debug(
                 AppLog.upload,
-                "[PERF] verify-deferred-queued content_id=\(contentId) asset_id=\(aid) mode=fast_deferred"
+                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred"
             )
             return .deferredQueued
         } catch {
@@ -1628,13 +1852,15 @@ final class HybridUploadManager: NSObject, ObservableObject {
             queueDeferredServerVerification(
                 contentId: contentId,
                 filename: filename,
-                assetId: aid,
+                localIdentifier: localIdentifier,
+                verificationKind: lookup.kind,
+                verificationValue: lookup.value,
                 waitForLivePairing: waitForLivePairing
             )
             print("[UPLOAD] verify request failed; deferred file=\(filename) err=\(error.localizedDescription)")
             AppLog.debug(
                 AppLog.upload,
-                "[PERF] verify-deferred-queued content_id=\(contentId) asset_id=\(aid) mode=fast_deferred reason=request_failed"
+                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred reason=request_failed"
             )
             return .deferredQueued
         }
@@ -2390,9 +2616,15 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     "mime_hint": isVideo ? plainMime : plainMime,
                     "created_at": String(cts),
                 ]
-                if let bid = self.computeBackupId(fileURL: plainURL) {
+                let plainBackupCandidates = self.computeBackupIdCandidatesForUpload(fileURL: plainURL, isVideo: isVideo)
+                if let bid = plainBackupCandidates.first {
                     tusLockedMeta["backup_id"] = bid
                 }
+                self.cacheBackupIdCandidates(
+                    asset: asset,
+                    resource: resource,
+                    candidates: plainBackupCandidates
+                )
                 // Optional metadata (user-controlled)
                 let prefs = SecurityPreferences.shared
                 if prefs.includeCaption, let cap = extracted.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -2446,6 +2678,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                         status: .queued,
                         tempFileURL: info.containerURL,
                         assetId: info.assetIdB58,
+                        backupId: plainBackupCandidates.first,
                         isLocked: true,
                         lockedKind: "orig",
                         assetIdB58: info.assetIdB58,
@@ -2481,6 +2714,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                             status: .queued,
                             tempFileURL: infoT.containerURL,
                             assetId: assetIdForThumb,
+                            backupId: plainBackupCandidates.first,
                             isLocked: true,
                             lockedKind: "thumb",
                             // Pair the thumbnail with the original's asset id (match web client behavior)
@@ -2519,6 +2753,14 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     pixelHeight: prePixelHeight,
                     estimatedBytes: size
                 )
+                let plainAssetId = self.computeAssetId(fileURL: destURL)
+                let plainBackupCandidates = self.computeBackupIdCandidatesForUpload(fileURL: destURL, isVideo: isVideo)
+                let plainBackupId = plainBackupCandidates.first
+                self.cacheBackupIdCandidates(
+                    asset: asset,
+                    resource: resource,
+                    candidates: plainBackupCandidates
+                )
                 let item = UploadItem(
                     assetLocalIdentifier: asset.localIdentifier,
                     filename: filename,
@@ -2534,7 +2776,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     totalBytes: size,
                     status: .queued,
                     tempFileURL: destURL,
-                    assetId: self.computeAssetId(fileURL: destURL)
+                    assetId: plainAssetId,
+                    backupId: plainBackupId
                 )
                 logExportPerf(status: "ok", inputBytes: size, outputItems: 1, outputBytes: item.totalBytes)
                 completion([item])
@@ -2964,9 +3207,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
                         "favorite": item.isFavorite ? "1" : "0"
                     ]
                     if let assetId = item.assetId ?? self.computeAssetId(fileURL: item.tempFileURL) { meta["asset_id"] = assetId }
+                    if let backupId = item.backupId ?? self.computeBackupId(fileURL: item.tempFileURL) { meta["backup_id"] = backupId }
                     if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["caption"] = cap }
                     if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["description"] = des }
-                    print("[UPLOAD] TUS meta filename=\(item.filename) content_id=\(item.contentId) created_at=\(item.creationTs) favorite=\(item.isFavorite ? 1 : 0) caption='\(item.caption ?? "")' description='\(item.longDescription ?? "")' asset_id='\(meta["asset_id"] ?? "")'")
+                    print("[UPLOAD] TUS meta filename=\(item.filename) content_id=\(item.contentId) created_at=\(item.creationTs) favorite=\(item.isFavorite ? 1 : 0) caption='\(item.caption ?? "")' description='\(item.longDescription ?? "")' asset_id='\(meta["asset_id"] ?? "")' backup_id='\(meta["backup_id"] ?? "")'")
                     if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum { meta["albums"] = albums }
                 }
                 let createStart = perfNow()
@@ -3016,6 +3260,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                             "favorite": item.isFavorite ? "1" : "0"
                         ]
                         if let assetId = item.assetId ?? self.computeAssetId(fileURL: item.tempFileURL) { meta["asset_id"] = assetId }
+                        if let backupId = item.backupId ?? self.computeBackupId(fileURL: item.tempFileURL) { meta["backup_id"] = backupId }
                         if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["caption"] = cap }
                         if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["description"] = des }
                         if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum { meta["albums"] = albums }
@@ -3258,12 +3503,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
         } else {
             writeField(name: "content_id", value: item.contentId)
             if let aid = item.assetId ?? computeAssetId(fileURL: item.tempFileURL) { writeField(name: "asset_id", value: aid) }
+            if let bid = item.backupId ?? computeBackupId(fileURL: item.tempFileURL) { writeField(name: "backup_id", value: bid) }
             writeField(name: "media_type", value: item.isVideo ? "video" : "image")
             writeField(name: "created_at", value: String(item.creationTs))
             writeField(name: "favorite", value: item.isFavorite ? "1" : "0")
             if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { writeField(name: "caption", value: cap) }
             if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { writeField(name: "description", value: des) }
-            print("[UPLOAD] Multipart meta filename=\(item.filename) content_id=\(item.contentId) created_at=\(item.creationTs) favorite=\(item.isFavorite ? 1 : 0) caption='\(item.caption ?? "")' description='\(item.longDescription ?? "")'")
+            print("[UPLOAD] Multipart meta filename=\(item.filename) content_id=\(item.contentId) created_at=\(item.creationTs) favorite=\(item.isFavorite ? 1 : 0) caption='\(item.caption ?? "")' description='\(item.longDescription ?? "")' backup_id='\(item.backupId ?? "")'")
             if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum {
                 writeField(name: "albums", value: albums)
             }
@@ -3288,11 +3534,12 @@ final class HybridUploadManager: NSObject, ObservableObject {
         // Create upload task using file-based body
         let task = bgSession.uploadTask(with: req, fromFile: bodyURL)
         // taskDescription format:
-        // uploadItemUUID|bodyFilename|boundary|attempt|contentId|mediaKind|syncMark|assetId
+        // uploadItemUUID|bodyFilename|boundary|attempt|contentId|mediaKind|syncMark|assetId|backupId
         // syncMark: "mark" for primary components, "skip" for non-primary components.
         let syncMark = shouldMarkSyncedInRepository(for: item) ? "mark" : "skip"
         let assetIdForDesc = preflightAssetId(for: item) ?? ""
-        let taskDescription = item.id.uuidString + "|" + bodyURL.lastPathComponent + "|" + boundary + "|0|" + item.contentId + "|" + (item.isVideo ? "video" : "photo") + "|" + syncMark + "|" + assetIdForDesc
+        let backupIdForDesc = preflightBackupId(for: item) ?? ""
+        let taskDescription = item.id.uuidString + "|" + bodyURL.lastPathComponent + "|" + boundary + "|0|" + item.contentId + "|" + (item.isVideo ? "video" : "photo") + "|" + syncMark + "|" + assetIdForDesc + "|" + backupIdForDesc
         task.taskDescription = taskDescription
         perfRegisterBackgroundTaskStart(taskDescription: taskDescription, bodyName: bodyURL.lastPathComponent)
 
@@ -3382,6 +3629,55 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
 // MARK: - Asset ID computation (Base58(first16(HMAC-SHA256(user_id, file_bytes))))
 extension HybridUploadManager {
+    fileprivate func computeBackupIdCandidatesForUpload(fileURL: URL, isVideo: Bool) -> [String] {
+        var candidates: [String] = []
+        if let primary = computeBackupId(fileURL: fileURL) {
+            candidates.append(primary)
+        }
+        if !isVideo && isHEICContainerForBackupCache(url: fileURL) {
+            if let converted = ImageConversion.convertHEICtoJPEG(inputURL: fileURL, quality: 0.9) {
+                if let alt = computeBackupId(fileURL: converted.url), !candidates.contains(alt) {
+                    candidates.append(alt)
+                }
+                try? FileManager.default.removeItem(at: converted.url)
+            }
+        }
+        return candidates
+    }
+
+    fileprivate func cacheBackupIdCandidates(
+        asset: PHAsset,
+        resource: PHAssetResource,
+        candidates: [String]
+    ) {
+        guard !candidates.isEmpty,
+              let userId = AuthManager.shared.userId,
+              !userId.isEmpty
+        else { return }
+        let creation = Int64(asset.creationDate?.timeIntervalSince1970 ?? 0)
+        let modified = Int64(asset.modificationDate?.timeIntervalSince1970 ?? 0)
+        let durationMs = Int64((asset.mediaType == .video ? asset.duration : 0) * 1000.0)
+        let fingerprint = [
+            "v1",
+            "mt=\(asset.mediaType.rawValue)",
+            "st=\(asset.mediaSubtypes.rawValue)",
+            "rt=\(resource.type.rawValue)",
+            "fn=\(resource.originalFilename)",
+            "uti=\(resource.uniformTypeIdentifier)",
+            "w=\(asset.pixelWidth)",
+            "h=\(asset.pixelHeight)",
+            "durms=\(durationMs)",
+            "c=\(creation)",
+            "m=\(modified)"
+        ].joined(separator: "|")
+        SyncRepository.shared.setCachedBackupIdCandidates(
+            userId: userId,
+            localIdentifier: asset.localIdentifier,
+            fingerprint: fingerprint,
+            candidates: candidates
+        )
+    }
+
     fileprivate func computeAssetId(fileURL: URL) -> String? {
         guard let uid = AuthManager.shared.userId, !uid.isEmpty else { return nil }
         guard let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
@@ -3459,6 +3755,14 @@ extension HybridUploadManager {
         }
         return nil
     }
+
+    private func isHEICContainerForBackupCache(url: URL) -> Bool {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let type = CGImageSourceGetType(src) as String?
+        else { return false }
+        let lower = type.lowercased()
+        return lower.contains("heic") || lower.contains("heif")
+    }
 }
 
 // MARK: - URLSessionDelegate for background uploads
@@ -3487,6 +3791,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         let syncMarkFromDesc = comps.count >= 7 ? String(comps[6]) : nil
         let assetIdFromDescRaw = comps.count >= 8 ? String(comps[7]) : nil
         let assetIdFromDesc = (assetIdFromDescRaw?.isEmpty == false) ? assetIdFromDescRaw : nil
+        let backupIdFromDescRaw = comps.count >= 9 ? String(comps[8]) : nil
+        let backupIdFromDesc = (backupIdFromDescRaw?.isEmpty == false) ? backupIdFromDescRaw : nil
         let maxAttempts = 3
         let scopedBodyURL = uploadTempFileURL(name: bodyName)
         let bodyURL = FileManager.default.fileExists(atPath: scopedBodyURL.path)
@@ -3517,6 +3823,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 mediaKindFromDesc: mediaKindFromDesc,
                 syncMarkFromDesc: syncMarkFromDesc,
                 assetIdFromDesc: assetIdFromDesc,
+                backupIdFromDesc: backupIdFromDesc,
                 maxAttempts: maxAttempts,
                 bodyURL: bodyURL,
                 bodyBytes: bodyBytes,
@@ -3538,6 +3845,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         mediaKindFromDesc: String?,
         syncMarkFromDesc: String?,
         assetIdFromDesc: String?,
+        backupIdFromDesc: String?,
         maxAttempts: Int,
         bodyURL: URL,
         bodyBytes: Int64,
@@ -3552,6 +3860,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         //  - Prefer the in-memory UploadItem when available (same-process completions).
         //  - Fall back to the taskDescription-encoded content id (cross-process resumptions).
         let dbContentId: String? = itemIndex.map { items[$0].contentId } ?? contentIdFromDesc
+        let localIdentifierForVerify: String? = itemIndex.map { items[$0].assetLocalIdentifier }
 
         if itemIndex == nil && dbContentId == nil {
             print("[UPLOAD] BG completion without identifiable contentId; skipping sync state update")
@@ -3679,8 +3988,9 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                     let cidValue = dbContentId ?? ""
                     let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                     let aidValue = assetIdFromDesc ?? ""
+                    let bidValue = backupIdFromDesc ?? ""
                     let boundaryValue = boundary ?? ""
-                    let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                    let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue
                     newTask.taskDescription = newDescription
                     self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                     newTask.resume()
@@ -3730,7 +4040,13 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                     setItemStatus(verified ? .completed : .failed)
                 } else {
                     if let cid = dbContentId {
-                        let verifyResult = await markSyncedAfterServerVerification(contentId: cid, filename: bodyName, assetId: assetIdFromDesc)
+                        let verifyResult = await markSyncedAfterServerVerification(
+                            contentId: cid,
+                            filename: bodyName,
+                            assetId: assetIdFromDesc,
+                            backupId: backupIdFromDesc,
+                            localIdentifier: localIdentifierForVerify
+                        )
                         verified = (verifyResult != .failed)
                     } else {
                         verified = false
@@ -3773,7 +4089,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 let cidValue = dbContentId ?? ""
                 let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                 let aidValue = assetIdFromDesc ?? ""
-                let newDescription = idStr + "|" + bodyName + "|" + boundary + "|" + String(nextAttempt) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                let bidValue = backupIdFromDesc ?? ""
+                let newDescription = idStr + "|" + bodyName + "|" + boundary + "|" + String(nextAttempt) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue
                 newTask.taskDescription = newDescription
                 self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                 newTask.resume()
@@ -3811,8 +4128,9 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 let cidValue = dbContentId ?? ""
                 let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                 let aidValue = assetIdFromDesc ?? ""
+                let bidValue = backupIdFromDesc ?? ""
                 let boundaryValue = boundary ?? ""
-                let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue
+                let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue
                 newTask.taskDescription = newDescription
                 self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                 newTask.resume()

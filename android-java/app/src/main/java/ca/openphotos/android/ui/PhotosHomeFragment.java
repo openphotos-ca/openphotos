@@ -122,6 +122,8 @@ public class PhotosHomeFragment extends Fragment {
     private static final int MENU_ACTION_FAVORITE = 2004;
     private static final int MENU_ACTION_DELETE = 2005;
     private static final int MENU_ACTION_CLEAR_RATING = 2006;
+    private static final int MENU_ACTION_RESTORE = 2008;
+    private static final int MENU_ACTION_PURGE = 2009;
 
     @Nullable
     @Override
@@ -554,6 +556,11 @@ public class PhotosHomeFragment extends Fragment {
         updateSelectionBarUi();
     }
 
+    private boolean areAllCurrentItemsSelected() {
+        int currentCount = timelineMode ? allPhotosJson.size() : all.size();
+        return currentCount > 0 && selectedIds.size() >= currentCount;
+    }
+
     private void selectAllCurrent() {
         selectedIds.clear();
         if (timelineMode) {
@@ -910,18 +917,25 @@ public class PhotosHomeFragment extends Fragment {
     private void showSelectionActionsMenu(View anchor) {
         if (selectedIds.isEmpty()) return;
         android.widget.PopupMenu pm = new android.widget.PopupMenu(requireContext(), anchor);
-        pm.getMenu().add(0, MENU_ACTION_ADD_TO_ALBUM, 0, "Add to Album");
-        pm.getMenu().add(0, MENU_ACTION_SHARE, 1, "Share");
-        pm.getMenu().add(0, MENU_ACTION_LOCK, 2, "Lock");
-        pm.getMenu().add(0, MENU_ACTION_FAVORITE, 3, "Add to Favorites");
-        pm.getMenu().add(0, MENU_ACTION_DELETE, 4, "Delete");
-        pm.getMenu().add(0, MENU_ACTION_CLEAR_RATING, 5, "Clear Rating");
+        if ("trash".equals(mediaFilter)) {
+            pm.getMenu().add(0, MENU_ACTION_RESTORE, 0, "Restore");
+            pm.getMenu().add(0, MENU_ACTION_PURGE, 1, "Delete Permanently...");
+        } else {
+            pm.getMenu().add(0, MENU_ACTION_ADD_TO_ALBUM, 0, "Add to Album");
+            pm.getMenu().add(0, MENU_ACTION_SHARE, 1, "Share");
+            pm.getMenu().add(0, MENU_ACTION_LOCK, 2, "Lock");
+            pm.getMenu().add(0, MENU_ACTION_FAVORITE, 3, "Add to Favorites");
+            pm.getMenu().add(0, MENU_ACTION_DELETE, 4, "Delete");
+            pm.getMenu().add(0, MENU_ACTION_CLEAR_RATING, 5, "Clear Rating");
+        }
         pm.setOnMenuItemClickListener(this::handleSelectionActionClick);
         pm.show();
     }
 
     private boolean handleSelectionActionClick(MenuItem item) {
         int id = item.getItemId();
+        if (id == MENU_ACTION_RESTORE) { runBulkRestore(); return true; }
+        if (id == MENU_ACTION_PURGE) { confirmBulkPurge(); return true; }
         if (id == MENU_ACTION_ADD_TO_ALBUM) {
             pendingAlbumPickMode = ALBUM_PICK_BULK_ADD;
             AlbumTreeDialogFragment dlg = AlbumTreeDialogFragment.newInstance(false);
@@ -1000,6 +1014,48 @@ public class PhotosHomeFragment extends Fragment {
                 requireActivity().runOnUiThread(() -> finishMutationSuccess("Deleted " + deleted + " item" + (deleted == 1 ? "" : "s")));
             } catch (Exception e) {
                 requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Delete failed", android.widget.Toast.LENGTH_LONG).show());
+            }
+        }).start();
+    }
+
+    private void runBulkRestore() {
+        List<String> assetIds = selectedAssetIds();
+        if (assetIds.isEmpty()) return;
+        new Thread(() -> {
+            try {
+                ServerPhotosService svc = new ServerPhotosService(requireContext().getApplicationContext());
+                JSONObject res = svc.restorePhotos(assetIds);
+                int restored = res.optInt("restored", 0);
+                requireActivity().runOnUiThread(() -> finishMutationSuccess("Restored " + restored + " item" + (restored == 1 ? "" : "s")));
+            } catch (Exception e) {
+                requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Restore failed", android.widget.Toast.LENGTH_LONG).show());
+            }
+        }).start();
+    }
+
+    private void confirmBulkPurge() {
+        List<String> assetIds = selectedAssetIds();
+        if (assetIds.isEmpty()) return;
+        String msg = "This will permanently delete " + assetIds.size() + " selected item" + (assetIds.size() == 1 ? "" : "s") + " from Trash.";
+        new android.app.AlertDialog.Builder(requireContext())
+                .setTitle("Delete Permanently?")
+                .setMessage(msg)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Delete", (d, w) -> runBulkPurge())
+                .show();
+    }
+
+    private void runBulkPurge() {
+        List<String> assetIds = selectedAssetIds();
+        if (assetIds.isEmpty()) return;
+        new Thread(() -> {
+            try {
+                ServerPhotosService svc = new ServerPhotosService(requireContext().getApplicationContext());
+                JSONObject res = svc.purgePhotos(assetIds);
+                int purged = res.optInt("purged", 0);
+                requireActivity().runOnUiThread(() -> finishMutationSuccess("Deleted permanently " + purged + " item" + (purged == 1 ? "" : "s")));
+            } catch (Exception e) {
+                requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Delete permanently failed", android.widget.Toast.LENGTH_LONG).show());
             }
         }).start();
     }

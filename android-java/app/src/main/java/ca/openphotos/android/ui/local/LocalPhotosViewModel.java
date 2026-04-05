@@ -10,6 +10,8 @@ import androidx.lifecycle.AndroidViewModel;
 import androidx.lifecycle.LiveData;
 import androidx.lifecycle.MutableLiveData;
 
+import ca.openphotos.android.prefs.SyncFoldersPreferences;
+import ca.openphotos.android.prefs.SyncPreferences;
 import ca.openphotos.android.ui.MediaGridAdapter;
 import ca.openphotos.android.ui.TimelineAdapter;
 
@@ -59,6 +61,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     private static final String K_FILTER_SS = "filter_screenshots";
     private static final String K_FILTER_LIVE = "filter_live";
     private static final String K_FILTER_MISSING = "filter_missing_cloud";
+    private static final String K_FILTER_DELETED = "filter_deleted_cloud";
     private static final String K_DATE_FROM = "date_from";
     private static final String K_DATE_TO = "date_to";
 
@@ -67,6 +70,9 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     private final LocalMediaRepository repository;
     private final LocalCloudCacheStore cloudCache;
     private final LocalCloudCheckService cloudCheckService;
+    private final LocalDeletedListService deletedListService;
+    private final SyncPreferences syncPrefs;
+    private final SyncFoldersPreferences syncFolderPrefs;
     private final SharedPreferences prefs;
     private final ExecutorService io = Executors.newSingleThreadExecutor();
 
@@ -93,7 +99,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
 
     private final Set<String> selectedIds = new LinkedHashSet<>();
     private final Set<String> selectedFolders = new LinkedHashSet<>();
-    private final Map<String, Integer> cloudStateByLocalId = new HashMap<>(); // -1 unknown, 0 missing, 1 backed
+    private final Map<String, Integer> cloudStateByLocalId = new HashMap<>(); // LocalCloudCacheStore.STATE_*
 
     private SortOption sortOption = SortOption.NEWEST;
     private LayoutOption layoutOption = LayoutOption.GRID;
@@ -102,9 +108,12 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     private boolean filterScreenshots = false;
     private boolean filterLive = false;
     private boolean filterMissingCloud = false;
+    private boolean filterDeletedCloud = false;
     @Nullable private Long dateFromSec = null;
     @Nullable private Long dateToSec = null;
     private boolean selectionMode = false;
+    private boolean listDeletedResultsMode = false;
+    private final Set<String> listDeletedRunIds = new LinkedHashSet<>();
 
     private int randomSeed = new Random().nextInt();
 
@@ -113,6 +122,9 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
         repository = new LocalMediaRepository(app);
         cloudCache = new LocalCloudCacheStore(app);
         cloudCheckService = new LocalCloudCheckService(app);
+        deletedListService = new LocalDeletedListService(app);
+        syncPrefs = new SyncPreferences(app);
+        syncFolderPrefs = new SyncFoldersPreferences(app);
         prefs = app.getSharedPreferences(PREF, Context.MODE_PRIVATE);
         restorePrefs();
     }
@@ -145,6 +157,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     public boolean isFilterScreenshots() { synchronized (lock) { return filterScreenshots; } }
     public boolean isFilterLive() { synchronized (lock) { return filterLive; } }
     public boolean isFilterMissingCloud() { synchronized (lock) { return filterMissingCloud; } }
+    public boolean isFilterDeletedCloud() { synchronized (lock) { return filterDeletedCloud; } }
     @Nullable public Long getDateFromSec() { synchronized (lock) { return dateFromSec; } }
     @Nullable public Long getDateToSec() { synchronized (lock) { return dateToSec; } }
 
@@ -160,7 +173,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     public boolean isCloudBackedUp(@NonNull String localId) {
         synchronized (lock) {
             Integer s = cloudStateByLocalId.get(localId);
-            return s != null && s == 1;
+            return s != null && s == LocalCloudCacheStore.STATE_BACKED_UP;
         }
     }
 
@@ -179,6 +192,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             if (filterScreenshots) labels.add("Screenshots");
             if (filterLive) labels.add("Live Photos");
             if (filterMissingCloud) labels.add("Missing in Cloud");
+            if (filterDeletedCloud) labels.add("Deleted in Cloud");
             if (dateFromSec != null || dateToSec != null) {
                 SimpleDateFormat f = new SimpleDateFormat("MMM d, yyyy", Locale.US);
                 String from = dateFromSec != null ? f.format(new Date(dateFromSec * 1000L)) : "-";
@@ -201,6 +215,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     public void stop() {
         repository.stopObserving();
         cloudCheckService.cancel();
+        deletedListService.cancel();
     }
 
     public void reload() {
@@ -281,6 +296,17 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
     public void setFilterMissingCloud(boolean on) {
         synchronized (lock) {
             filterMissingCloud = on;
+            if (on) filterDeletedCloud = false;
+            persistPrefsLocked();
+        }
+        recomputeAndPublish();
+    }
+
+    public void setFilterDeletedCloud(boolean on) {
+        synchronized (lock) {
+            filterDeletedCloud = on;
+            if (on) filterMissingCloud = false;
+            if (!on) clearDeletedListResultsModeLocked();
             persistPrefsLocked();
         }
         recomputeAndPublish();
@@ -301,6 +327,8 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             filterScreenshots = false;
             filterLive = false;
             filterMissingCloud = false;
+            filterDeletedCloud = false;
+            clearDeletedListResultsModeLocked();
             selectedFolders.clear();
             dateFromSec = null;
             dateToSec = null;
@@ -369,17 +397,141 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
 
     public void startCloudCheckAll() {
         List<LocalMediaItem> snapshot;
-        synchronized (lock) { snapshot = new ArrayList<>(allItems); }
+        synchronized (lock) {
+            clearDeletedListResultsModeLocked();
+            snapshot = new ArrayList<>(allItems);
+        }
         startCloudCheck(snapshot);
     }
 
     public void startCloudCheckCurrentSelection() {
-        List<LocalMediaItem> snapshot = currentVisibleSnapshot();
+        List<LocalMediaItem> snapshot;
+        synchronized (lock) {
+            clearDeletedListResultsModeLocked();
+            snapshot = new ArrayList<>(visibleItemsCache);
+        }
         startCloudCheck(snapshot);
+    }
+
+    public void startCloudCheckListDeleted() {
+        List<LocalMediaItem> snapshot;
+        synchronized (lock) {
+            snapshot = currentSyncScopeSnapshotLocked();
+            if (snapshot.isEmpty()) {
+                messageEventLive.postValue("No photos in sync scope");
+                return;
+            }
+            prepareDeletedListResultsPresentationLocked();
+            persistPrefsLocked();
+        }
+        selectionModeLive.postValue(false);
+        selectedCountLive.postValue(0);
+        recomputeAndPublish();
+
+        boolean started = deletedListService.startScan(snapshot, cloudCache, new LocalDeletedListService.Listener() {
+            @Override
+            public void onStart(int totalLocalItems, int serverDeletedTotal, boolean serverFirst) {
+                cloudRunningLive.postValue(true);
+                cloudProgressLive.postValue(new Progress(0, totalLocalItems));
+            }
+
+            @Override
+            public void onProgress(int processed, int total) {
+                cloudProgressLive.postValue(new Progress(processed, total));
+            }
+
+            @Override
+            public void onMatchesUpdated(@NonNull Set<String> deletedLocalIds) {
+                synchronized (lock) {
+                    listDeletedRunIds.clear();
+                    listDeletedRunIds.addAll(deletedLocalIds);
+                    listDeletedResultsMode = true;
+                }
+                recomputeAndPublish();
+            }
+
+            @Override
+            public void onFinished(@NonNull LocalDeletedListService.Stats stats) {
+                cloudRunningLive.postValue(false);
+                cloudProgressLive.postValue(new Progress(stats.scanned + stats.skipped, snapshot.size()));
+                synchronized (lock) {
+                    for (String localId : stats.scannedLocalIds) {
+                        cloudStateByLocalId.remove(localId);
+                    }
+                    for (String localId : stats.deletedLocalIds) {
+                        cloudStateByLocalId.put(localId, LocalCloudCacheStore.STATE_DELETED_IN_CLOUD);
+                    }
+                    listDeletedRunIds.clear();
+                    listDeletedRunIds.addAll(stats.deletedLocalIds);
+                    if (stats.deleted > 0) {
+                        listDeletedResultsMode = true;
+                        filterDeletedCloud = true;
+                        filterMissingCloud = false;
+                        selectionMode = true;
+                        selectedIds.clear();
+                        selectedIds.addAll(stats.deletedLocalIds);
+                    } else {
+                        clearDeletedListResultsModeLocked();
+                        filterDeletedCloud = false;
+                        selectionMode = false;
+                        selectedIds.clear();
+                    }
+                    persistPrefsLocked();
+                }
+                selectionModeLive.postValue(stats.deleted > 0);
+                selectedCountLive.postValue(stats.deleted > 0 ? stats.deletedLocalIds.size() : 0);
+                messageEventLive.postValue(
+                        "List Deleted: " + stats.deleted + " deleted, "
+                                + stats.scanned + " scanned, "
+                                + stats.skipped + " skipped ("
+                                + (stats.serverFirst ? "server-first" : "local-first") + ")"
+                );
+                recomputeAndPublish();
+            }
+
+            @Override
+            public void onCanceled() {
+                cloudRunningLive.postValue(false);
+                synchronized (lock) {
+                    if (listDeletedRunIds.isEmpty()) {
+                        resetDeletedListResultsPresentationLocked();
+                    }
+                }
+                selectionModeLive.postValue(isSelectionModeValue());
+                selectedCountLive.postValue(currentSelectedIds().size());
+                messageEventLive.postValue("List Deleted canceled");
+                recomputeAndPublish();
+            }
+
+            @Override
+            public void onError(@NonNull String message, boolean authExpired) {
+                cloudRunningLive.postValue(false);
+                synchronized (lock) {
+                    if (listDeletedRunIds.isEmpty()) {
+                        resetDeletedListResultsPresentationLocked();
+                    }
+                }
+                selectionModeLive.postValue(isSelectionModeValue());
+                selectedCountLive.postValue(currentSelectedIds().size());
+                messageEventLive.postValue(message);
+                if (authExpired) authExpiredEventLive.postValue(System.currentTimeMillis());
+                recomputeAndPublish();
+            }
+        });
+        if (!started) {
+            synchronized (lock) {
+                resetDeletedListResultsPresentationLocked();
+            }
+            selectionModeLive.postValue(false);
+            selectedCountLive.postValue(0);
+            messageEventLive.postValue("List Deleted already running");
+            recomputeAndPublish();
+        }
     }
 
     public void cancelCloudCheck() {
         cloudCheckService.cancel();
+        deletedListService.cancel();
     }
 
     private void startCloudCheck(@NonNull List<LocalMediaItem> snapshot) {
@@ -410,7 +562,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             public void onFinished(@NonNull LocalCloudCheckService.Stats stats) {
                 cloudRunningLive.postValue(false);
                 cloudProgressLive.postValue(new Progress(stats.checked + stats.skipped, stats.checked + stats.skipped));
-                messageEventLive.postValue("Cloud check: " + stats.backedUp + " backed up, " + stats.missing + " missing, " + stats.skipped + " skipped");
+                messageEventLive.postValue("Cloud check: " + stats.backedUp + " backed up, " + stats.deleted + " deleted, " + stats.missing + " missing, " + stats.skipped + " skipped");
                 recomputeAndPublish();
             }
 
@@ -443,6 +595,8 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             boolean ss;
             boolean live;
             boolean missingFilter;
+            boolean deletedFilter;
+            boolean deletedResultsMode;
             Long from;
             Long to;
             SortOption sort;
@@ -450,6 +604,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             int seed;
             boolean inSelection;
             Set<String> selection;
+            Set<String> deletedRunIds;
             Map<String, Integer> cloud;
 
             synchronized (lock) {
@@ -460,6 +615,8 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
                 ss = filterScreenshots;
                 live = filterLive;
                 missingFilter = filterMissingCloud;
+                deletedFilter = filterDeletedCloud;
+                deletedResultsMode = listDeletedResultsMode;
                 from = dateFromSec;
                 to = dateToSec;
                 sort = sortOption;
@@ -467,6 +624,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
                 seed = randomSeed;
                 inSelection = selectionMode;
                 selection = new LinkedHashSet<>(selectedIds);
+                deletedRunIds = new LinkedHashSet<>(listDeletedRunIds);
                 cloud = new HashMap<>(cloudStateByLocalId);
             }
 
@@ -480,7 +638,15 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
                 if (to != null && item.createdAtSec > to) continue;
                 if (missingFilter) {
                     Integer st = cloud.get(item.localId);
-                    if (st == null || st != 0) continue;
+                    if (st == null || st != LocalCloudCacheStore.STATE_MISSING) continue;
+                }
+                if (deletedFilter) {
+                    if (deletedResultsMode) {
+                        if (!deletedRunIds.contains(item.localId)) continue;
+                    } else {
+                        Integer st = cloud.get(item.localId);
+                        if (st == null || st != LocalCloudCacheStore.STATE_DELETED_IN_CLOUD) continue;
+                    }
                 }
                 noType.add(item);
             }
@@ -521,7 +687,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             ArrayList<MediaGridAdapter.Cell> gridCells = new ArrayList<>();
             for (LocalMediaItem item : visible) {
                 Integer st = cloud.get(item.localId);
-                boolean cloudBacked = st != null && st == 1;
+                boolean cloudBacked = st != null && st == LocalCloudCacheStore.STATE_BACKED_UP;
                 gridCells.add(new MediaGridAdapter.Cell(
                         item.localId,
                         item.displayName,
@@ -560,7 +726,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             selectedFoldersLive.postValue(new LinkedHashSet<>(folderFilters));
             selectionModeLive.postValue(inSelection);
             selectedCountLive.postValue(selection.size());
-            activeFiltersLive.postValue(hasActiveFilters(folderFilters, fav, ss, live, missingFilter, from, to, sort));
+            activeFiltersLive.postValue(hasActiveFilters(folderFilters, fav, ss, live, missingFilter, deletedFilter, from, to, sort));
         });
     }
 
@@ -570,6 +736,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             boolean screenshots,
             boolean live,
             boolean missing,
+            boolean deleted,
             @Nullable Long from,
             @Nullable Long to,
             @NonNull SortOption sort
@@ -579,19 +746,131 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
                 || screenshots
                 || live
                 || missing
+                || deleted
                 || from != null
                 || to != null
                 || sort != SortOption.NEWEST;
     }
 
     private void hydrateCloudStatesLocked(@NonNull List<LocalMediaItem> items) {
+        cloudStateByLocalId.clear();
         for (LocalMediaItem it : items) {
             LocalCloudCacheStore.Entry e = cloudCache.get(it.localId);
             if (e == null) continue;
             String fp = BackupIdUtil.fingerprint(it);
             if (!fp.equals(e.fingerprint)) continue;
-            cloudStateByLocalId.put(it.localId, e.backedUp ? 1 : 0);
+            cloudStateByLocalId.put(it.localId, e.cloudState);
         }
+    }
+
+    @NonNull
+    private List<LocalMediaItem> currentSyncScopeSnapshotLocked() {
+        ArrayList<LocalMediaItem> snapshot = new ArrayList<>();
+        if (!"selected".equals(syncPrefs.scope())) {
+            snapshot.addAll(allItems);
+            return snapshot;
+        }
+
+        Set<String> selected = normalizePaths(syncFolderPrefs.getSyncFolders());
+        boolean includeUnassigned = syncPrefs.syncIncludeUnassigned();
+        if (selected.isEmpty() && !includeUnassigned) {
+            return snapshot;
+        }
+
+        for (LocalMediaItem item : allItems) {
+            String rel = normalizePath(item.relativePath);
+            boolean inSelected = pathMatchesSyncScope(rel, selected);
+            if (inSelected || includeUnassigned) {
+                snapshot.add(item);
+            }
+        }
+        return snapshot;
+    }
+
+    private void prepareDeletedListResultsPresentationLocked() {
+        favoritesOnly = false;
+        filterScreenshots = false;
+        filterLive = false;
+        filterMissingCloud = false;
+        filterDeletedCloud = true;
+        selectedFolders.clear();
+        mediaType = MediaType.ALL;
+        dateFromSec = null;
+        dateToSec = null;
+        selectionMode = false;
+        selectedIds.clear();
+        listDeletedResultsMode = true;
+        listDeletedRunIds.clear();
+    }
+
+    private void clearDeletedListResultsModeLocked() {
+        listDeletedResultsMode = false;
+        listDeletedRunIds.clear();
+    }
+
+    private void resetDeletedListResultsPresentationLocked() {
+        clearDeletedListResultsModeLocked();
+        filterDeletedCloud = false;
+        selectionMode = false;
+        selectedIds.clear();
+        persistPrefsLocked();
+    }
+
+    @NonNull
+    private static Set<String> normalizePaths(@NonNull Set<String> src) {
+        LinkedHashSet<String> out = new LinkedHashSet<>();
+        for (String path : src) {
+            String normalized = normalizePath(path);
+            if (!normalized.isEmpty()) out.add(normalized);
+        }
+        return out;
+    }
+
+    @NonNull
+    private static String normalizePath(@Nullable String rel) {
+        if (rel == null) return "";
+        String p = rel.trim();
+        if (p.isEmpty()) return "";
+        String[] parts = p.split("/");
+        StringBuilder out = new StringBuilder();
+        for (String part : parts) {
+            String clean = sanitizeSegment(part);
+            if (clean.isEmpty()) continue;
+            if (out.length() > 0) out.append('/');
+            out.append(clean);
+        }
+        return out.toString();
+    }
+
+    @NonNull
+    private static String sanitizeSegment(@Nullable String raw) {
+        if (raw == null) return "";
+        String s = raw.trim();
+        if (s.isEmpty()) return "";
+        StringBuilder out = new StringBuilder(s.length());
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            if (Character.isISOControl(c)) continue;
+            if (c == '/' || c == '\\') continue;
+            out.append(c);
+        }
+        return out.toString().trim();
+    }
+
+    private static boolean pathMatchesSyncScope(@Nullable String rel, @NonNull Set<String> set) {
+        if (rel == null || rel.isEmpty() || set.isEmpty()) return false;
+        String normalizedRel = normalizePath(rel);
+        if (normalizedRel.isEmpty()) return false;
+        String candidate = (normalizedRel.endsWith("/") ? normalizedRel : (normalizedRel + "/"))
+                .toLowerCase(Locale.US);
+        for (String path : set) {
+            String normalizedPath = normalizePath(path);
+            if (normalizedPath.isEmpty()) continue;
+            String prefix = (normalizedPath.endsWith("/") ? normalizedPath : (normalizedPath + "/"))
+                    .toLowerCase(Locale.US);
+            if (candidate.startsWith(prefix)) return true;
+        }
+        return false;
     }
 
     private static void sortItems(@NonNull List<LocalMediaItem> items, @NonNull SortOption sort, int seed) {
@@ -673,7 +952,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
                             : Long.compare(a.createdAtSec, b.createdAtSec));
                     for (LocalMediaItem item : dayItems) {
                         Integer st = cloud.get(item.localId);
-                        boolean cloudBacked = st != null && st == 1;
+                        boolean cloudBacked = st != null && st == LocalCloudCacheStore.STATE_BACKED_UP;
                         out.add(TimelineAdapter.Cell.photo(
                                 item.localId,
                                 item.isVideo,
@@ -718,6 +997,8 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
             filterScreenshots = prefs.getBoolean(K_FILTER_SS, false);
             filterLive = prefs.getBoolean(K_FILTER_LIVE, false);
             filterMissingCloud = prefs.getBoolean(K_FILTER_MISSING, false);
+            filterDeletedCloud = prefs.getBoolean(K_FILTER_DELETED, false);
+            if (filterDeletedCloud) filterMissingCloud = false;
             long from = prefs.getLong(K_DATE_FROM, -1L);
             long to = prefs.getLong(K_DATE_TO, -1L);
             dateFromSec = from > 0 ? from : null;
@@ -734,6 +1015,7 @@ public final class LocalPhotosViewModel extends AndroidViewModel {
                 .putBoolean(K_FILTER_SS, filterScreenshots)
                 .putBoolean(K_FILTER_LIVE, filterLive)
                 .putBoolean(K_FILTER_MISSING, filterMissingCloud)
+                .putBoolean(K_FILTER_DELETED, filterDeletedCloud)
                 .putLong(K_DATE_FROM, dateFromSec != null ? dateFromSec : -1L)
                 .putLong(K_DATE_TO, dateToSec != null ? dateToSec : -1L)
                 .apply();

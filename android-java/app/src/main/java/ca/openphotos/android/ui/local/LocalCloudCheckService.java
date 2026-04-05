@@ -27,7 +27,7 @@ public final class LocalCloudCheckService {
     public interface Listener {
         void onStart(int total);
         void onProgress(int processed, int total);
-        void onItemResult(@NonNull String localId, int cloudState); // 1 = backed up, 0 = missing
+        void onItemResult(@NonNull String localId, int cloudState); // see LocalCloudCacheStore.STATE_*
         void onFinished(@NonNull Stats stats);
         void onCanceled();
         void onError(@NonNull String message, boolean authExpired);
@@ -36,14 +36,18 @@ public final class LocalCloudCheckService {
     public static final class Stats {
         public final int checked;
         public final int backedUp;
+        public final int deleted;
         public final int missing;
         public final int skipped;
+        @NonNull public final Set<String> deletedLocalIds;
 
-        public Stats(int checked, int backedUp, int missing, int skipped) {
+        public Stats(int checked, int backedUp, int deleted, int missing, int skipped, @NonNull Set<String> deletedLocalIds) {
             this.checked = checked;
             this.backedUp = backedUp;
+            this.deleted = deleted;
             this.missing = missing;
             this.skipped = skipped;
+            this.deletedLocalIds = deletedLocalIds;
         }
     }
 
@@ -85,8 +89,10 @@ public final class LocalCloudCheckService {
         int processed = 0;
         int checked = 0;
         int backed = 0;
+        int deleted = 0;
         int missing = 0;
         int skipped = 0;
+        Set<String> deletedLocalIds = new HashSet<>();
 
         try {
             String userId = AuthManager.get(app).getUserId();
@@ -135,9 +141,9 @@ public final class LocalCloudCheckService {
                     queryIds.addAll(candidates);
                 }
 
-                Set<String> present = new HashSet<>();
+                ServerPhotosService.ExistsMatchesResult matches = new ServerPhotosService.ExistsMatchesResult(null, null, null, null);
                 if (!queryIds.isEmpty()) {
-                    present = fetchPresentWithRetry(service, new ArrayList<>(queryIds));
+                    matches = fetchMatchesWithRetry(service, new ArrayList<>(queryIds));
                 }
 
                 long nowSec = System.currentTimeMillis() / 1000L;
@@ -147,33 +153,53 @@ public final class LocalCloudCheckService {
                         return;
                     }
                     boolean isBacked = false;
+                    boolean isDeleted = false;
                     for (String bid : e.getValue()) {
-                        if (present.contains(bid)) {
+                        if (matches.presentBackupIds.contains(bid)) {
                             isBacked = true;
                             break;
                         }
                     }
+                    if (!isBacked) {
+                        for (String bid : e.getValue()) {
+                            if (matches.deletedBackupIds.contains(bid)) {
+                                isDeleted = true;
+                                break;
+                            }
+                        }
+                    }
 
                     checked++;
-                    if (isBacked) backed++; else missing++;
+                    int cloudState;
+                    if (isBacked) {
+                        backed++;
+                        cloudState = LocalCloudCacheStore.STATE_BACKED_UP;
+                    } else if (isDeleted) {
+                        deleted++;
+                        deletedLocalIds.add(e.getKey());
+                        cloudState = LocalCloudCacheStore.STATE_DELETED_IN_CLOUD;
+                    } else {
+                        missing++;
+                        cloudState = LocalCloudCacheStore.STATE_MISSING;
+                    }
                     // Preserve fingerprint by re-reading item from chunk
                     LocalMediaItem src = findByLocalId(chunk, e.getKey());
                     if (src != null) {
                         cache.put(e.getKey(), new LocalCloudCacheStore.Entry(
                                 BackupIdUtil.fingerprint(src),
                                 e.getValue(),
-                                isBacked,
+                                cloudState,
                                 nowSec
                         ));
                     }
 
-                    listener.onItemResult(e.getKey(), isBacked ? 1 : 0);
+                    listener.onItemResult(e.getKey(), cloudState);
                     processed++;
                     listener.onProgress(processed, total);
                 }
             }
 
-            listener.onFinished(new Stats(checked, backed, missing, skipped));
+            listener.onFinished(new Stats(checked, backed, deleted, missing, skipped, deletedLocalIds));
         } catch (IOException ioe) {
             String m = ioe.getMessage() == null ? "Network error" : ioe.getMessage();
             listener.onError(m, isAuthExpired(ioe));
@@ -188,9 +214,9 @@ public final class LocalCloudCheckService {
     }
 
     @NonNull
-    private static Set<String> fetchPresentWithRetry(@NonNull ServerPhotosService service, @NonNull List<String> backupIds) throws IOException {
+    private static ServerPhotosService.ExistsMatchesResult fetchMatchesWithRetry(@NonNull ServerPhotosService service, @NonNull List<String> backupIds) throws IOException {
         try {
-            return service.existsFullyBackedUpByBackupIds(backupIds);
+            return service.existsMatchesByBackupIds(backupIds, true);
         } catch (IOException first) {
             if (!isRetryable(first)) throw first;
             try {
@@ -199,7 +225,7 @@ public final class LocalCloudCheckService {
                 Thread.currentThread().interrupt();
                 throw first;
             }
-            return service.existsFullyBackedUpByBackupIds(backupIds);
+            return service.existsMatchesByBackupIds(backupIds, true);
         }
     }
 

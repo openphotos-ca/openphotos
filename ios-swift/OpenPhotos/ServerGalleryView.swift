@@ -61,6 +61,7 @@ struct ServerGalleryView: View {
     @State private var isPreparingShare: Bool = false
     @State private var didCreateShareInCurrentSheet: Bool = false
     @State private var showEmptyTrashConfirm: Bool = false
+    @State private var showSelectedPurgeConfirm: Bool = false
 
     // Similar Media state
     @State private var showSimilarMedia: Bool = false
@@ -330,6 +331,15 @@ struct ServerGalleryView: View {
             } message: {
                 let trashCount = viewModel.mediaCounts?.trash ?? 0
                 Text("This will permanently delete \(trashCount) item\(trashCount == 1 ? "" : "s") from Trash.")
+            }
+            .alert("Delete Permanently?", isPresented: $showSelectedPurgeConfirm) {
+                Button("Delete", role: .destructive) {
+                    Task { await bulkPurge() }
+                }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                let count = viewModel.selected.count
+                Text("This will permanently delete \(count) selected item\(count == 1 ? "" : "s") from Trash.")
             }
             .overlay {
                 if isPreparingShare {
@@ -646,7 +656,7 @@ struct ServerGalleryView: View {
 
     // MARK: - Subviews and Sheets
     private var selectionBar: some View {
-        HStack {
+        return HStack {
             Button("Select All") { viewModel.selectAll() }
             Button("Deselect All") { viewModel.deselectAll() }
             Spacer()
@@ -657,90 +667,97 @@ struct ServerGalleryView: View {
         .padding()
         .background(.ultraThinMaterial)
         .confirmationDialog("Actions", isPresented: $showingActions) {
-            Button("Add to Album…") { albumPickerRemoveMode = false; showAlbumPicker = true }
-            Button("Share") {
-                // Dismiss the action dialog first
-                showingActions = false
-
-                // Check if we have selected items
-                guard !viewModel.selected.isEmpty else {
-                    shareError = "No photos selected"
-                    showShareError = true
-                    return
+            if viewModel.selectedMediaType == .trash {
+                Button("Restore") { Task { await bulkRestore() } }
+                Button("Delete Permanently...", role: .destructive) {
+                    showSelectedPurgeConfirm = true
                 }
+            } else {
+                Button("Add to Album…") { albumPickerRemoveMode = false; showAlbumPicker = true }
+                Button("Share") {
+                    // Dismiss the action dialog first
+                    showingActions = false
 
-                // If only one photo selected, share it directly
-                if viewModel.selected.count == 1, let singleAsset = viewModel.selected.first {
-                    didCreateShareInCurrentSheet = false
-                    shareContext = ShareContext(
-                        kind: .asset,
-                        id: singleAsset,
-                        name: "Selected photo"
-                    )
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                        showCreateShare = true
+                    // Check if we have selected items
+                    guard !viewModel.selected.isEmpty else {
+                        shareError = "No photos selected"
+                        showShareError = true
+                        return
                     }
-                } else {
-                    // Multiple photos selected - create an album and share it
-                    Task {
-                        // Show loading indicator
-                        await MainActor.run {
-                            isPreparingShare = true
+
+                    // If only one photo selected, share it directly
+                    if viewModel.selected.count == 1, let singleAsset = viewModel.selected.first {
+                        didCreateShareInCurrentSheet = false
+                        shareContext = ShareContext(
+                            kind: .asset,
+                            id: singleAsset,
+                            name: "Selected photo"
+                        )
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+                            showCreateShare = true
                         }
-
-                        var preparedAlbumId: Int? = nil
-                        do {
-                            let selectedAssetIds = Array(viewModel.selected)
-                            let albumName = "Shared Selection (\(selectedAssetIds.count) photos)"
-
-                            // Create a new album
-                            let album = try await ServerPhotosService.shared.createAlbum(
-                                name: albumName,
-                                // Hidden from regular album listings; used as immutable share snapshot.
-                                description: "Share snapshot"
-                            )
-                            preparedAlbumId = album.id
-
-                            // Add all selected photos to the album
-                            try await ServerPhotosService.shared.addPhotosToAlbum(
-                                albumId: album.id,
-                                assetIds: selectedAssetIds
-                            )
-
-                            // Now share the album containing all photos
+                    } else {
+                        // Multiple photos selected - create an album and share it
+                        Task {
+                            // Show loading indicator
                             await MainActor.run {
-                                isPreparingShare = false
-                                didCreateShareInCurrentSheet = false
-                                shareContext = ShareContext(
-                                    kind: .album,
-                                    id: String(album.id),
-                                    name: albumName,
-                                    temporaryAlbumId: album.id
-                                )
-                                showCreateShare = true
+                                isPreparingShare = true
                             }
-                        } catch {
-                            if let albumId = preparedAlbumId {
-                                do {
-                                    try await ServerPhotosService.shared.deleteAlbum(id: albumId)
-                                    print("[SHARE] cleaned failed selection album id=\(albumId)")
-                                } catch {
-                                    print("[SHARE] failed cleanup after prepare error id=\(albumId) error=\(error.localizedDescription)")
+
+                            var preparedAlbumId: Int? = nil
+                            do {
+                                let selectedAssetIds = Array(viewModel.selected)
+                                let albumName = "Shared Selection (\(selectedAssetIds.count) photos)"
+
+                                // Create a new album
+                                let album = try await ServerPhotosService.shared.createAlbum(
+                                    name: albumName,
+                                    // Hidden from regular album listings; used as immutable share snapshot.
+                                    description: "Share snapshot"
+                                )
+                                preparedAlbumId = album.id
+
+                                // Add all selected photos to the album
+                                try await ServerPhotosService.shared.addPhotosToAlbum(
+                                    albumId: album.id,
+                                    assetIds: selectedAssetIds
+                                )
+
+                                // Now share the album containing all photos
+                                await MainActor.run {
+                                    isPreparingShare = false
+                                    didCreateShareInCurrentSheet = false
+                                    shareContext = ShareContext(
+                                        kind: .album,
+                                        id: String(album.id),
+                                        name: albumName,
+                                        temporaryAlbumId: album.id
+                                    )
+                                    showCreateShare = true
+                                }
+                            } catch {
+                                if let albumId = preparedAlbumId {
+                                    do {
+                                        try await ServerPhotosService.shared.deleteAlbum(id: albumId)
+                                        print("[SHARE] cleaned failed selection album id=\(albumId)")
+                                    } catch {
+                                        print("[SHARE] failed cleanup after prepare error id=\(albumId) error=\(error.localizedDescription)")
+                                    }
+                                }
+                                await MainActor.run {
+                                    isPreparingShare = false
+                                    shareError = "Failed to prepare photos for sharing: \(error.localizedDescription)"
+                                    showShareError = true
                                 }
                             }
-                            await MainActor.run {
-                                isPreparingShare = false
-                                shareError = "Failed to prepare photos for sharing: \(error.localizedDescription)"
-                                showShareError = true
-                            }
                         }
                     }
                 }
+                Button("Lock") { Task { await bulkLock() } }
+                Button("Add to Favorites") { Task { await bulkFavorite(true) } }
+                Button("Delete", role: .destructive) { Task { await bulkDelete() } }
+                Button("Clear Rating") { Task { await bulkRating(nil) } }
             }
-            Button("Lock") { Task { await bulkLock() } }
-            Button("Add to Favorites") { Task { await bulkFavorite(true) } }
-            Button("Delete", role: .destructive) { Task { await bulkDelete() } }
-            Button("Clear Rating") { Task { await bulkRating(nil) } }
             Button("Cancel", role: .cancel) {}
         }
     }
@@ -1022,6 +1039,39 @@ struct ServerGalleryView: View {
         }
         // Mutations must bypass the in-memory cache so counts and grids update immediately.
         viewModel.refreshCurrentTabAndInvalidateOtherMediaTypes()
+    }
+
+    private func bulkPurge() async {
+        let ids = Array(viewModel.selected)
+        guard !ids.isEmpty else { return }
+        do {
+            let purged = try await ServerPhotosService.shared.purgePhotos(assetIds: ids)
+            await MainActor.run {
+                let idSet = Set(ids)
+                let affected = viewModel.photos.filter { idSet.contains($0.asset_id) }
+                viewModel.selected.removeAll()
+                viewModel.isSelectionMode = false
+                if viewModel.selectedMediaType == .trash {
+                    viewModel.photos.removeAll { idSet.contains($0.asset_id) }
+                }
+                if let counts = viewModel.mediaCounts {
+                    let purgedCount = affected.filter { ($0.delete_time ?? 0) > 0 }.count
+                    viewModel.mediaCounts = ServerMediaCounts(
+                        all: counts.all,
+                        photos: counts.photos,
+                        videos: counts.videos,
+                        locked: counts.locked,
+                        locked_photos: counts.locked_photos,
+                        locked_videos: counts.locked_videos,
+                        trash: max(0, (counts.trash ?? 0) - purgedCount)
+                    )
+                }
+            }
+            viewModel.refreshCurrentTabAndInvalidateOtherMediaTypes()
+            ToastManager.shared.show("Deleted permanently \(purged)")
+        } catch {
+            ToastManager.shared.show("Failed to permanently delete selected items")
+        }
     }
 
     private func emptyTrash() async {

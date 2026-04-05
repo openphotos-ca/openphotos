@@ -8,8 +8,20 @@ import UniformTypeIdentifiers
 struct CloudBackupCheckResult {
     let checked: Int
     let backedUp: Int
+    let deleted: Int
     let missing: Int
     let skipped: Int
+    let deletedLocalIdentifiers: Set<String>
+}
+
+struct DeletedCloudListResult {
+    let scanned: Int
+    let deleted: Int
+    let skipped: Int
+    let deletedLocalIdentifiers: Set<String>
+    let scannedLocalIdentifiers: Set<String>
+    let serverDeletedTotal: Int
+    let usedServerFirst: Bool
 }
 
 private final class ExportRequestContinuationState {
@@ -64,6 +76,14 @@ final class CloudBackupCheckService {
     private let exportManager = PHAssetResourceManager.default()
     private let exportSemaphore = AsyncSemaphore(value: 1)
 
+    private struct DeletedListWork {
+        let asset: PHAsset
+        let resource: PHAssetResource
+        let localIdentifier: String
+        let fingerprint: String
+        let cachedCandidates: [String]?
+    }
+
     private init() {
     }
 
@@ -80,8 +100,10 @@ final class CloudBackupCheckService {
         var processed = 0
         var checked = 0
         var backedUp = 0
+        var deleted = 0
         var missing = 0
         var skipped = 0
+        var deletedLocalIdentifiers: Set<String> = []
 
         // Process in small chunks to bound memory and request sizes.
         let chunkSize = 20
@@ -166,12 +188,12 @@ final class CloudBackupCheckService {
                 )
             }
 
-            let present: Set<String>
+            let matches: CloudExistsMatches
             if queryIds.isEmpty {
-                present = []
+                matches = .empty
             } else {
                 try Task.checkCancellation()
-                present = try await existsWithRetry(backupIds: Array(queryIds))
+                matches = try await existsWithRetry(backupIds: Array(queryIds))
             }
 
             for w in work {
@@ -185,18 +207,30 @@ final class CloudBackupCheckService {
                 }
 
                 checked += 1
-                let isBackedUp = w.components.allSatisfy { comp in comp.contains(where: present.contains) }
+                let isBackedUp = w.components.allSatisfy { comp in
+                    comp.contains(where: matches.presentBackupIds.contains)
+                }
+                let isDeletedInCloud = !isBackedUp && w.components.allSatisfy { comp in
+                    comp.contains(where: matches.deletedBackupIds.contains)
+                }
+                let status: CloudItemStatus
 
                 if isBackedUp {
                     backedUp += 1
+                    status = .backedUp
+                } else if isDeletedInCloud {
+                    deleted += 1
+                    deletedLocalIdentifiers.insert(w.localIdentifier)
+                    status = .deletedInCloud
                 } else {
                     missing += 1
+                    status = .missing
                 }
 
                 // Persist result; skip notifications during the bulk run.
-                SyncRepository.shared.setCloudBackedUpForLocalIdentifier(
+                SyncRepository.shared.setCloudStatusForLocalIdentifier(
                     w.localIdentifier,
-                    backedUp: isBackedUp,
+                    status: status,
                     checkedAt: checkedAt,
                     emitNotification: false
                 )
@@ -210,19 +244,305 @@ final class CloudBackupCheckService {
                 object: nil
             )
         }
-        return CloudBackupCheckResult(checked: checked, backedUp: backedUp, missing: missing, skipped: skipped)
+        return CloudBackupCheckResult(
+            checked: checked,
+            backedUp: backedUp,
+            deleted: deleted,
+            missing: missing,
+            skipped: skipped,
+            deletedLocalIdentifiers: deletedLocalIdentifiers
+        )
     }
 
-    private func existsWithRetry(backupIds: [String]) async throws -> Set<String> {
+    func runDeletedOnlyList(
+        assets: [PHAsset],
+        onProgress: @escaping (_ processed: Int, _ total: Int) -> Void,
+        onMatchesUpdated: @escaping (_ deletedLocalIdentifiers: Set<String>) -> Void
+    ) async throws -> DeletedCloudListResult {
+        guard let userId = AuthManager.shared.userId, !userId.isEmpty else {
+            throw NSError(domain: "CloudCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: "Not logged in"])
+        }
+
+        let total = assets.count
+        let checkedAt = Int64(Date().timeIntervalSince1970)
+        let deletedPageLimit = 500
+        let matchBatchLimit = 300
+
+        var processed = 0
+        var skipped = 0
+        var scannedLocalIdentifiers: Set<String> = []
+        var deletedLocalIdentifiers: Set<String> = []
+        var works: [DeletedListWork] = []
+        works.reserveCapacity(assets.count)
+
+        for asset in assets {
+            try Task.checkCancellation()
+            guard let resource = primaryResourceToCheck(for: asset) else {
+                skipped += 1
+                processed += 1
+                onProgress(processed, total)
+                continue
+            }
+            let fingerprint = backupIdFingerprint(asset: asset, resource: resource)
+            let cachedCandidates = SyncRepository.shared.getCachedBackupIdCandidates(
+                userId: userId,
+                localIdentifier: asset.localIdentifier,
+                fingerprint: fingerprint
+            )
+            works.append(
+                DeletedListWork(
+                    asset: asset,
+                    resource: resource,
+                    localIdentifier: asset.localIdentifier,
+                    fingerprint: fingerprint,
+                    cachedCandidates: cachedCandidates
+                )
+            )
+        }
+
+        let firstPage = try await deletedBackupsListWithRetry(limit: 1, after: nil)
+        let serverDeletedTotal = firstPage.total
+        let useServerFirst = serverDeletedTotal <= works.count
+
+        if serverDeletedTotal == 0 {
+            scannedLocalIdentifiers = Set(works.map(\.localIdentifier))
+            _ = SyncRepository.shared.setCloudStatusForLocalIdentifiers(
+                scannedLocalIdentifiers,
+                status: .unknown,
+                emitNotification: false
+            )
+            DispatchQueue.main.async {
+                NotificationCenter.default.post(
+                    name: SyncRepository.cloudBulkStatusChangedNotification,
+                    object: nil
+                )
+            }
+            processed = total
+            onProgress(processed, total)
+            return DeletedCloudListResult(
+                scanned: scannedLocalIdentifiers.count,
+                deleted: 0,
+                skipped: skipped,
+                deletedLocalIdentifiers: [],
+                scannedLocalIdentifiers: scannedLocalIdentifiers,
+                serverDeletedTotal: serverDeletedTotal,
+                usedServerFirst: useServerFirst
+            )
+        }
+
+        if useServerFirst {
+            var deletedBackupIds: Set<String> = []
+            var cachedLookup: [String: Set<String>] = [:]
+            let cachedWorks = works.filter { $0.cachedCandidates != nil }
+            let uncachedWorks = works.filter { $0.cachedCandidates == nil }
+
+            for work in cachedWorks {
+                let candidates = work.cachedCandidates ?? []
+                scannedLocalIdentifiers.insert(work.localIdentifier)
+                for candidate in candidates {
+                    cachedLookup[candidate, default: []].insert(work.localIdentifier)
+                }
+            }
+
+            func absorbDeletedPage(_ backupIds: [String]) {
+                for backupId in backupIds {
+                    guard deletedBackupIds.insert(backupId).inserted else { continue }
+                    guard let localIds = cachedLookup[backupId], !localIds.isEmpty else { continue }
+                    let before = deletedLocalIdentifiers.count
+                    deletedLocalIdentifiers.formUnion(localIds)
+                    if deletedLocalIdentifiers.count != before {
+                        onMatchesUpdated(deletedLocalIdentifiers)
+                    }
+                }
+            }
+
+            absorbDeletedPage(firstPage.backupIds)
+            var nextAfter = firstPage.nextAfter
+            while let after = nextAfter, !after.isEmpty {
+                try Task.checkCancellation()
+                let page = try await deletedBackupsListWithRetry(limit: deletedPageLimit, after: after)
+                absorbDeletedPage(page.backupIds)
+                nextAfter = page.nextAfter
+            }
+
+            processed = min(total, processed + cachedWorks.count)
+            onProgress(processed, total)
+
+            for work in uncachedWorks {
+                try Task.checkCancellation()
+                do {
+                    let exported = try await exportAndComputeAssetIdCandidatesKeepingFile(
+                        resource: work.resource,
+                        asset: work.asset,
+                        userId: userId
+                    )
+                    defer { try? FileManager.default.removeItem(at: exported.normalizedURL) }
+                    if exported.candidates.isEmpty {
+                        skipped += 1
+                    } else {
+                        SyncRepository.shared.setCachedBackupIdCandidates(
+                            userId: userId,
+                            localIdentifier: work.localIdentifier,
+                            fingerprint: work.fingerprint,
+                            candidates: exported.candidates
+                        )
+                        scannedLocalIdentifiers.insert(work.localIdentifier)
+                        if exported.candidates.contains(where: deletedBackupIds.contains) {
+                            if deletedLocalIdentifiers.insert(work.localIdentifier).inserted {
+                                onMatchesUpdated(deletedLocalIdentifiers)
+                            }
+                        }
+                    }
+                } catch let cancelError as CancellationError {
+                    throw cancelError
+                } catch {
+                    skipped += 1
+                }
+                processed += 1
+                onProgress(processed, total)
+            }
+        } else {
+            struct PendingMatchWork {
+                let localIdentifier: String
+                let fingerprint: String
+                let candidates: [String]
+            }
+
+            func processMatchBatch(_ batch: [PendingMatchWork]) async throws {
+                guard !batch.isEmpty else { return }
+                let queryIds = Array(Set(batch.flatMap(\.candidates)))
+                let deletedMatches = try await matchDeletedBackupsWithRetry(queryIds)
+                for work in batch {
+                    scannedLocalIdentifiers.insert(work.localIdentifier)
+                    if work.candidates.contains(where: deletedMatches.contains) {
+                        if deletedLocalIdentifiers.insert(work.localIdentifier).inserted {
+                            onMatchesUpdated(deletedLocalIdentifiers)
+                        }
+                    }
+                }
+            }
+
+            var pendingBatch: [PendingMatchWork] = []
+            pendingBatch.reserveCapacity(32)
+            var pendingQueryIds: Set<String> = []
+
+            func flushPendingBatch() async throws {
+                try await processMatchBatch(pendingBatch)
+                processed += pendingBatch.count
+                onProgress(processed, total)
+                pendingBatch.removeAll(keepingCapacity: true)
+                pendingQueryIds.removeAll(keepingCapacity: true)
+            }
+
+            for work in works {
+                try Task.checkCancellation()
+                if let cached = work.cachedCandidates, !cached.isEmpty {
+                    pendingBatch.append(
+                        PendingMatchWork(
+                            localIdentifier: work.localIdentifier,
+                            fingerprint: work.fingerprint,
+                            candidates: cached
+                        )
+                    )
+                    pendingQueryIds.formUnion(cached)
+                    if pendingQueryIds.count >= matchBatchLimit || pendingBatch.count >= 64 {
+                        try await flushPendingBatch()
+                    }
+                    continue
+                }
+
+                do {
+                    let exported = try await exportAndComputeAssetIdCandidatesKeepingFile(
+                        resource: work.resource,
+                        asset: work.asset,
+                        userId: userId
+                    )
+                    defer { try? FileManager.default.removeItem(at: exported.normalizedURL) }
+                    if exported.candidates.isEmpty {
+                        skipped += 1
+                        processed += 1
+                        onProgress(processed, total)
+                        continue
+                    }
+                    SyncRepository.shared.setCachedBackupIdCandidates(
+                        userId: userId,
+                        localIdentifier: work.localIdentifier,
+                        fingerprint: work.fingerprint,
+                        candidates: exported.candidates
+                    )
+                    pendingBatch.append(
+                        PendingMatchWork(
+                            localIdentifier: work.localIdentifier,
+                            fingerprint: work.fingerprint,
+                            candidates: exported.candidates
+                        )
+                    )
+                    pendingQueryIds.formUnion(exported.candidates)
+                    if pendingQueryIds.count >= matchBatchLimit || pendingBatch.count >= 24 {
+                        try await flushPendingBatch()
+                    }
+                } catch let cancelError as CancellationError {
+                    throw cancelError
+                } catch {
+                    skipped += 1
+                    processed += 1
+                    onProgress(processed, total)
+                }
+            }
+
+            if !pendingBatch.isEmpty {
+                try await flushPendingBatch()
+            }
+        }
+
+        let deletedSet = deletedLocalIdentifiers
+        let clearSet = scannedLocalIdentifiers.subtracting(deletedSet)
+        _ = SyncRepository.shared.setCloudStatusForLocalIdentifiers(
+            deletedSet,
+            status: .deletedInCloud,
+            checkedAt: checkedAt,
+            emitNotification: false
+        )
+        _ = SyncRepository.shared.setCloudStatusForLocalIdentifiers(
+            clearSet,
+            status: .unknown,
+            emitNotification: false
+        )
+        DispatchQueue.main.async {
+            NotificationCenter.default.post(
+                name: SyncRepository.cloudBulkStatusChangedNotification,
+                object: nil
+            )
+        }
+        onMatchesUpdated(deletedLocalIdentifiers)
+
+        return DeletedCloudListResult(
+            scanned: scannedLocalIdentifiers.count,
+            deleted: deletedLocalIdentifiers.count,
+            skipped: skipped,
+            deletedLocalIdentifiers: deletedLocalIdentifiers,
+            scannedLocalIdentifiers: scannedLocalIdentifiers,
+            serverDeletedTotal: serverDeletedTotal,
+            usedServerFirst: useServerFirst
+        )
+    }
+
+    private func existsWithRetry(backupIds: [String]) async throws -> CloudExistsMatches {
         try Task.checkCancellation()
         do {
-            return try await ServerPhotosService.shared.existsFullyBackedUp(backupIds: backupIds)
+            return try await ServerPhotosService.shared.existsMatches(
+                backupIds: backupIds,
+                includeDeletedMatches: true
+            )
         } catch {
             if isRetryableNetworkError(error) {
                 try Task.checkCancellation()
                 try await Task.sleep(nanoseconds: 700_000_000)
                 try Task.checkCancellation()
-                return try await ServerPhotosService.shared.existsFullyBackedUp(backupIds: backupIds)
+                return try await ServerPhotosService.shared.existsMatches(
+                    backupIds: backupIds,
+                    includeDeletedMatches: true
+                )
             }
             throw error
         }
@@ -252,6 +572,36 @@ final class CloudBackupCheckService {
             }
         }
         return false
+    }
+
+    private func deletedBackupsListWithRetry(limit: Int, after: String?) async throws -> DeletedBackupsPage {
+        try Task.checkCancellation()
+        do {
+            return try await ServerPhotosService.shared.listDeletedBackups(limit: limit, after: after)
+        } catch {
+            if isRetryableNetworkError(error) {
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: 700_000_000)
+                try Task.checkCancellation()
+                return try await ServerPhotosService.shared.listDeletedBackups(limit: limit, after: after)
+            }
+            throw error
+        }
+    }
+
+    private func matchDeletedBackupsWithRetry(_ backupIds: [String]) async throws -> Set<String> {
+        try Task.checkCancellation()
+        do {
+            return try await ServerPhotosService.shared.matchDeletedBackups(backupIds)
+        } catch {
+            if isRetryableNetworkError(error) {
+                try Task.checkCancellation()
+                try await Task.sleep(nanoseconds: 700_000_000)
+                try Task.checkCancellation()
+                return try await ServerPhotosService.shared.matchDeletedBackups(backupIds)
+            }
+            throw error
+        }
     }
 
     // MARK: - Resource selection (match uploader's intent)

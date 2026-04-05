@@ -22,6 +22,37 @@ import okhttp3.Response;
 
 /** Minimal server API wrappers for albums/faces/search/media. */
 public final class ServerPhotosService {
+    public static final class ExistsMatchesResult {
+        public final java.util.Set<String> presentAssetIds;
+        public final java.util.Set<String> presentBackupIds;
+        public final java.util.Set<String> deletedAssetIds;
+        public final java.util.Set<String> deletedBackupIds;
+
+        public ExistsMatchesResult(
+                @Nullable java.util.Set<String> presentAssetIds,
+                @Nullable java.util.Set<String> presentBackupIds,
+                @Nullable java.util.Set<String> deletedAssetIds,
+                @Nullable java.util.Set<String> deletedBackupIds
+        ) {
+            this.presentAssetIds = presentAssetIds != null ? presentAssetIds : new java.util.HashSet<>();
+            this.presentBackupIds = presentBackupIds != null ? presentBackupIds : new java.util.HashSet<>();
+            this.deletedAssetIds = deletedAssetIds != null ? deletedAssetIds : new java.util.HashSet<>();
+            this.deletedBackupIds = deletedBackupIds != null ? deletedBackupIds : new java.util.HashSet<>();
+        }
+    }
+
+    public static final class DeletedBackupsPageResult {
+        public final int total;
+        public final java.util.List<String> backupIds;
+        @Nullable public final String nextAfter;
+
+        public DeletedBackupsPageResult(int total, @Nullable java.util.List<String> backupIds, @Nullable String nextAfter) {
+            this.total = total;
+            this.backupIds = backupIds != null ? backupIds : new java.util.ArrayList<>();
+            this.nextAfter = nextAfter;
+        }
+    }
+
     private final Context app;
     public ServerPhotosService(Context app) { this.app = app.getApplicationContext(); }
 
@@ -134,21 +165,91 @@ public final class ServerPhotosService {
 
     /** Returns subset of backup IDs that are fully backed up server-side. */
     public java.util.Set<String> existsFullyBackedUpByBackupIds(@Nullable java.util.List<String> backupIds) throws IOException {
-        java.util.HashSet<String> out = new java.util.HashSet<>();
-        if (backupIds == null || backupIds.isEmpty()) return out;
+        return existsMatches(null, backupIds, false).presentBackupIds;
+    }
+
+    public ExistsMatchesResult existsMatchesByBackupIds(
+            @Nullable java.util.List<String> backupIds,
+            boolean includeDeletedMatches
+    ) throws IOException {
+        return existsMatches(null, backupIds, includeDeletedMatches);
+    }
+
+    public ExistsMatchesResult existsMatches(
+            @Nullable java.util.List<String> assetIds,
+            @Nullable java.util.List<String> backupIds,
+            boolean includeDeletedMatches
+    ) throws IOException {
         JSONObject body = new JSONObject();
         try {
-            JSONArray arr = new JSONArray();
-            for (String id : backupIds) {
-                if (id != null && !id.isEmpty()) arr.put(id);
+            JSONArray assetArr = new JSONArray();
+            if (assetIds != null) {
+                for (String id : assetIds) {
+                    if (id != null && !id.isEmpty()) assetArr.put(id);
+                }
             }
-            body.put("backup_ids", arr);
+            JSONArray backupArr = new JSONArray();
+            if (backupIds != null) {
+                for (String id : backupIds) {
+                    if (id != null && !id.isEmpty()) backupArr.put(id);
+                }
+            }
+            body.put("asset_ids", assetArr);
+            body.put("backup_ids", backupArr);
+            body.put("include_deleted_matches", includeDeletedMatches);
         } catch (Exception ignored) {}
         JSONObject resp = postJson("/api/photos/exists", body);
-        JSONArray present = resp.optJSONArray("present_backup_ids");
-        if (present == null) return out;
-        for (int i = 0; i < present.length(); i++) {
-            String id = present.optString(i, "");
+        return new ExistsMatchesResult(
+                jsonArrayToSet(resp.optJSONArray("present_asset_ids")),
+                jsonArrayToSet(resp.optJSONArray("present_backup_ids")),
+                jsonArrayToSet(resp.optJSONArray("deleted_asset_ids")),
+                jsonArrayToSet(resp.optJSONArray("deleted_backup_ids"))
+        );
+    }
+
+    public DeletedBackupsPageResult listDeletedBackups(int limit, @Nullable String after) throws IOException {
+        okhttp3.HttpUrl.Builder hb = okhttp3.HttpUrl.parse(url("/api/photos/deleted-backups")).newBuilder();
+        hb.addQueryParameter("limit", String.valueOf(Math.max(1, Math.min(limit, 1000))));
+        if (after != null && !after.isEmpty()) hb.addQueryParameter("after", after);
+        Request req = new Request.Builder().url(hb.build()).get().build();
+        try (Response r = AuthorizedHttpClient.get(app).raw().newCall(req).execute()) {
+            String s = r.body() != null ? r.body().string() : "{}";
+            if (!r.isSuccessful()) throw new IOException("HTTP " + r.code() + (s.isEmpty() ? "" : (" - " + s)));
+            JSONObject resp;
+            try { resp = new JSONObject(s.isEmpty() ? "{}" : s); } catch (Exception e) { throw new IOException("Bad JSON", e); }
+            java.util.ArrayList<String> ids = new java.util.ArrayList<>();
+            JSONArray arr = resp.optJSONArray("backup_ids");
+            if (arr != null) {
+                for (int i = 0; i < arr.length(); i++) {
+                    String id = arr.optString(i, "");
+                    if (!id.isEmpty()) ids.add(id);
+                }
+            }
+            String nextAfter = resp.optString("next_after", "");
+            if (nextAfter != null && nextAfter.isEmpty()) nextAfter = null;
+            return new DeletedBackupsPageResult(resp.optInt("total", 0), ids, nextAfter);
+        }
+    }
+
+    public java.util.Set<String> matchDeletedBackups(@Nullable java.util.List<String> backupIds) throws IOException {
+        if (backupIds == null || backupIds.isEmpty()) return new java.util.HashSet<>();
+        JSONObject body = new JSONObject();
+        try {
+            JSONArray backupArr = new JSONArray();
+            for (String id : backupIds) {
+                if (id != null && !id.isEmpty()) backupArr.put(id);
+            }
+            body.put("backup_ids", backupArr);
+        } catch (Exception ignored) {}
+        JSONObject resp = postJson("/api/photos/deleted-backups/match", body);
+        return jsonArrayToSet(resp.optJSONArray("deleted_backup_ids"));
+    }
+
+    private static java.util.Set<String> jsonArrayToSet(@Nullable JSONArray arr) {
+        java.util.HashSet<String> out = new java.util.HashSet<>();
+        if (arr == null) return out;
+        for (int i = 0; i < arr.length(); i++) {
+            String id = arr.optString(i, "");
             if (!id.isEmpty()) out.add(id);
         }
         return out;
@@ -206,6 +307,28 @@ public final class ServerPhotosService {
             body.put("asset_ids", arr);
         } catch (Exception ignored) {}
         return postJson("/api/photos/delete", body);
+    }
+
+    /** Restore trashed photos by asset ids. */
+    public JSONObject restorePhotos(java.util.List<String> assetIds) throws IOException {
+        JSONObject body = new JSONObject();
+        try {
+            JSONArray arr = new JSONArray();
+            for (String id : assetIds) arr.put(id);
+            body.put("asset_ids", arr);
+        } catch (Exception ignored) {}
+        return postJson("/api/photos/restore", body);
+    }
+
+    /** Permanently purge specific trashed photos by asset ids. */
+    public JSONObject purgePhotos(java.util.List<String> assetIds) throws IOException {
+        JSONObject body = new JSONObject();
+        try {
+            JSONArray arr = new JSONArray();
+            for (String id : assetIds) arr.put(id);
+            body.put("asset_ids", arr);
+        } catch (Exception ignored) {}
+        return postJson("/api/photos/purge", body);
     }
 
     /** Permanently purge all items currently in trash for the authenticated user. */

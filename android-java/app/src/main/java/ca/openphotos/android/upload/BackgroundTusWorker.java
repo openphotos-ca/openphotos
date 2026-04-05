@@ -367,6 +367,9 @@ public class BackgroundTusWorker extends Worker {
 
 /** Simple processor that uploads a single queued UploadEntity using TusUploadManager. */
 class TusQueueProcessor {
+    private static final String TAG = "OpenPhotosMotion";
+    private static final long PAIRED_STILL_WAIT_MS = 30_000L;
+    private static final long PAIRED_STILL_POLL_MS = 150L;
     private final Context app;
     private final int chunkSizeBytes;
     TusQueueProcessor(Context app, int chunkSizeBytes) {
@@ -378,6 +381,13 @@ class TusQueueProcessor {
         // Queue processor supports both unlocked and locked rows.
         File file = new File(e.tempFilePath);
         if (!file.exists()) throw new FileNotFoundException(e.tempFilePath);
+        if (shouldSkipPairedMotionUpload(e)) {
+            Log.i(TAG, "paired-motion skip contentId=" + e.contentId
+                    + " uploadId=" + e.id
+                    + " file=" + e.filename
+                    + " reason=still_already_terminal");
+            return;
+        }
         TusUploadManager mgr = new TusUploadManager(app, chunkSizeBytes);
         if (e.isLocked) {
             java.util.Map<String,String> meta = new java.util.HashMap<>();
@@ -400,6 +410,46 @@ class TusQueueProcessor {
                 ph.creationTs = fileTs > 0 ? fileTs : (System.currentTimeMillis() / 1000L);
             }
             mgr.uploadUnlockedQueued(file, ph, e.albumPathsJson, e);
+        }
+    }
+
+    private boolean shouldSkipPairedMotionUpload(UploadEntity e) throws InterruptedException {
+        if (e == null || e.isLocked || !e.isVideo || e.contentId == null || e.contentId.trim().isEmpty()) {
+            return false;
+        }
+
+        AppDatabase db = AppDatabase.get(app);
+        UploadDao uploadDao = db.uploadDao();
+        PhotoDao photoDao = db.photoDao();
+        long deadline = System.currentTimeMillis() + PAIRED_STILL_WAIT_MS;
+        boolean sawSiblingStill = false;
+
+        while (true) {
+            UploadEntity siblingStill = null;
+            java.util.List<UploadEntity> rows = uploadDao.listByContentId(e.contentId);
+            for (UploadEntity row : rows) {
+                if (row == null || row.id == e.id || row.isVideo) continue;
+                sawSiblingStill = true;
+                if (siblingStill == null || row.id < siblingStill.id) siblingStill = row;
+            }
+            if (!sawSiblingStill || siblingStill == null) {
+                return false;
+            }
+
+            if (siblingStill.status == 0 || siblingStill.status == 1) {
+                if (System.currentTimeMillis() >= deadline) {
+                    Log.w(TAG, "paired-motion wait timeout contentId=" + e.contentId
+                            + " uploadId=" + e.id
+                            + " siblingUploadId=" + siblingStill.id
+                            + " siblingStatus=" + siblingStill.status);
+                    return false;
+                }
+                Thread.sleep(PAIRED_STILL_POLL_MS);
+                continue;
+            }
+
+            PhotoEntity photo = photoDao.getByContentId(e.contentId);
+            return photo != null && photo.syncState == 2;
         }
     }
 }

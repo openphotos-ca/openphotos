@@ -78,6 +78,9 @@ struct GalleryView: View {
                         onCloudCheckCurrentSelection: {
                             viewModel.startCloudCheck(scope: .currentSelection)
                         },
+                        onCloudCheckListDeleted: {
+                            viewModel.startCloudCheck(scope: .listDeleted)
+                        },
                         onCloudCheckCancel: {
                             // No-op. Kept to show explicit Cancel row in menu.
                         },
@@ -637,6 +640,7 @@ struct GalleryAppBar: View {
     let onCloudCheck: () -> Void
     let onCloudCheckAll: () -> Void
     let onCloudCheckCurrentSelection: () -> Void
+    let onCloudCheckListDeleted: () -> Void
     let onCloudCheckCancel: () -> Void
     let onSelect: () -> Void
     
@@ -682,6 +686,7 @@ struct GalleryAppBar: View {
                 Menu {
                     Button("Check all photos", action: onCloudCheckAll)
                     Button("Check Current Selection", action: onCloudCheckCurrentSelection)
+                    Button("List Deleted", action: onCloudCheckListDeleted)
                     Button("Cancel", action: onCloudCheckCancel)
                 } label: {
                     Image(systemName: "cloud")
@@ -1200,6 +1205,8 @@ struct ActiveFilterBar: View {
                 label = viewModel.selectedTimeRange.displayName
             case .missingInCloud:
                 label = "Missing in Cloud"
+            case .deletedInCloud:
+                label = "Deleted in Cloud"
             }
             filters.append((
                 id: "filter",

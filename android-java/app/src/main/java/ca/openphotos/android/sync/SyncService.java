@@ -10,6 +10,7 @@ import android.os.Build;
 import android.provider.MediaStore;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
 import androidx.core.content.ContextCompat;
 
 import ca.openphotos.android.core.AuthManager;
@@ -22,6 +23,9 @@ import ca.openphotos.android.media.AlbumPathUtil;
 import ca.openphotos.android.media.MotionPhotoSupport;
 import ca.openphotos.android.prefs.SyncFoldersPreferences;
 import ca.openphotos.android.prefs.SyncPreferences;
+import ca.openphotos.android.ui.local.BackupIdUtil;
+import ca.openphotos.android.ui.local.LocalCloudCacheStore;
+import ca.openphotos.android.ui.local.LocalMediaItem;
 import ca.openphotos.android.upload.SyncConcurrencyPolicy;
 import ca.openphotos.android.upload.UploadExecutionTracker;
 import ca.openphotos.android.upload.UploadOrchestrator;
@@ -66,6 +70,7 @@ public final class SyncService {
     private final UploadDao uploadDao;
     private final SyncPreferences prefs;
     private final SyncFoldersPreferences folderPrefs;
+    private final LocalCloudCacheStore localCloudCache;
     private final ExecutorService serial = Executors.newSingleThreadExecutor();
 
     private final Object runLock = new Object();
@@ -84,6 +89,7 @@ public final class SyncService {
         this.uploadDao = db.uploadDao();
         this.prefs = new SyncPreferences(this.app);
         this.folderPrefs = new SyncFoldersPreferences(this.app);
+        this.localCloudCache = new LocalCloudCacheStore(this.app);
     }
 
     public static SyncService get(Context app) {
@@ -410,6 +416,7 @@ public final class SyncService {
                 photoDao.markBackgroundQueued(contentId, nowSec);
             } else {
                 File tmp = exportToCache(c.uri, guessExtension(c.mime));
+                warmBackupIdCache(c, tmp);
                 enqueueUnlockedUploadRow(contentId, tmp, c.displayName, c.isVideo, c.albumPathsJson, c.mime);
                 rowsEnqueuedForCandidate++;
                 if (motionVideo != null && motionVideo.exists() && motionVideo.length() > 0) {
@@ -471,6 +478,28 @@ public final class SyncService {
         ue.albumPathsJson = prefs.preserveAlbum() ? albumPathsJson : null;
         ue.lockedMetadataJson = null;
         uploadDao.upsert(ue);
+    }
+
+    private void warmBackupIdCache(@NonNull Candidate candidate, @NonNull File exportedFile) {
+        String userId = AuthManager.get(app).getUserId();
+        if (userId == null || userId.trim().isEmpty()) return;
+        LocalMediaItem item = candidate.asLocalMediaItem();
+        String fingerprint = BackupIdUtil.fingerprint(item);
+        java.util.List<String> candidates = BackupIdUtil.computeBackupIdCandidatesForFile(
+                app,
+                exportedFile,
+                candidate.mime != null ? candidate.mime : "",
+                candidate.displayName != null ? candidate.displayName : exportedFile.getName(),
+                candidate.isVideo,
+                userId
+        );
+        if (candidates.isEmpty()) return;
+        localCloudCache.put(candidate.localId, new LocalCloudCacheStore.Entry(
+                fingerprint,
+                candidates,
+                LocalCloudCacheStore.STATE_UNKNOWN,
+                0L
+        ));
     }
 
     private String preferredUploadFilename(String displayName, String fallbackName, String mimeType, boolean isVideo) {
@@ -719,6 +748,16 @@ public final class SyncService {
                 cd.localId = uri.toString();
                 cd.isVideo = false;
                 cd.createdAt = dateTakenMs > 0 ? (dateTakenMs / 1000L) : dateAddedSec;
+                cd.dateModifiedSec = c.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED) >= 0
+                        ? c.getLong(c.getColumnIndex(MediaStore.Images.Media.DATE_MODIFIED))
+                        : 0L;
+                cd.width = c.getColumnIndex(MediaStore.Images.Media.WIDTH) >= 0
+                        ? c.getInt(c.getColumnIndex(MediaStore.Images.Media.WIDTH))
+                        : 0;
+                cd.height = c.getColumnIndex(MediaStore.Images.Media.HEIGHT) >= 0
+                        ? c.getInt(c.getColumnIndex(MediaStore.Images.Media.HEIGHT))
+                        : 0;
+                cd.durationMs = 0L;
                 cd.relPath = norm;
                 cd.mime = mime;
                 cd.displayName = displayName;
@@ -792,6 +831,18 @@ public final class SyncService {
                 cd.localId = uri.toString();
                 cd.isVideo = true;
                 cd.createdAt = dateTakenMs > 0 ? (dateTakenMs / 1000L) : dateAddedSec;
+                cd.dateModifiedSec = c.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED) >= 0
+                        ? c.getLong(c.getColumnIndex(MediaStore.Video.Media.DATE_MODIFIED))
+                        : 0L;
+                cd.width = c.getColumnIndex(MediaStore.Video.Media.WIDTH) >= 0
+                        ? c.getInt(c.getColumnIndex(MediaStore.Video.Media.WIDTH))
+                        : 0;
+                cd.height = c.getColumnIndex(MediaStore.Video.Media.HEIGHT) >= 0
+                        ? c.getInt(c.getColumnIndex(MediaStore.Video.Media.HEIGHT))
+                        : 0;
+                cd.durationMs = c.getColumnIndex(MediaStore.Video.Media.DURATION) >= 0
+                        ? c.getLong(c.getColumnIndex(MediaStore.Video.Media.DURATION))
+                        : 0L;
                 cd.relPath = norm;
                 cd.mime = mime;
                 cd.displayName = displayName;
@@ -1008,12 +1059,36 @@ public final class SyncService {
         String localId;
         boolean isVideo;
         long createdAt;
+        long dateModifiedSec;
         long sizeBytes;
+        long durationMs;
+        int width;
+        int height;
         String relPath;
         String displayName;
         String albumPathsJson;
         boolean locked;
         boolean unassigned;
         String mime;
+
+        LocalMediaItem asLocalMediaItem() {
+            return new LocalMediaItem(
+                    localId,
+                    uri != null ? uri.toString() : localId,
+                    displayName != null ? displayName : "",
+                    mime != null ? mime : "",
+                    relPath != null ? relPath : "",
+                    isVideo,
+                    createdAt,
+                    dateModifiedSec,
+                    sizeBytes,
+                    durationMs,
+                    width,
+                    height,
+                    false,
+                    false,
+                    false
+            );
+        }
     }
 }

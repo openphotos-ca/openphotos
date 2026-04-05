@@ -36,6 +36,7 @@ struct UploadItem: Identifiable, Hashable {
 
     // Unlocked/plain uploads: precomputed asset_id (Base58 HMAC) used for preflight skip and upload metadata.
     var assetId: String?
+    var backupId: String?
 
     // Locked upload fields (optional). When set, uploader must send locked metadata and encrypted blob.
     var isLocked: Bool = false
@@ -62,6 +63,7 @@ struct UploadItem: Identifiable, Hashable {
          tusURL: URL? = nil,
          tempFileURL: URL,
          assetId: String? = nil,
+         backupId: String? = nil,
          isLocked: Bool = false,
          lockedKind: String? = nil,
          assetIdB58: String? = nil,
@@ -86,6 +88,7 @@ struct UploadItem: Identifiable, Hashable {
         self.tusURL = tusURL
         self.tempFileURL = tempFileURL
         self.assetId = assetId
+        self.backupId = backupId
         self.isLocked = isLocked
         self.lockedKind = lockedKind
         self.assetIdB58 = assetIdB58

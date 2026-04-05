@@ -391,11 +391,13 @@ public class LocalPhotosFragment extends Fragment {
             PopupMenu pm = new PopupMenu(requireContext(), v);
             pm.getMenu().add(Menu.NONE, 1, 1, "Check all photos");
             pm.getMenu().add(Menu.NONE, 2, 2, "Check current selection");
-            pm.getMenu().add(Menu.NONE, 3, 3, "Cancel");
+            pm.getMenu().add(Menu.NONE, 3, 3, "List Deleted");
+            pm.getMenu().add(Menu.NONE, 4, 4, "Cancel");
             pm.setOnMenuItemClickListener(item -> {
                 if (item.getItemId() == 1) vm.startCloudCheckAll();
                 if (item.getItemId() == 2) vm.startCloudCheckCurrentSelection();
-                if (item.getItemId() == 3) return true;
+                if (item.getItemId() == 3) vm.startCloudCheckListDeleted();
+                if (item.getItemId() == 4) return true;
                 return true;
             });
             pm.show();
@@ -554,11 +556,13 @@ public class LocalPhotosFragment extends Fragment {
         MenuItem iScreenshots = m.add(Menu.NONE, 2, 2, "Screenshots");
         MenuItem iLive = m.add(Menu.NONE, 3, 3, "Live Photos");
         MenuItem iMissing = m.add(Menu.NONE, 4, 4, "Missing in Cloud");
+        MenuItem iDeleted = m.add(Menu.NONE, 5, 5, "Deleted in Cloud");
 
         iDate.setCheckable(false);
         iScreenshots.setCheckable(true).setChecked(vm.isFilterScreenshots());
         iLive.setCheckable(true).setChecked(vm.isFilterLive());
         iMissing.setCheckable(true).setChecked(vm.isFilterMissingCloud());
+        iDeleted.setCheckable(true).setChecked(vm.isFilterDeletedCloud());
 
         pm.setOnMenuItemClickListener(item -> {
             if (item.getItemId() == 1) {
@@ -575,6 +579,10 @@ public class LocalPhotosFragment extends Fragment {
             }
             if (item.getItemId() == 4) {
                 vm.setFilterMissingCloud(!vm.isFilterMissingCloud());
+                return true;
+            }
+            if (item.getItemId() == 5) {
+                vm.setFilterDeletedCloud(!vm.isFilterDeletedCloud());
                 return true;
             }
             return false;

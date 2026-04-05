@@ -4,6 +4,35 @@ import AVFoundation
 import ImageIO
 import UniformTypeIdentifiers
 
+struct CloudExistsMatches {
+    let presentAssetIds: Set<String>
+    let presentBackupIds: Set<String>
+    let deletedAssetIds: Set<String>
+    let deletedBackupIds: Set<String>
+
+    static let empty = CloudExistsMatches(
+        presentAssetIds: [],
+        presentBackupIds: [],
+        deletedAssetIds: [],
+        deletedBackupIds: []
+    )
+
+    func union(_ other: CloudExistsMatches) -> CloudExistsMatches {
+        CloudExistsMatches(
+            presentAssetIds: presentAssetIds.union(other.presentAssetIds),
+            presentBackupIds: presentBackupIds.union(other.presentBackupIds),
+            deletedAssetIds: deletedAssetIds.union(other.deletedAssetIds),
+            deletedBackupIds: deletedBackupIds.union(other.deletedBackupIds)
+        )
+    }
+}
+
+struct DeletedBackupsPage {
+    let total: Int
+    let backupIds: [String]
+    let nextAfter: String?
+}
+
 /// ServerPhotosService wraps the server photo/album APIs used by the server-backed Photos tab.
 /// It uses AuthorizedHTTPClient to include auth headers and token refresh.
 final class ServerPhotosService {
@@ -415,6 +444,22 @@ final class ServerPhotosService {
         _ = try await AuthorizedHTTPClient.shared.request(req)
     }
 
+    func purgePhotos(assetIds: [String]) async throws -> Int {
+        struct Req: Encodable { let asset_ids: [String] }
+        struct Resp: Decodable { let purged: Int }
+        let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/photos/purge")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Req(asset_ids: assetIds))
+        let (data, http) = try await AuthorizedHTTPClient.shared.request(req)
+        guard (200..<300).contains(http.statusCode) else {
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "HTTP", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: body])
+        }
+        return (try? JSONDecoder().decode(Resp.self, from: data).purged) ?? 0
+    }
+
     func emptyTrash() async throws -> Int {
         struct Resp: Decodable { let purged: Int }
         let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/photos/purge-all")
@@ -548,30 +593,88 @@ final class ServerPhotosService {
 
     // MARK: - Cloud Existence
 
+    func existsMatches(
+        assetIds: [String] = [],
+        backupIds: [String] = [],
+        includeDeletedMatches: Bool = false
+    ) async throws -> CloudExistsMatches {
+        struct Req: Encodable {
+            let asset_ids: [String]
+            let backup_ids: [String]
+            let include_deleted_matches: Bool
+        }
+        struct Resp: Decodable {
+            let present_asset_ids: [String]?
+            let present_backup_ids: [String]?
+            let deleted_asset_ids: [String]?
+            let deleted_backup_ids: [String]?
+        }
+
+        guard !assetIds.isEmpty || !backupIds.isEmpty else {
+            return .empty
+        }
+
+        let resp: Resp = try await AuthorizedHTTPClient.shared.postJSON(
+            path: "/api/photos/exists",
+            body: Req(
+                asset_ids: assetIds,
+                backup_ids: backupIds,
+                include_deleted_matches: includeDeletedMatches
+            )
+        )
+        return CloudExistsMatches(
+            presentAssetIds: Set(resp.present_asset_ids ?? []),
+            presentBackupIds: Set(resp.present_backup_ids ?? []),
+            deletedAssetIds: Set(resp.deleted_asset_ids ?? []),
+            deletedBackupIds: Set(resp.deleted_backup_ids ?? [])
+        )
+    }
+
     /// Returns the subset of `assetIds` that exist on the server and are considered "fully backed up"
     /// (not in Trash; locked items require both orig+thumb).
     func existsFullyBackedUp(assetIds: [String]) async throws -> Set<String> {
-        struct Req: Encodable { let asset_ids: [String] }
-        struct Resp: Decodable { let present_asset_ids: [String] }
-        guard !assetIds.isEmpty else { return [] }
-        let resp: Resp = try await AuthorizedHTTPClient.shared.postJSON(
-            path: "/api/photos/exists",
-            body: Req(asset_ids: assetIds)
-        )
-        return Set(resp.present_asset_ids)
+        let matches = try await existsMatches(assetIds: assetIds)
+        return matches.presentAssetIds
     }
 
     /// Returns the subset of `backupIds` that exist on the server and are considered "fully backed up"
     /// (not in Trash; locked items require both orig+thumb). This uses the server's `photos.backup_id`.
     func existsFullyBackedUp(backupIds: [String]) async throws -> Set<String> {
+        let matches = try await existsMatches(backupIds: backupIds)
+        return matches.presentBackupIds
+    }
+
+    func listDeletedBackups(limit: Int = 500, after: String? = nil) async throws -> DeletedBackupsPage {
+        struct Resp: Decodable {
+            let total: Int
+            let backup_ids: [String]
+            let next_after: String?
+        }
+
+        var query: [String: String] = ["limit": String(max(1, min(limit, 1000)))]
+        if let after, !after.isEmpty {
+            query["after"] = after
+        }
+        let resp: Resp = try await AuthorizedHTTPClient.shared.getJSON(
+            path: "/api/photos/deleted-backups",
+            query: query
+        )
+        return DeletedBackupsPage(
+            total: resp.total,
+            backupIds: resp.backup_ids,
+            nextAfter: resp.next_after
+        )
+    }
+
+    func matchDeletedBackups(_ backupIds: [String]) async throws -> Set<String> {
         struct Req: Encodable { let backup_ids: [String] }
-        struct Resp: Decodable { let present_backup_ids: [String]? }
+        struct Resp: Decodable { let deleted_backup_ids: [String] }
         guard !backupIds.isEmpty else { return [] }
         let resp: Resp = try await AuthorizedHTTPClient.shared.postJSON(
-            path: "/api/photos/exists",
+            path: "/api/photos/deleted-backups/match",
             body: Req(backup_ids: backupIds)
         )
-        return Set(resp.present_backup_ids ?? [])
+        return Set(resp.deleted_backup_ids)
     }
 
     func getPhotosByAssetIds(_ assetIds: [String], includeLocked: Bool = false) async throws -> [ServerPhoto] {

@@ -9,12 +9,14 @@ import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.e2ee.PAE3;
 import ca.openphotos.android.media.Transforms;
 import ca.openphotos.android.prefs.SecurityPreferences;
+import ca.openphotos.android.ui.local.BackupIdUtil;
 import ca.openphotos.android.util.Hashing;
 
 import org.json.JSONObject;
 
 import java.io.File;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -62,6 +64,18 @@ public final class LockedUploadPreparer {
         JSONObject header = meta.headerMeta;
         Map<String,String> tusLocked = jsonToStringMap(meta.tusMeta);
         if (albumPathsJson != null && !albumPathsJson.isEmpty()) tusLocked.put("albums", albumPathsJson);
+
+        List<String> backupIdCandidates = BackupIdUtil.computeBackupIdCandidatesForFile(
+                app,
+                input,
+                mimeHint != null ? mimeHint : "",
+                input.getName(),
+                isVideo,
+                userId
+        );
+        if (!backupIdCandidates.isEmpty()) {
+            tusLocked.put("backup_id", backupIdCandidates.get(0));
+        }
 
         String assetIdB58 = Hashing.assetIdB58FromFile(input, userId);
         // Encrypt orig

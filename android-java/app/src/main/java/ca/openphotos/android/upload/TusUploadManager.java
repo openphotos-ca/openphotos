@@ -5,6 +5,7 @@ import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.util.Log;
 
+import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import ca.openphotos.android.core.AuthManager;
@@ -14,6 +15,7 @@ import ca.openphotos.android.data.db.dao.UploadDao;
 import ca.openphotos.android.data.db.entities.PhotoEntity;
 import ca.openphotos.android.data.db.entities.UploadEntity;
 import ca.openphotos.android.server.ServerPhotosService;
+import ca.openphotos.android.ui.local.BackupIdUtil;
 import ca.openphotos.android.util.Hashing;
 import ca.openphotos.android.util.Logx;
 
@@ -21,7 +23,9 @@ import java.io.File;
 import java.io.IOException;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 
@@ -33,6 +37,33 @@ import io.tus.java.client.TusUploader;
  * Android TUS uploader with Cloudflare-safe request sizing and persisted upload URLs.
  */
 public class TusUploadManager {
+    private static final class UploadPreflightDecision {
+        final boolean shouldSkip;
+        final boolean deleted;
+        @Nullable final String matchedKind;
+        @Nullable final String matchedValue;
+
+        private UploadPreflightDecision(
+                boolean shouldSkip,
+                boolean deleted,
+                @Nullable String matchedKind,
+                @Nullable String matchedValue
+        ) {
+            this.shouldSkip = shouldSkip;
+            this.deleted = deleted;
+            this.matchedKind = matchedKind;
+            this.matchedValue = matchedValue;
+        }
+
+        static UploadPreflightDecision none() {
+            return new UploadPreflightDecision(false, false, null, null);
+        }
+
+        static UploadPreflightDecision skip(boolean deleted, @NonNull String matchedKind, @NonNull String matchedValue) {
+            return new UploadPreflightDecision(true, deleted, matchedKind, matchedValue);
+        }
+    }
+
     private static final String TAG = "TusUpload";
     private static final String SHARED_TAG = "OpenPhotos";
     private static final int DEFAULT_CHUNK_SIZE = 1 * TusAdaptiveChunkController.MIB;
@@ -112,29 +143,41 @@ public class TusUploadManager {
         String contentId = (photo != null && photo.contentId != null && !photo.contentId.isEmpty())
                 ? photo.contentId
                 : Hashing.contentIdFromFile(file);
-        String userId = auth.getUserId();
-        String assetId = (userId != null) ? Hashing.assetIdB58FromFile(file, userId) : null;
-        if (assetId != null && !assetId.isEmpty()) {
-            try {
-                boolean exists = new ServerPhotosService(app).isAssetFullyBackedUp(assetId);
-                if (exists) {
-                    if (markPhotoSyncedOnSuccess) {
-                        long now = System.currentTimeMillis() / 1000L;
-                        photoDao.markSynced(contentId, now);
-                    }
-                    String existingName = chooseUploadFilename(queueRow, originalFilename, originalMimeType, file, photo);
-                    logTusInfo("preflight skip existing asset_id=" + assetId + " file=" + existingName);
-                    return;
-                }
-            } catch (Exception e) {
-                String existingName = chooseUploadFilename(queueRow, originalFilename, originalMimeType, file, photo);
-                logTusWarn("preflight exists failed file=" + existingName + " reason=" + UploadFailurePolicy.summarize(e));
-            }
-        }
-
         String uploadFilename = chooseUploadFilename(queueRow, originalFilename, originalMimeType, file, photo);
         String mime = (photo.mediaType == 1 ? "video" : "image");
         String uploadMime = chooseUploadMime(queueRow, originalMimeType, uploadFilename, mime);
+        String userId = auth.getUserId();
+        String assetId = (userId != null) ? Hashing.assetIdB58FromFile(file, userId) : null;
+        List<String> backupIdCandidates = userId != null
+                ? BackupIdUtil.computeBackupIdCandidatesForFile(
+                        app,
+                        file,
+                        uploadMime,
+                        uploadFilename,
+                        photo.mediaType == 1,
+                        userId
+                )
+                : Collections.emptyList();
+        if ((assetId != null && !assetId.isEmpty()) || !backupIdCandidates.isEmpty()) {
+            try {
+                UploadPreflightDecision decision = resolveUploadPreflight(assetId, backupIdCandidates);
+                if (decision.shouldSkip) {
+                    long now = System.currentTimeMillis() / 1000L;
+                    photoDao.markSynced(contentId, now);
+                    logTusInfo(
+                            "preflight skip "
+                                    + (decision.deleted ? "deleted " : "existing ")
+                                    + (decision.matchedKind != null ? decision.matchedKind : "asset_id")
+                                    + "="
+                                    + (decision.matchedValue != null ? decision.matchedValue : assetId)
+                                    + " file=" + uploadFilename
+                    );
+                    return;
+                }
+            } catch (Exception e) {
+                logTusWarn("preflight exists failed file=" + uploadFilename + " reason=" + UploadFailurePolicy.summarize(e));
+            }
+        }
 
         Map<String, String> meta = new HashMap<>();
         meta.put("filename", uploadFilename);
@@ -143,6 +186,7 @@ public class TusUploadManager {
         meta.put("media_type", mime);
         meta.put("created_at", String.valueOf(photo.creationTs));
         if (assetId != null) meta.put("asset_id", assetId);
+        if (!backupIdCandidates.isEmpty()) meta.put("backup_id", backupIdCandidates.get(0));
         if (albumPathsJson != null && !albumPathsJson.isEmpty()) meta.put("albums", albumPathsJson);
         meta.put("source", "android");
 
@@ -292,14 +336,35 @@ public class TusUploadManager {
             boolean updateQueueStatusOnSuccess
     ) throws Exception {
         String assetId = lockedMeta != null ? lockedMeta.get("asset_id_b58") : null;
-        if (assetId != null && !assetId.isEmpty()) {
+        List<String> backupIds = Collections.emptyList();
+        if (lockedMeta != null) {
+            String backupId = lockedMeta.get("backup_id");
+            if (backupId != null && !backupId.trim().isEmpty()) {
+                backupIds = Collections.singletonList(backupId.trim());
+            }
+        }
+        if ((assetId != null && !assetId.isEmpty()) || !backupIds.isEmpty()) {
             try {
-                boolean exists = new ServerPhotosService(app).isAssetFullyBackedUp(assetId);
-                if (exists) {
+                UploadPreflightDecision decision = resolveUploadPreflight(assetId, backupIds);
+                if (decision.shouldSkip) {
+                    String contentId =
+                            lockedMeta != null
+                                    ? lockedMeta.get("content_id")
+                                    : null;
+                    if (contentId != null && !contentId.trim().isEmpty()) {
+                        photoDao.markSynced(contentId.trim(), System.currentTimeMillis() / 1000L);
+                    }
                     if (updateQueueStatusOnSuccess) {
                         uploadDao.markCompleted(uploadRow.id, pae3File.length());
                     }
-                    logTusInfo("preflight skip existing locked asset_id=" + assetId + " file=" + filename);
+                    logTusInfo(
+                            "preflight skip "
+                                    + (decision.deleted ? "deleted locked " : "existing locked ")
+                                    + (decision.matchedKind != null ? decision.matchedKind : "asset_id")
+                                    + "="
+                                    + (decision.matchedValue != null ? decision.matchedValue : assetId)
+                                    + " file=" + filename
+                    );
                     return;
                 }
             } catch (Exception e) {
@@ -610,6 +675,57 @@ public class TusUploadManager {
             headers.put("Authorization", "Bearer " + auth.getToken());
         }
         client.setHeaders(headers);
+    }
+
+    @NonNull
+    private UploadPreflightDecision resolveUploadPreflight(
+            @Nullable String assetId,
+            @Nullable List<String> backupIds
+    ) throws IOException {
+        java.util.ArrayList<String> assetIds = new java.util.ArrayList<>(1);
+        if (assetId != null && !assetId.trim().isEmpty()) {
+            assetIds.add(assetId.trim());
+        }
+        java.util.ArrayList<String> normalizedBackupIds = new java.util.ArrayList<>();
+        if (backupIds != null) {
+            for (String backupId : backupIds) {
+                if (backupId == null) continue;
+                String trimmed = backupId.trim();
+                if (!trimmed.isEmpty()) normalizedBackupIds.add(trimmed);
+            }
+        }
+        if (assetIds.isEmpty() && normalizedBackupIds.isEmpty()) {
+            return UploadPreflightDecision.none();
+        }
+
+        ServerPhotosService.ExistsMatchesResult matches = new ServerPhotosService(app).existsMatches(
+                assetIds.isEmpty() ? null : assetIds,
+                normalizedBackupIds.isEmpty() ? null : normalizedBackupIds,
+                true
+        );
+
+        for (String backupId : normalizedBackupIds) {
+            if (matches.presentBackupIds.contains(backupId)) {
+                return UploadPreflightDecision.skip(false, "backup_id", backupId);
+            }
+        }
+        for (String candidateAssetId : assetIds) {
+            if (matches.presentAssetIds.contains(candidateAssetId)) {
+                return UploadPreflightDecision.skip(false, "asset_id", candidateAssetId);
+            }
+        }
+        for (String backupId : normalizedBackupIds) {
+            if (matches.deletedBackupIds.contains(backupId)) {
+                return UploadPreflightDecision.skip(true, "backup_id", backupId);
+            }
+        }
+        for (String candidateAssetId : assetIds) {
+            if (matches.deletedAssetIds.contains(candidateAssetId)) {
+                return UploadPreflightDecision.skip(true, "asset_id", candidateAssetId);
+            }
+        }
+
+        return UploadPreflightDecision.none();
     }
 
     @Nullable

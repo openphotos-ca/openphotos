@@ -82,6 +82,41 @@ public final class BackupIdUtil {
         return new ArrayList<>(out);
     }
 
+    @NonNull
+    public static List<String> computeBackupIdCandidatesForFile(
+            @NonNull Context app,
+            @NonNull File file,
+            @NonNull String mimeType,
+            @NonNull String displayName,
+            boolean isVideo,
+            @NonNull String userId
+    ) {
+        Set<String> out = new LinkedHashSet<>();
+        String mime = mimeType.toLowerCase(Locale.US);
+        String lowerName = displayName.toLowerCase(Locale.US);
+        boolean likelyJpeg = mime.contains("jpeg") || mime.contains("jpg") || lowerName.endsWith(".jpg") || lowerName.endsWith(".jpeg");
+        boolean likelyHeic = !isVideo && (mime.contains("heic") || mime.contains("heif") || lowerName.endsWith(".heic") || lowerName.endsWith(".heif"));
+
+        String primary = computeBackupIdForFile(file, userId, likelyJpeg);
+        if (primary != null && !primary.isEmpty()) out.add(primary);
+
+        if (likelyHeic) {
+            File conv = null;
+            try {
+                conv = Transforms.heicToJpeg(app, android.net.Uri.fromFile(file), 0.90f);
+                String alt = computeBackupIdForFile(conv, userId, true);
+                if (alt != null && !alt.isEmpty()) out.add(alt);
+            } catch (Exception ignored) {
+            } finally {
+                if (conv != null) {
+                    try { conv.delete(); } catch (Exception ignored) {}
+                }
+            }
+        }
+
+        return new ArrayList<>(out);
+    }
+
     @Nullable
     private static String computeBackupIdForUri(@NonNull Context app, @NonNull Uri uri, @NonNull String userId, boolean likelyJpeg) {
         try {

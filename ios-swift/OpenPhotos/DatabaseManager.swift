@@ -115,6 +115,7 @@ class DatabaseManager {
                 pixel_height INTEGER,
                 estimated_bytes INTEGER,
                 locked BOOLEAN,
+                cloud_status INTEGER NOT NULL DEFAULT 0,
                 cloud_backed_up BOOLEAN,
                 cloud_checked_at INTEGER,
                 sync_state INTEGER NOT NULL DEFAULT 0,
@@ -196,10 +197,29 @@ class DatabaseManager {
         if !columnExists(table: "photos", column: "cloud_backed_up") {
             _ = executeQuery("ALTER TABLE photos ADD COLUMN cloud_backed_up BOOLEAN")
         }
+        // photos.cloud_status (0=unknown, 1=backed up, 2=deleted in cloud, 3=missing)
+        if !columnExists(table: "photos", column: "cloud_status") {
+            _ = executeQuery("ALTER TABLE photos ADD COLUMN cloud_status INTEGER NOT NULL DEFAULT 0")
+        }
         // photos.cloud_checked_at (unix seconds of last successful check for this asset)
         if !columnExists(table: "photos", column: "cloud_checked_at") {
             _ = executeQuery("ALTER TABLE photos ADD COLUMN cloud_checked_at INTEGER")
         }
+        _ = executeQuery(
+            """
+            UPDATE photos
+            SET cloud_status = CASE
+                WHEN cloud_backed_up = 1 THEN 1
+                WHEN cloud_checked_at IS NOT NULL AND cloud_checked_at > 0 THEN 3
+                ELSE cloud_status
+            END
+            WHERE COALESCE(cloud_status, 0) = 0
+              AND (
+                cloud_backed_up = 1
+                OR (cloud_checked_at IS NOT NULL AND cloud_checked_at > 0)
+              )
+            """
+        )
     }
     
     private func createIndices() {
@@ -213,6 +233,7 @@ class DatabaseManager {
             "CREATE INDEX IF NOT EXISTS idx_photos_media_type ON photos(media_type);",
             "CREATE INDEX IF NOT EXISTS idx_photos_state ON photos(sync_state, sync_at);",
             "CREATE INDEX IF NOT EXISTS idx_photos_local_identifier ON photos(local_identifier);",
+            "CREATE INDEX IF NOT EXISTS idx_photos_cloud_status ON photos(cloud_status);",
             "CREATE INDEX IF NOT EXISTS idx_photos_cloud_backed_up ON photos(cloud_backed_up);",
             // backup_id_cache table
             "CREATE INDEX IF NOT EXISTS idx_backup_id_cache_user ON backup_id_cache(user_id);"

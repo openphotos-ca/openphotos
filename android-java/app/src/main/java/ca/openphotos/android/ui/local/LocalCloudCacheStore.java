@@ -19,16 +19,21 @@ public final class LocalCloudCacheStore {
     private static final String PREF = "local.cloud.cache.v1";
     private static final String PREFIX = "item.";
 
+    public static final int STATE_UNKNOWN = 0;
+    public static final int STATE_BACKED_UP = 1;
+    public static final int STATE_DELETED_IN_CLOUD = 2;
+    public static final int STATE_MISSING = 3;
+
     public static final class Entry {
         @NonNull public final String fingerprint;
         @NonNull public final List<String> candidates;
-        public final boolean backedUp;
+        public final int cloudState;
         public final long checkedAtSec;
 
-        public Entry(@NonNull String fingerprint, @NonNull List<String> candidates, boolean backedUp, long checkedAtSec) {
+        public Entry(@NonNull String fingerprint, @NonNull List<String> candidates, int cloudState, long checkedAtSec) {
             this.fingerprint = fingerprint;
             this.candidates = candidates;
-            this.backedUp = backedUp;
+            this.cloudState = cloudState;
             this.checkedAtSec = checkedAtSec;
         }
     }
@@ -54,10 +59,18 @@ public final class LocalCloudCacheStore {
                     if (!v.isEmpty()) out.add(v);
                 }
             }
-            boolean backed = j.optBoolean("backed_up", false);
             long checked = j.optLong("checked_at", 0L);
+            int cloudState;
+            if (j.has("cloud_state")) {
+                cloudState = j.optInt("cloud_state", STATE_UNKNOWN);
+            } else {
+                boolean backed = j.optBoolean("backed_up", false);
+                if (backed) cloudState = STATE_BACKED_UP;
+                else if (checked > 0) cloudState = STATE_MISSING;
+                else cloudState = STATE_UNKNOWN;
+            }
             if (fp.isEmpty()) return null;
-            return new Entry(fp, out, backed, checked);
+            return new Entry(fp, out, cloudState, checked);
         } catch (Exception ignored) {
             return null;
         }
@@ -70,7 +83,8 @@ public final class LocalCloudCacheStore {
             JSONArray arr = new JSONArray();
             for (String c : entry.candidates) arr.put(c);
             j.put("candidates", arr);
-            j.put("backed_up", entry.backedUp);
+            j.put("cloud_state", entry.cloudState);
+            j.put("backed_up", entry.cloudState == STATE_BACKED_UP);
             j.put("checked_at", entry.checkedAtSec);
             sp.edit().putString(key(localId), j.toString()).apply();
         } catch (Exception ignored) {

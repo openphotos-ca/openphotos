@@ -46,6 +46,49 @@ final class SyncService: NSObject {
         return queue.sync { syncCompletionVersion }
     }
 
+    func resolveAssetsForCurrentSyncScope(preferLiveFetch: Bool = true) -> [PHAsset] {
+        if auth.syncScope != .selectedAlbums {
+            return snapshotAllAssets(preferLiveFetch: preferLiveFetch)
+        }
+
+        let db = DatabaseManager.shared
+        let allowed: [String] = db.executeSelect(
+            """
+            SELECT DISTINCT ap.asset_id
+            FROM album_photos ap
+            WHERE EXISTS (
+                SELECT 1 FROM album_closure ac JOIN albums a ON a.id = ac.ancestor_id
+                WHERE ac.descendant_id = ap.album_id AND a.sync_enabled = 1
+            )
+            """
+        ) { stmt in String(cString: sqlite3_column_text(stmt, 0)) }
+        let selectedIds = Set(allowed)
+        var merged: [PHAsset] = []
+        if !selectedIds.isEmpty {
+            merged = fetchAssetsByLocalIdentifiers(selectedIds)
+        }
+
+        if auth.syncIncludeUnassigned {
+            let inAlbum: Set<String> = Set(
+                db.executeSelect("SELECT DISTINCT asset_id FROM album_photos") { stmt in
+                    String(cString: sqlite3_column_text(stmt, 0))
+                }
+            )
+            let allAssets = snapshotAllAssets(preferLiveFetch: preferLiveFetch)
+            if merged.isEmpty {
+                merged.reserveCapacity(allAssets.count)
+            }
+            var seen = Set(merged.map { $0.localIdentifier })
+            for asset in allAssets where !inAlbum.contains(asset.localIdentifier) {
+                if seen.insert(asset.localIdentifier).inserted {
+                    merged.append(asset)
+                }
+            }
+        }
+
+        return merged
+    }
+
     func syncOnAppOpen() {
         guard auth.syncEnabledAfterManualStart else { return }
         guard auth.autoStartSyncOnOpen else { return }
@@ -314,7 +357,7 @@ final class SyncService: NSObject {
                 let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
                 SyncService.shared.queue.async {
                     SyncService.shared.finalizeAutoCloudCheckCycle(
-                        logLine: "[PERF] cloud-check-auto-done source=\(source) requested_ids=\(requested) eligible_ids=\(identifiers.count) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) checked=\(result.checked) backed_up=\(result.backedUp) missing=\(result.missing) skipped=\(result.skipped)"
+                        logLine: "[PERF] cloud-check-auto-done source=\(source) requested_ids=\(requested) eligible_ids=\(identifiers.count) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) checked=\(result.checked) backed_up=\(result.backedUp) deleted=\(result.deleted) missing=\(result.missing) skipped=\(result.skipped)"
                     )
                 }
             } catch {
@@ -383,11 +426,14 @@ final class SyncService: NSObject {
                     onProgress: { _, _ in }
                 )
                 let backedUpLocalIds = SyncRepository.shared.getCloudBackedUpLocalIdentifiers(in: identifiers)
-                let markedSynced = SyncRepository.shared.markSyncedForLocalIdentifiers(backedUpLocalIds)
+                let deletedLocalIds = SyncRepository.shared.getCloudDeletedLocalIdentifiers(in: identifiers)
+                let markedSynced = SyncRepository.shared.markSyncedForLocalIdentifiers(
+                    backedUpLocalIds.union(deletedLocalIds)
+                )
                 let elapsedMs = Int(Date().timeIntervalSince(startedAt) * 1000.0)
                 SyncService.shared.queue.async {
                     SyncService.shared.finalizeManualCloudCheckCycle(
-                        logLine: "[PERF] cloud-check-manual-done source=\(source) requested_ids=\(requested) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) checked=\(result.checked) backed_up=\(result.backedUp) missing=\(result.missing) skipped=\(result.skipped) marked_synced=\(markedSynced)"
+                        logLine: "[PERF] cloud-check-manual-done source=\(source) requested_ids=\(requested) resolved_ids=\(resolvedCount) elapsed_ms=\(elapsedMs) checked=\(result.checked) backed_up=\(result.backedUp) deleted=\(result.deleted) missing=\(result.missing) skipped=\(result.skipped) marked_synced=\(markedSynced)"
                     )
                 }
             } catch {
