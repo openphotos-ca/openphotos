@@ -341,6 +341,26 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
         "CREATE INDEX IF NOT EXISTS idx_photos_backup_id ON photos(backup_id);",
     )
     .await;
+    exec(
+        &client,
+        r#"
+        CREATE TABLE IF NOT EXISTS deleted_upload_tombstones (
+            organization_id INTEGER NOT NULL REFERENCES organizations(id),
+            user_id TEXT NOT NULL,
+            key_kind TEXT NOT NULL,
+            key_value TEXT NOT NULL,
+            source_asset_id TEXT NOT NULL,
+            deleted_at BIGINT NOT NULL,
+            PRIMARY KEY (organization_id, user_id, key_kind, key_value)
+        );
+    "#,
+    )
+    .await?;
+    exec(
+        &client,
+        r#"CREATE INDEX IF NOT EXISTS idx_deleted_upload_tombstones_source ON deleted_upload_tombstones(organization_id, user_id, source_asset_id);"#,
+    )
+    .await?;
     exec(&client, r#"CREATE INDEX IF NOT EXISTS idx_photos_org_deleted ON photos(organization_id, delete_time);"#).await?;
     exec(
         &client,

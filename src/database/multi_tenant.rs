@@ -1295,6 +1295,17 @@ impl MultiTenantDatabase {
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS delete_time INTEGER DEFAULT 0;
             -- Ratings: optional 0..5 (NULL = unrated)
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS rating SMALLINT;
+            CREATE TABLE IF NOT EXISTS deleted_upload_tombstones (
+                organization_id INTEGER NOT NULL,
+                user_id TEXT NOT NULL,
+                key_kind TEXT NOT NULL,
+                key_value TEXT NOT NULL,
+                source_asset_id TEXT NOT NULL,
+                deleted_at INTEGER NOT NULL,
+                PRIMARY KEY (organization_id, user_id, key_kind, key_value)
+            );
+            CREATE INDEX IF NOT EXISTS idx_deleted_upload_tombstones_source
+                ON deleted_upload_tombstones(organization_id, user_id, source_asset_id);
             
             -- Albums table (nested via parent_id) [moved below for standalone execution]
             ALTER TABLE albums ADD COLUMN IF NOT EXISTS organization_id INTEGER;

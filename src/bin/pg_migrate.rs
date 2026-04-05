@@ -94,6 +94,26 @@ async fn run_migrations(client: &Client) -> Result<()> {
         "ALTER TABLE IF EXISTS photos ADD COLUMN IF NOT EXISTS locked_thumb_uploaded BOOLEAN DEFAULT FALSE;",
     )
     .await;
+    try_exec(
+        client,
+        r#"
+        CREATE TABLE IF NOT EXISTS deleted_upload_tombstones (
+            organization_id INTEGER NOT NULL,
+            user_id TEXT NOT NULL,
+            key_kind TEXT NOT NULL,
+            key_value TEXT NOT NULL,
+            source_asset_id TEXT NOT NULL,
+            deleted_at BIGINT NOT NULL,
+            PRIMARY KEY (organization_id, user_id, key_kind, key_value)
+        );
+    "#,
+    )
+    .await;
+    try_exec(
+        client,
+        "CREATE INDEX IF NOT EXISTS idx_deleted_upload_tombstones_source ON deleted_upload_tombstones(organization_id, user_id, source_asset_id);",
+    )
+    .await;
     // photo_embeddings → PK(org, asset)
     promote_pk(
         client,

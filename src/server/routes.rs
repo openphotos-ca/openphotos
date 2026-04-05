@@ -31,10 +31,11 @@ use crate::server::face_handlers::{
 use crate::server::handlers::health_check;
 use crate::server::photo_routes::{
     add_photos_to_album, create_album, create_live_album, delete_album, freeze_live_album,
-    get_albums_for_photo, get_filter_metadata, get_photo, list_albums, list_media, list_photos,
-    media_counts, merge_albums, purge_all_trash, purge_photos, remove_photos_from_album,
-    restore_photos, serve_face_thumbnail, serve_image as photo_serve_image, serve_thumbnail,
-    update_album as update_album_route, update_album_json, update_live_album_json,
+    get_albums_for_photo, get_filter_metadata, get_photo, list_albums, list_deleted_backups,
+    list_media, list_photos, match_deleted_backups, media_counts, merge_albums, purge_all_trash,
+    purge_photos, remove_photos_from_album, restore_photos, serve_face_thumbnail,
+    serve_image as photo_serve_image, serve_thumbnail, update_album as update_album_route,
+    update_album_json, update_live_album_json,
 };
 use crate::server::similar_routes::{
     similar_groups, similar_neighbors, similar_video_groups, similar_video_neighbors,
@@ -576,6 +577,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/photos/:id/rating", put(crate::server::photo_routes::update_photo_rating))
         .route("/api/photos/by-ids", post(crate::server::photo_routes::get_photos_by_asset_ids))
         .route("/api/photos/exists", post(crate::server::photo_routes::photos_exist))
+        .route("/api/photos/deleted-backups", get(list_deleted_backups))
+        .route("/api/photos/deleted-backups/match", post(match_deleted_backups))
         .route("/api/media", get(list_media))
         .route("/api/media/counts", get(media_counts))
         .route("/api/buckets/years", get(crate::server::photo_routes::bucket_years))

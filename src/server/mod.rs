@@ -1,6 +1,7 @@
 pub mod auth_handlers;
 pub mod capabilities;
 pub mod crypto_envelope;
+pub mod deleted_upload_tombstones;
 pub mod demo_policy;
 pub mod face_handlers;
 pub mod handlers;

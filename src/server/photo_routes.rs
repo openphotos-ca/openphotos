@@ -1,3 +1,8 @@
+use crate::server::deleted_upload_tombstones::{
+    list_deleted_backup_ids_page, match_deleted_backup_ids, remove_deleted_tombstones_for_asset,
+    spawn_legacy_deleted_backup_repair, upsert_deleted_tombstones_for_asset, KEY_KIND_ASSET_ID,
+    KEY_KIND_BACKUP_ID,
+};
 use crate::server::logging;
 use axum::extract::Request as AxumRequest;
 use axum::{
@@ -660,8 +665,11 @@ pub(crate) fn hard_delete_assets(
         let org_id: i32 = state.org_id_for_user(user_id);
         for aid in asset_ids {
             let row_opt = futures::executor::block_on(pg.query_opt(
-                "SELECT id, path FROM photos WHERE organization_id=$1 AND asset_id=$2 AND COALESCE(delete_time,0)>0 LIMIT 1",
-                &[&org_id, aid],
+                "SELECT id, path
+                 FROM photos
+                 WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 AND COALESCE(delete_time,0)>0
+                 LIMIT 1",
+                &[&org_id, &user_id, aid],
             ))
             .ok()
             .flatten();
@@ -694,8 +702,8 @@ pub(crate) fn hard_delete_assets(
                 &[&org_id, aid],
             ));
             let rows = futures::executor::block_on(pg.execute(
-                "DELETE FROM photos WHERE organization_id=$1 AND id=$2",
-                &[&org_id, &photo_id],
+                "DELETE FROM photos WHERE organization_id=$1 AND user_id=$2 AND id=$3",
+                &[&org_id, &user_id, &photo_id],
             ))
             .unwrap_or(0);
             if rows > 0 {
@@ -746,8 +754,8 @@ pub(crate) fn hard_delete_assets(
             let conn = data_db.lock();
             let mut pid: Option<i32> = None;
             let mut pth: Option<String> = None;
-            if let Ok(mut stmt) = conn.prepare("SELECT id, path FROM photos WHERE organization_id = ? AND asset_id = ? AND COALESCE(delete_time,0) > 0 LIMIT 1") {
-                if let Ok((pid_v, path_v)) = stmt.query_row(duckdb::params![org_id, aid], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))) {
+            if let Ok(mut stmt) = conn.prepare("SELECT id, path FROM photos WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(delete_time,0) > 0 LIMIT 1") {
+                if let Ok((pid_v, path_v)) = stmt.query_row(duckdb::params![org_id, user_id, aid], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, String>(1)?))) {
                     pid = Some(pid_v);
                     pth = Some(path_v);
                 }
@@ -781,8 +789,8 @@ pub(crate) fn hard_delete_assets(
             );
             let rows = conn
                 .execute(
-                    "DELETE FROM photos WHERE organization_id = ? AND id = ?",
-                    duckdb::params![org_id, photo_id],
+                    "DELETE FROM photos WHERE organization_id = ? AND user_id = ? AND id = ?",
+                    duckdb::params![org_id, user_id, photo_id],
                 )
                 .unwrap_or(0);
             if rows > 0 {
@@ -1058,6 +1066,8 @@ pub struct ExistsRequest {
     pub asset_ids: Vec<String>,
     #[serde(default)]
     pub backup_ids: Vec<String>,
+    #[serde(default)]
+    pub include_deleted_matches: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -1065,6 +1075,41 @@ pub struct ExistsResponse {
     pub present_asset_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub present_backup_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_asset_ids: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deleted_backup_ids: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeletedBackupsQuery {
+    #[serde(default = "default_deleted_backups_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub after: Option<String>,
+}
+
+fn default_deleted_backups_limit() -> usize {
+    500
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeletedBackupsPageResponse {
+    pub total: usize,
+    pub backup_ids: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_after: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeletedBackupsMatchRequest {
+    #[serde(default)]
+    pub backup_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeletedBackupsMatchResponse {
+    pub deleted_backup_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1152,6 +1197,8 @@ pub async fn photos_exist(
         return Ok(Json(ExistsResponse {
             present_asset_ids: Vec::new(),
             present_backup_ids: None,
+            deleted_asset_ids: None,
+            deleted_backup_ids: None,
         }));
     }
 
@@ -1161,6 +1208,7 @@ pub async fn photos_exist(
     } else {
         &payload.asset_ids
     };
+    let requested_set: HashSet<String> = requested_ids.iter().cloned().collect();
 
     if let Some(pg) = &state.pg_client {
         // On-demand backfill so `backup_id` queries work without a full reindex.
@@ -1220,6 +1268,8 @@ pub async fn photos_exist(
         }
 
         let mut present: Vec<String> = Vec::new();
+        let mut active_request_matches: HashSet<String> = HashSet::new();
+        let mut deleted_requested: HashSet<String> = HashSet::new();
         if !requested_ids.is_empty() {
             let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
             params.push(&user.organization_id);
@@ -1343,6 +1393,18 @@ pub async fn photos_exist(
                 }
                 if fully_backed_up {
                     if use_backup_ids {
+                        if let Some(bid) = backup_id.as_ref() {
+                            if requested_set.contains(bid) {
+                                active_request_matches.insert(bid.clone());
+                            }
+                        }
+                        if requested_set.contains(&asset_id) {
+                            active_request_matches.insert(asset_id.clone());
+                        }
+                    } else {
+                        active_request_matches.insert(asset_id.clone());
+                    }
+                    if use_backup_ids {
                         present.push(backup_id.unwrap_or(asset_id));
                     } else {
                         present.push(asset_id);
@@ -1361,8 +1423,72 @@ pub async fn photos_exist(
                 locked_total,
                 locked_incomplete
             );
+
+            if payload.include_deleted_matches {
+                let deleted_sql = format!(
+                    "SELECT asset_id, backup_id
+                     FROM photos
+                     WHERE organization_id = $1 AND user_id = $2
+                       AND COALESCE(delete_time, 0) > 0
+                       AND {}",
+                    where_clause
+                );
+                let deleted_rows = pg
+                    .query(&deleted_sql, &params)
+                    .await
+                    .map_err(|e| AppError(anyhow::anyhow!(e.to_string())))?;
+                for row in deleted_rows {
+                    let deleted_asset_id: String = row.get(0);
+                    let deleted_backup_id: Option<String> = row.get(1);
+                    if use_backup_ids {
+                        if let Some(bid) = deleted_backup_id.as_ref() {
+                            if requested_set.contains(bid) {
+                                deleted_requested.insert(bid.clone());
+                            }
+                        }
+                        if requested_set.contains(&deleted_asset_id) {
+                            deleted_requested.insert(deleted_asset_id);
+                        }
+                    } else {
+                        deleted_requested.insert(deleted_asset_id);
+                    }
+                }
+
+                let mut tombstone_params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> =
+                    Vec::new();
+                tombstone_params.push(&user.organization_id);
+                tombstone_params.push(&user.user_id);
+                let tombstone_key_kind = if use_backup_ids {
+                    KEY_KIND_BACKUP_ID
+                } else {
+                    KEY_KIND_ASSET_ID
+                };
+                tombstone_params.push(&tombstone_key_kind);
+                let mut tombstone_placeholders: Vec<String> = Vec::new();
+                for (i, id) in requested_ids.iter().enumerate() {
+                    tombstone_placeholders.push(format!("${}", i + 4));
+                    tombstone_params.push(id);
+                }
+                let tombstone_sql = format!(
+                    "SELECT key_value
+                     FROM deleted_upload_tombstones
+                     WHERE organization_id = $1 AND user_id = $2 AND key_kind = $3
+                       AND key_value IN ({})",
+                    tombstone_placeholders.join(",")
+                );
+                let tombstone_rows = pg
+                    .query(&tombstone_sql, &tombstone_params)
+                    .await
+                    .map_err(|e| AppError(anyhow::anyhow!(e.to_string())))?;
+                for row in tombstone_rows {
+                    deleted_requested.insert(row.get::<_, String>(0));
+                }
+
+                deleted_requested.retain(|id| !active_request_matches.contains(id));
+            }
         }
 
+        let deleted_values: Vec<String> = deleted_requested.into_iter().collect();
         return Ok(Json(ExistsResponse {
             present_asset_ids: if use_backup_ids {
                 Vec::new()
@@ -1370,6 +1496,16 @@ pub async fn photos_exist(
                 present.clone()
             },
             present_backup_ids: if use_backup_ids { Some(present) } else { None },
+            deleted_asset_ids: if payload.include_deleted_matches && !use_backup_ids {
+                Some(deleted_values.clone())
+            } else {
+                None
+            },
+            deleted_backup_ids: if payload.include_deleted_matches && use_backup_ids {
+                Some(deleted_values)
+            } else {
+                None
+            },
         }));
     }
 
@@ -1444,6 +1580,8 @@ pub async fn photos_exist(
     }
 
     let mut present: Vec<String> = Vec::new();
+    let mut active_request_matches: HashSet<String> = HashSet::new();
+    let mut deleted_requested: HashSet<String> = HashSet::new();
     if !requested_ids.is_empty() {
         let ids = requested_ids.clone();
         let rows: Vec<(
@@ -1612,6 +1750,18 @@ pub async fn photos_exist(
             }
             if fully_backed_up {
                 if use_backup_ids {
+                    if let Some(bid) = backup_id.as_ref() {
+                        if requested_set.contains(bid) {
+                            active_request_matches.insert(bid.clone());
+                        }
+                    }
+                    if requested_set.contains(&asset_id) {
+                        active_request_matches.insert(asset_id.clone());
+                    }
+                } else {
+                    active_request_matches.insert(asset_id.clone());
+                }
+                if use_backup_ids {
                     present.push(backup_id.unwrap_or(asset_id));
                 } else {
                     present.push(asset_id);
@@ -1630,8 +1780,113 @@ pub async fn photos_exist(
             locked_total,
             locked_incomplete
         );
+
+        if payload.include_deleted_matches {
+            let ids = requested_ids.clone();
+            let deleted_rows: Vec<(String, Option<String>)> = {
+                let conn = data_db.lock();
+                let mut q = String::from(
+                    "SELECT asset_id, backup_id
+                     FROM photos
+                     WHERE organization_id = ? AND user_id = ? AND COALESCE(delete_time, 0) > 0 AND ",
+                );
+                if use_backup_ids {
+                    q.push_str("(backup_id IN (");
+                    q.push_str(&vec!["?"; ids.len()].join(","));
+                    q.push_str(") OR asset_id IN (");
+                    q.push_str(&vec!["?"; ids.len()].join(","));
+                    q.push_str("))");
+                } else {
+                    q.push_str("asset_id IN (");
+                    q.push_str(&vec!["?"; ids.len()].join(","));
+                    q.push(')');
+                }
+                let mut stmt = conn.prepare(&q).map_err(|e| AppError(anyhow!(e)))?;
+                let mut params: Vec<Box<dyn duckdb::ToSql>> =
+                    Vec::with_capacity(2 + (ids.len() * if use_backup_ids { 2 } else { 1 }));
+                params.push(Box::new(org_id));
+                params.push(Box::new(user.user_id.clone()));
+                for id in &ids {
+                    params.push(Box::new(id.clone()));
+                }
+                if use_backup_ids {
+                    for id in &ids {
+                        params.push(Box::new(id.clone()));
+                    }
+                }
+                let mapped = stmt
+                    .query_map(
+                        duckdb::params_from_iter(params.iter().map(|b| &**b)),
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .map_err(|e| AppError(anyhow!(e)))?;
+                let mut out: Vec<(String, Option<String>)> = Vec::new();
+                for r in mapped {
+                    if let Ok(v) = r {
+                        out.push(v);
+                    }
+                }
+                out
+            };
+            for (deleted_asset_id, deleted_backup_id) in deleted_rows {
+                if use_backup_ids {
+                    if let Some(bid) = deleted_backup_id.as_ref() {
+                        if requested_set.contains(bid) {
+                            deleted_requested.insert(bid.clone());
+                        }
+                    }
+                    if requested_set.contains(&deleted_asset_id) {
+                        deleted_requested.insert(deleted_asset_id);
+                    }
+                } else {
+                    deleted_requested.insert(deleted_asset_id);
+                }
+            }
+
+            let tombstone_rows: Vec<String> = {
+                let conn = data_db.lock();
+                let mut q = String::from(
+                    "SELECT key_value
+                     FROM deleted_upload_tombstones
+                     WHERE organization_id = ? AND user_id = ? AND key_kind = ? AND key_value IN (",
+                );
+                q.push_str(&vec!["?"; ids.len()].join(","));
+                q.push(')');
+                let mut stmt = conn.prepare(&q).map_err(|e| AppError(anyhow!(e)))?;
+                let mut params: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(3 + ids.len());
+                params.push(Box::new(org_id));
+                params.push(Box::new(user.user_id.clone()));
+                params.push(Box::new(
+                    if use_backup_ids {
+                        KEY_KIND_BACKUP_ID
+                    } else {
+                        KEY_KIND_ASSET_ID
+                    }
+                    .to_string(),
+                ));
+                for id in &ids {
+                    params.push(Box::new(id.clone()));
+                }
+                let mapped = stmt
+                    .query_map(
+                        duckdb::params_from_iter(params.iter().map(|b| &**b)),
+                        |row| row.get::<_, String>(0),
+                    )
+                    .map_err(|e| AppError(anyhow!(e)))?;
+                let mut out = Vec::new();
+                for r in mapped {
+                    if let Ok(v) = r {
+                        out.push(v);
+                    }
+                }
+                out
+            };
+            deleted_requested.extend(tombstone_rows);
+            deleted_requested.retain(|id| !active_request_matches.contains(id));
+        }
     }
 
+    let deleted_values: Vec<String> = deleted_requested.into_iter().collect();
     Ok(Json(ExistsResponse {
         present_asset_ids: if use_backup_ids {
             Vec::new()
@@ -1639,7 +1894,69 @@ pub async fn photos_exist(
             present.clone()
         },
         present_backup_ids: if use_backup_ids { Some(present) } else { None },
+        deleted_asset_ids: if payload.include_deleted_matches && !use_backup_ids {
+            Some(deleted_values.clone())
+        } else {
+            None
+        },
+        deleted_backup_ids: if payload.include_deleted_matches && use_backup_ids {
+            Some(deleted_values)
+        } else {
+            None
+        },
     }))
+}
+
+#[instrument(skip(state, headers))]
+pub async fn list_deleted_backups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<DeletedBackupsQuery>,
+) -> Result<impl IntoResponse, AppError> {
+    let user = get_user_from_headers(&headers, &state.auth_service).await?;
+    spawn_legacy_deleted_backup_repair(state.clone(), user.organization_id, user.user_id.clone());
+    let limit = query.limit.clamp(1, 1000);
+    let (total, backup_ids) = list_deleted_backup_ids_page(
+        state.as_ref(),
+        user.organization_id,
+        &user.user_id,
+        limit,
+        query.after.as_deref(),
+    )
+    .await
+    .map_err(AppError)?;
+    let next_after = if backup_ids.len() == limit {
+        backup_ids.last().cloned()
+    } else {
+        None
+    };
+    Ok(Json(DeletedBackupsPageResponse {
+        total,
+        backup_ids,
+        next_after,
+    }))
+}
+
+#[instrument(skip(state, headers))]
+pub async fn match_deleted_backups(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<DeletedBackupsMatchRequest>,
+) -> Result<impl IntoResponse, AppError> {
+    let user = get_user_from_headers(&headers, &state.auth_service).await?;
+    spawn_legacy_deleted_backup_repair(state.clone(), user.organization_id, user.user_id.clone());
+    let mut deleted_backup_ids = match_deleted_backup_ids(
+        state.as_ref(),
+        user.organization_id,
+        &user.user_id,
+        &payload.backup_ids,
+    )
+    .await
+    .map_err(AppError)?
+    .into_iter()
+    .collect::<Vec<_>>();
+    deleted_backup_ids.sort();
+    Ok(Json(DeletedBackupsMatchResponse { deleted_backup_ids }))
 }
 
 #[instrument(skip(state, headers))]
@@ -2541,10 +2858,21 @@ pub async fn delete_photos(
         let mut deleted = 0usize;
         let now = chrono::Utc::now().timestamp();
         for aid in &payload.asset_ids {
+            upsert_deleted_tombstones_for_asset(
+                state.as_ref(),
+                user.organization_id,
+                &user.user_id,
+                aid,
+                now,
+            )
+            .await
+            .map_err(AppError)?;
             let rows = pg
                 .execute(
-                    "UPDATE photos SET delete_time=$1, favorites=0 WHERE organization_id=$2 AND asset_id=$3 AND COALESCE(delete_time,0)=0",
-                    &[&now, &user.organization_id, aid],
+                    "UPDATE photos
+                     SET delete_time=$1, favorites=0
+                     WHERE organization_id=$2 AND user_id=$3 AND asset_id=$4 AND COALESCE(delete_time,0)=0",
+                    &[&now, &user.organization_id, &user.user_id, aid],
                 )
                 .await
                 .unwrap_or(0);
@@ -2565,11 +2893,22 @@ pub async fn delete_photos(
     let now = chrono::Utc::now().timestamp();
 
     for aid in &payload.asset_ids {
+        upsert_deleted_tombstones_for_asset(
+            state.as_ref(),
+            user.organization_id,
+            &user.user_id,
+            aid,
+            now,
+        )
+        .await
+        .map_err(AppError)?;
         let conn = data_db.lock();
         let rows = conn
             .execute(
-                "UPDATE photos SET delete_time = ?, favorites = 0 WHERE asset_id = ? AND COALESCE(delete_time,0) = 0",
-                duckdb::params![now, aid],
+                "UPDATE photos
+                 SET delete_time = ?, favorites = 0
+                 WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(delete_time,0) = 0",
+                duckdb::params![now, user.organization_id, &user.user_id, aid],
             )
             .unwrap_or(0);
         drop(conn);
@@ -2600,12 +2939,22 @@ pub async fn restore_photos(
         for aid in &payload.asset_ids {
             let rows = pg
                 .execute(
-                    "UPDATE photos SET delete_time=0 WHERE organization_id=$1 AND asset_id=$2 AND COALESCE(delete_time,0)>0",
-                    &[&user.organization_id, aid],
+                    "UPDATE photos
+                     SET delete_time=0
+                     WHERE organization_id=$1 AND user_id=$2 AND asset_id=$3 AND COALESCE(delete_time,0)>0",
+                    &[&user.organization_id, &user.user_id, aid],
                 )
                 .await
                 .unwrap_or(0);
             if rows > 0 {
+                remove_deleted_tombstones_for_asset(
+                    state.as_ref(),
+                    user.organization_id,
+                    &user.user_id,
+                    aid,
+                )
+                .await
+                .map_err(AppError)?;
                 restored += 1;
                 if let Err(e) = reindex_single_asset(&state, &user.user_id, aid) {
                     tracing::warn!("[SEARCH] reindex on restore (PG) failed: {}", e);
@@ -2621,15 +2970,25 @@ pub async fn restore_photos(
     let mut restored = 0usize;
 
     for aid in &payload.asset_ids {
-        let conn = data_db.lock();
-        let rows = conn
-            .execute(
-                "UPDATE photos SET delete_time = 0 WHERE asset_id = ? AND COALESCE(delete_time,0) > 0",
-                duckdb::params![aid],
+        let rows = {
+            let conn = data_db.lock();
+            conn.execute(
+                "UPDATE photos
+                 SET delete_time = 0
+                 WHERE organization_id = ? AND user_id = ? AND asset_id = ? AND COALESCE(delete_time,0) > 0",
+                duckdb::params![user.organization_id, &user.user_id, aid],
             )
-            .unwrap_or(0);
-        drop(conn);
+            .unwrap_or(0)
+        };
         if rows > 0 {
+            remove_deleted_tombstones_for_asset(
+                state.as_ref(),
+                user.organization_id,
+                &user.user_id,
+                aid,
+            )
+            .await
+            .map_err(AppError)?;
             restored += 1;
             if let Err(e) = reindex_single_asset(&state, &user.user_id, aid) {
                 tracing::warn!("[SEARCH] reindex on restore failed: {}", e);
@@ -2667,22 +3026,31 @@ pub async fn purge_all_trash(
         let mut ids = Vec::new();
         if let Ok(rows) = pg
             .query(
-                "SELECT asset_id FROM photos WHERE organization_id=$1 AND COALESCE(delete_time,0)>0",
-                &[&user.organization_id],
+                "SELECT asset_id
+                 FROM photos
+                 WHERE organization_id=$1 AND user_id=$2 AND COALESCE(delete_time,0)>0",
+                &[&user.organization_id, &user.user_id],
             )
             .await
         {
-            for r in rows { ids.push(r.get::<_, String>(0)); }
+            for r in rows {
+                ids.push(r.get::<_, String>(0));
+            }
         }
         ids
     } else {
         let data_db = state.get_user_data_database(&user.user_id)?;
         let conn = data_db.lock();
         let mut ids = Vec::new();
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT asset_id FROM photos WHERE COALESCE(delete_time,0) > 0")
-        {
-            if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+        if let Ok(mut stmt) = conn.prepare(
+            "SELECT asset_id
+             FROM photos
+             WHERE organization_id = ? AND user_id = ? AND COALESCE(delete_time,0) > 0",
+        ) {
+            if let Ok(rows) = stmt.query_map(
+                duckdb::params![user.organization_id, &user.user_id],
+                |row| row.get::<_, String>(0),
+            ) {
                 for r in rows {
                     if let Ok(a) = r {
                         ids.push(a);

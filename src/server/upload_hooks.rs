@@ -17,6 +17,7 @@ use tokio::time::{self, Duration};
 use tokio_stream::{wrappers::BroadcastStream, wrappers::IntervalStream};
 
 use crate::auth::types::User;
+use crate::server::deleted_upload_tombstones::find_deleted_upload_match;
 use crate::server::state::AppState;
 use crate::server::text_search::reindex_single_asset;
 #[cfg(feature = "ee")]
@@ -48,6 +49,24 @@ pub struct RustusFileInfo {
 pub struct RustusHookRequestV2 {
     pub upload: RustusFileInfo,
     pub request: Value,
+}
+
+async fn cleanup_skipped_upload_artifacts(src_path: &Path) {
+    let _ = tokio::fs::remove_file(src_path).await;
+    let sidecar = src_path.with_extension("info");
+    let _ = tokio::fs::remove_file(sidecar).await;
+}
+
+async fn compute_backup_id_for_path(path: &Path, user_id: &str) -> Option<String> {
+    let src = path.to_path_buf();
+    let uid = user_id.to_string();
+    tokio::task::spawn_blocking(move || {
+        let bytes = std::fs::read(src).ok()?;
+        crate::photos::backup_id::from_bytes(&bytes, &uid).ok()
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 pub async fn handle_rustus_hook(
@@ -957,6 +976,45 @@ pub(crate) async fn ingest_finished_upload(
         }
     }
 
+    let upload_backup_id = if let Some(bid) = meta_get(&metadata, &["backup_id"]) {
+        Some(bid)
+    } else {
+        compute_backup_id_for_path(src_path, user_id).await
+    };
+    if let Some(matched) = find_deleted_upload_match(
+        state.as_ref(),
+        org_id,
+        user_id,
+        Some(&asset_id),
+        upload_backup_id.as_deref(),
+    )
+    .await?
+    {
+        tracing::info!(
+            target: "upload",
+            "[UPLOAD] skipped deleted/tombstoned upload user={} upload_id={} asset_id={} key_kind={} key_value={}",
+            user_id,
+            upload_id,
+            asset_id,
+            matched.key_kind,
+            matched.key_value
+        );
+        cleanup_skipped_upload_artifacts(src_path).await;
+        let skipped_ext = src_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        state.record_sync_ingest(
+            user_id,
+            source_method.unwrap_or("unknown"),
+            /*is_photo=*/ !crate::video::is_video_extension(&skipped_ext),
+            /*duplicate=*/ true,
+            /*success=*/ true,
+        );
+        return Ok(());
+    }
+
     // Decide destination path if move_on_ingest is enabled
     let dest_path = if state.move_on_ingest {
         // Determine extension preference: from metadata filename -> from src -> fallback to 'bin'
@@ -1235,15 +1293,22 @@ pub(crate) async fn ingest_finished_upload(
     let data_db = state.get_user_data_database(user_id)?;
     let (asset_exists, existing_locked): (bool, bool) = {
         let conn = data_db.lock();
-        conn.prepare("SELECT COALESCE(locked, FALSE) FROM photos WHERE asset_id = ? LIMIT 1")
-            .ok()
-            .and_then(|mut s| {
-                match s.query_row(duckdb::params![&asset_id], |row| row.get::<_, bool>(0)) {
-                    Ok(lock) => Some((true, lock)),
-                    Err(_) => None,
-                }
-            })
-            .unwrap_or((false, false))
+        conn.prepare(
+            "SELECT COALESCE(locked, FALSE)
+             FROM photos
+             WHERE organization_id = ? AND user_id = ? AND asset_id = ?
+             LIMIT 1",
+        )
+        .ok()
+        .and_then(|mut s| {
+            match s.query_row(duckdb::params![org_id, user_id, &asset_id], |row| {
+                row.get::<_, bool>(0)
+            }) {
+                Ok(lock) => Some((true, lock)),
+                Err(_) => None,
+            }
+        })
+        .unwrap_or((false, false))
     };
     // Incoming here is always UNLOCKED
     if asset_exists && existing_locked == false {
@@ -1296,23 +1361,6 @@ pub(crate) async fn ingest_finished_upload(
                     None,
                 );
             }
-        }
-        {
-            let conn = data_db.lock();
-            log_db_error!(
-                conn.execute(
-                    "UPDATE photos SET delete_time = 0 WHERE asset_id = ?",
-                    duckdb::params![&asset_id],
-                ),
-                format!("Clear delete_time for asset {}", asset_id)
-            );
-        }
-        if let Err(e) = reindex_single_asset(state, user_id, &asset_id) {
-            tracing::warn!(
-                "[UPLOAD] reindex failed while reviving existing asset {}: {}",
-                asset_id,
-                e
-            );
         }
         // Update sync stats (duplicate, success)
         state.record_sync_ingest(
@@ -1891,6 +1939,27 @@ async fn ingest_locked_upload(
         .unwrap_or_else(|| "orig".to_string());
     let is_thumb = kind == "thumb";
     let backup_id_opt: Option<String> = metadata.get("backup_id").cloned();
+
+    if let Some(matched) = find_deleted_upload_match(
+        state.as_ref(),
+        org_id,
+        user_id,
+        Some(&asset_id_b58),
+        backup_id_opt.as_deref(),
+    )
+    .await?
+    {
+        tracing::info!(
+            target: "upload",
+            "[UPLOAD-LOCKED] skipped deleted/tombstoned upload user={} asset_id={} key_kind={} key_value={}",
+            user_id,
+            asset_id_b58,
+            matched.key_kind,
+            matched.key_value
+        );
+        cleanup_skipped_upload_artifacts(src_path).await;
+        return Ok(());
+    }
 
     // Destination path under locked/
     let dest_path = if is_thumb {
