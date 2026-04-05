@@ -11,3 +11,17 @@ index 0acd1a1..106a72e 100644
                          // Body extends Record<string, unknown> and thus `xhr` is not known
                          // but we export the `TusBody` type, which people pass as a generic into the Uppy class,
                          // so on the implementer side it works as expected.
+diff --git a/node_modules/@uppy/tus/src/index.ts b/node_modules/@uppy/tus/src/index.ts
+index 11ef837..d70f71c 100644
+--- a/node_modules/@uppy/tus/src/index.ts
++++ b/node_modules/@uppy/tus/src/index.ts
+@@ -319,7 +319,8 @@ export default class Tus<M extends Meta, B extends Body> extends BasePlugin<
+             // We have to put `as XMLHttpRequest` because tus-js-client
+             // returns `any`, as the type differs in Node.js and the browser.
+             // In the browser it's always `XMLHttpRequest`.
+-            xhr: payload.lastResponse.getUnderlyingObject() as XMLHttpRequest,
++            xhr:
++              payload?.lastResponse?.getUnderlyingObject?.() || (payload?.lastResponse as XMLHttpRequest | undefined),
+             // Body extends Record<string, unknown> and thus `xhr` is not known
+             // but we export the `TusBody` type, which people pass as a generic into the Uppy class,
+             // so on the implementer side it works as expected.

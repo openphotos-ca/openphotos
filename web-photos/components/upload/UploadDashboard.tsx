@@ -42,11 +42,16 @@ function base58Encode(bytes: Uint8Array): string {
   return out.join('') || '1';
 }
 
-async function computeAssetIdB58(blob: Blob, userId: string): Promise<string> {
+async function computeAssetIdB58(blob: Blob, userId: string): Promise<string | null> {
+  const subtle = globalThis.crypto?.subtle;
+  if (!subtle || typeof subtle.importKey !== 'function' || typeof subtle.sign !== 'function') {
+    return null;
+  }
+  if (!userId) return null;
   const keyData = new TextEncoder().encode(userId);
-  const key = await crypto.subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+  const key = await subtle.importKey('raw', keyData, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
   const bytes = await blob.arrayBuffer();
-  const mac = new Uint8Array(await crypto.subtle.sign('HMAC', key, bytes));
+  const mac = new Uint8Array(await subtle.sign('HMAC', key, bytes));
   return base58Encode(mac.slice(0, 16));
 }
 
@@ -583,7 +588,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
         for (const id of fileIDs) {
           const f: any = uppy.getFile(id);
           if (!f) continue;
-          let aid = (f?.meta?.asset_id_b58 as string | undefined) || (f?.meta?.asset_id as string | undefined) || '';
+          let aid: string | null = (f?.meta?.asset_id_b58 as string | undefined) || (f?.meta?.asset_id as string | undefined) || null;
           if (!aid) {
             const data = f.data as Blob | undefined;
             if (!data || typeof Blob === 'undefined' || !(data instanceof Blob)) continue;

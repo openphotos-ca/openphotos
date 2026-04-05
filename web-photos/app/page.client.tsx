@@ -1792,6 +1792,76 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
             });
           }
         }}
+        onBulkRestore={async () => {
+          const ids = Array.from(new Set(selectedPhotos));
+          if (ids.length === 0) return;
+          try {
+            const result = await photosApi.restorePhotos(ids);
+            const restoredSet = new Set(ids);
+            setSelectedPhotos((prev) => prev.filter((aid) => !restoredSet.has(aid)));
+            setAllPhotos((prev) => prev.filter((p) => !restoredSet.has(p.asset_id)));
+            if (viewerPhoto && restoredSet.has(viewerPhoto.asset_id)) {
+              setViewerIndex(null);
+            }
+            try {
+              await queryClient.invalidateQueries({ queryKey: ['photos'] });
+              await queryClient.invalidateQueries({
+                predicate: (q: any) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts',
+              });
+            } catch {}
+            const restored = Number(result?.restored ?? 0);
+            const requested = Number(result?.requested ?? ids.length);
+            toast({
+              title: restored > 0 ? 'Restored from Trash' : 'Restore failed',
+              description: `${restored} of ${requested} item${requested === 1 ? '' : 's'} restored`,
+              variant: restored > 0 ? 'success' : 'destructive',
+            });
+          } catch (e: any) {
+            toast({
+              title: 'Restore failed',
+              description: e?.message || String(e),
+              variant: 'destructive',
+            });
+          }
+        }}
+        onBulkPurge={async () => {
+          const ids = Array.from(new Set(selectedPhotos));
+          if (ids.length === 0) return;
+          if (typeof window !== 'undefined') {
+            const ok = window.confirm(
+              `Permanently delete ${ids.length} item${ids.length === 1 ? '' : 's'} from Trash? This cannot be undone.`
+            );
+            if (!ok) return;
+          }
+          try {
+            const result = await photosApi.purgePhotos(ids);
+            const purgedSet = new Set(ids);
+            setSelectedPhotos((prev) => prev.filter((aid) => !purgedSet.has(aid)));
+            setAllPhotos((prev) => prev.filter((p) => !purgedSet.has(p.asset_id)));
+            if (viewerPhoto && purgedSet.has(viewerPhoto.asset_id)) {
+              setViewerIndex(null);
+            }
+            try {
+              await queryClient.invalidateQueries({ queryKey: ['photos'] });
+              await queryClient.invalidateQueries({
+                predicate: (q: any) => Array.isArray(q.queryKey) && q.queryKey[0] === 'media-counts',
+              });
+            } catch {}
+            const purged = Number(result?.purged ?? 0);
+            const requested = Number(result?.requested ?? ids.length);
+            toast({
+              title: purged > 0 ? 'Deleted permanently' : 'Delete permanently failed',
+              description: `${purged} of ${requested} item${requested === 1 ? '' : 's'} permanently deleted`,
+              variant: purged > 0 ? 'success' : 'destructive',
+            });
+          } catch (e: any) {
+            toast({
+              title: 'Delete permanently failed',
+              description: e?.message || String(e),
+              variant: 'destructive',
+            });
+          }
+        }}
         isLoading={isLoading}
       />
       {/* Album chips row (isolated to avoid whole-page crash if something fails) */}
