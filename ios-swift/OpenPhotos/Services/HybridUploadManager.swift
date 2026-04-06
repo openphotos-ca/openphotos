@@ -13,13 +13,14 @@ final class HybridUploadManager: NSObject, ObservableObject {
     static let shared = HybridUploadManager()
 
     private static let keepScreenOnDefaultsKey = "sync.keepScreenOnForegroundUploads"
+    private static let foregroundUploadIdleTimerReason = "foreground-upload"
 
     // Published queue for UI
     @Published private(set) var items: [UploadItem] = []
     @Published var keepScreenOn: Bool = true {
         didSet {
-            IdleTimerManager.shared.setDisabled(keepScreenOn)
             UserDefaults.standard.set(keepScreenOn, forKey: Self.keepScreenOnDefaultsKey)
+            scheduleForegroundUploadIdleTimerRefresh()
         }
     }
 
@@ -793,7 +794,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             UserDefaults.standard.set(true, forKey: Self.keepScreenOnDefaultsKey)
         }
         keepScreenOn = UserDefaults.standard.bool(forKey: Self.keepScreenOnDefaultsKey)
-        IdleTimerManager.shared.setDisabled(keepScreenOn)
+        scheduleForegroundUploadIdleTimerRefresh()
         setupBackgroundSession()
         cleanupOrphanedUploadTempArtifactsOnLaunch()
         pathMonitor.pathUpdateHandler = { [weak self] path in
@@ -892,6 +893,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 "[PERF] tus-scene-suspend reason=\(reason) suspended=\(suspended ? 1 : 0) active_workers=\(activeTusWorkers) pending=\(pendingTus.count)"
             )
         }
+        scheduleForegroundUploadIdleTimerRefresh()
     }
 
     func handleSceneDidBecomeActive() {
@@ -1065,6 +1067,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             liveComponentPendingByContentId.removeAll(keepingCapacity: true)
         }
         cancelActiveExports()
+        scheduleForegroundUploadIdleTimerRefresh()
         DispatchQueue.main.async {
             for idx in self.items.indices {
                 switch self.items[idx].status {
@@ -1133,9 +1136,11 @@ final class HybridUploadManager: NSObject, ObservableObject {
         completion: @escaping ([UploadItem]) -> Void
     ) {
         activityQueue.sync { activePreflightChecks += 1 }
+        scheduleForegroundUploadIdleTimerRefresh()
         func finish(_ items: [UploadItem]) {
             completion(items)
             self.activityQueue.sync { self.activePreflightChecks = max(0, self.activePreflightChecks - 1) }
+            self.scheduleForegroundUploadIdleTimerRefresh()
         }
         if exported.isEmpty {
             finish([])
@@ -1397,6 +1402,26 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private func hasDeferredVerificationWork() -> Bool {
         deferredVerifyStateQueue.sync {
             deferredVerifyLoopTask != nil || !deferredVerifyEntriesByContentId.isEmpty
+        }
+    }
+
+    private func hasForegroundUploadWorkActive() -> Bool {
+        let activityBusy = activityQueue.sync { activeExportBatches > 0 || activePreflightChecks > 0 }
+        let tusBusy = tusQueue.sync { !foregroundTusSuspended && (activeTusWorkers > 0 || !pendingTus.isEmpty) }
+        return activityBusy || tusBusy
+    }
+
+    private func refreshForegroundUploadIdleTimer() {
+        let shouldKeepAwake = keepScreenOn && hasForegroundUploadWorkActive()
+        IdleTimerManager.shared.setActive(
+            shouldKeepAwake,
+            reason: Self.foregroundUploadIdleTimerReason
+        )
+    }
+
+    private func scheduleForegroundUploadIdleTimerRefresh() {
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.refreshForegroundUploadIdleTimer()
         }
     }
 
@@ -1892,6 +1917,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             )
             self.maybeStartTusWorkers(reason: "enqueue")
         }
+        scheduleForegroundUploadIdleTimerRefresh()
     }
 
     private func recordTusUploadHealth(
@@ -2198,6 +2224,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
         if shouldLogSummary {
             perfLogSummary(reason: "foreground-idle", force: true)
         }
+        if retired || shouldLogSummary {
+            scheduleForegroundUploadIdleTimerRefresh()
+        }
         return retired
     }
 
@@ -2214,6 +2243,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         if shouldLogSummary {
             perfLogSummary(reason: "foreground-idle", force: true)
         }
+        scheduleForegroundUploadIdleTimerRefresh()
     }
 
     private func runTusWorker() async {
@@ -2249,6 +2279,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             liveComponentPendingByContentId.removeAll(keepingCapacity: true)
         }
         cancelActiveExports()
+        scheduleForegroundUploadIdleTimerRefresh()
         DispatchQueue.main.async {
             for idx in self.items.indices {
                 switch self.items[idx].status {
@@ -2286,6 +2317,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
     private func exportAssetsToTempFiles(assets: [PHAsset], completion: @escaping ([UploadItem]) -> Void) {
         activityQueue.sync { activeExportBatches += 1 }
+        scheduleForegroundUploadIdleTimerRefresh()
         var results: [UploadItem] = []
         let group = DispatchGroup()
         let manager = PHAssetResourceManager.default()
@@ -2345,6 +2377,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             group.notify(queue: .main) {
                 completion(results)
                 self.activityQueue.sync { self.activeExportBatches = max(0, self.activeExportBatches - 1) }
+                self.scheduleForegroundUploadIdleTimerRefresh()
             }
         }
     }

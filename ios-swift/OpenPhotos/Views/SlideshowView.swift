@@ -180,7 +180,7 @@ struct SlideshowView: View {
     /// Initial setup: load current image, start timer, enable keep-awake
     private func setupSlideshow() {
         // Keep screen awake during slideshow
-        IdleTimerManager.shared.setDisabled(true)
+        IdleTimerManager.shared.setActive(true, reason: "slideshow")
 
         // Load initial images
         Task {
@@ -206,7 +206,7 @@ struct SlideshowView: View {
         imageCache.removeAll()
 
         // Re-enable screen sleep
-        IdleTimerManager.shared.setDisabled(false)
+        IdleTimerManager.shared.setActive(false, reason: "slideshow")
     }
 
     /// Start the auto-advance timer
