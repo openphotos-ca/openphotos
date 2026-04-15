@@ -1,6 +1,6 @@
 [package]
 name = "albumbud"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 
 [lib]
@@ -26,6 +26,8 @@ tower-http = { version = "0.5", features = ["cors", "trace", "limit", "fs", "tim
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
 tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 ndarray = "0.16"
+rknn-runtime = { path = "rknn-runtime" }
+ort-session = { path = "ort-session" }
 
 # Database
 tokio-postgres = { version = "0.7", features = ["with-chrono-0_4"] }
@@ -128,7 +130,11 @@ optional = true
 default = []
 ffmpeg-inprocess = ["ffmpeg-next"]
 libheif_ffi = ["libheif-sys"]
-gpu = ["ort/cuda", "face-normalizer/gpu"]
+gpu = ["gpu-cuda"]
+gpu-cuda = ["ort-session/cuda", "face-normalizer/gpu-cuda"]
+gpu-coreml = ["ort-session/coreml", "face-normalizer/gpu-coreml"]
+gpu-directml = ["ort-session/directml", "face-normalizer/gpu-directml"]
+gpu-migraphx = ["ort-session/migraphx", "face-normalizer/gpu-migraphx"]
 
 # Optional: enable Jieba CJK tokenizer support with `--features jieba`
 jieba = ["dep:tantivy-jieba"]

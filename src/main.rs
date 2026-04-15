@@ -1,3 +1,4 @@
+mod ai_config;
 mod auth;
 mod clip;
 mod database;
@@ -177,6 +178,18 @@ struct Args {
     #[arg(long, default_value = "ViT-B-32__openai", env = "DEFAULT_MODEL")]
     default_model: String,
 
+    /// AI backend: auto, cpu, cuda, coreml, directml, migraphx, or rk3588-hybrid
+    #[arg(long, default_value = "auto", env = "AI_BACKEND")]
+    ai_backend: String,
+
+    /// AI device index for GPU execution providers
+    #[arg(long, default_value_t = 0, env = "AI_DEVICE_ID")]
+    ai_device_id: i32,
+
+    /// Optional RKNN model directory root
+    #[arg(long, env = "RKNN_MODEL_PATH")]
+    rknn_model_path: Option<String>,
+
     /// Log level
     #[arg(long, default_value = "info", env = "LOG_LEVEL")]
     log_level: String,
@@ -208,9 +221,27 @@ async fn main() -> Result<()> {
     info!("Server address: {}", args.address);
     info!("Model path: {}", args.model_path);
     info!("Default model: {}", args.default_model);
+    info!("AI backend: {}", args.ai_backend);
+    info!("AI device ID: {}", args.ai_device_id);
 
     // Load environment variables from .env file if present
     dotenvy::dotenv().ok();
+
+    let ai_config = crate::ai_config::AiRuntimeConfig::from_args(
+        &args.model_path,
+        &args.ai_backend,
+        args.ai_device_id,
+        args.rknn_model_path.as_deref(),
+    )?;
+    std::env::set_var(
+        "AI_COREML_COMPUTE_UNITS",
+        ai_config.coreml_compute_units.as_str(),
+    );
+    info!("RKNN model path: {}", ai_config.rknn_model_root.display());
+    info!(
+        "AI CoreML compute units: {}",
+        ai_config.coreml_compute_units.as_str()
+    );
 
     // Optional one-shot repair flow
     if args.repair_db {
@@ -289,7 +320,7 @@ async fn main() -> Result<()> {
 
     // Initialize application state
     let state = Arc::new(
-        AppState::new(&args.database, model_configs.clone())
+        AppState::new(&args.database, model_configs.clone(), ai_config.clone())
             .await
             .unwrap_or_else(|e| {
                 // Attempt an automatic one-time repair for common FK issues, then retry once
@@ -305,8 +336,12 @@ async fn main() -> Result<()> {
                         e
                     );
                 }
-                futures::executor::block_on(AppState::new(&args.database, model_configs.clone()))
-                    .expect("Failed to initialize application state after repair")
+                futures::executor::block_on(AppState::new(
+                    &args.database,
+                    model_configs.clone(),
+                    ai_config.clone(),
+                ))
+                .expect("Failed to initialize application state after repair")
             }),
     );
 

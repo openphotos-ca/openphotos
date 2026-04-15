@@ -3,42 +3,54 @@ use image::RgbImage;
 use log::{debug, info, warn};
 use ndarray::Array4;
 use ort::{
-    execution_providers::CPUExecutionProvider,
     session::{Session, SessionOutputs},
     value::Value,
 };
+use ort_session::{build_session_from_file, ProviderConfig, SessionTuning};
+use rknn_runtime::AiBackend;
 use std::sync::{Arc, Mutex};
 
 pub struct FaceRecognizer {
     session: Option<Arc<Mutex<Session>>>,
+    active_backend: AiBackend,
     input_size: (u32, u32),
 }
 
 impl FaceRecognizer {
     pub fn new(model_path: &str) -> Result<Self> {
+        Self::new_with_backend(model_path, AiBackend::Cpu, 0, None)
+    }
+
+    pub fn new_with_backend(
+        model_path: &str,
+        ai_backend: AiBackend,
+        ai_device_id: i32,
+        _rknn_model_path: Option<&std::path::Path>,
+    ) -> Result<Self> {
         info!("Initializing ArcFace Recognizer with model: {}", model_path);
 
-        let session = if !model_path.is_empty() && std::path::Path::new(model_path).exists() {
-            info!("Loading ArcFace ONNX model from {}", model_path);
-
-            // Initialize ONNX Runtime (reuse existing initialization)
-            // Reuse global ORT environment if already initialized
-            let _ = ort::init()
-                .with_execution_providers([CPUExecutionProvider::default().build()])
-                .commit()
-                .or_else(|_| Ok::<bool, ort::Error>(false))?; // Ignore if already initialized
-
-            // Create session
-            Some(Arc::new(Mutex::new(
-                Session::builder()?.commit_from_file(model_path)?,
-            )))
+        let ort_backend = if ai_backend.prefers_rknn() {
+            AiBackend::Cpu
         } else {
-            warn!("ArcFace model not found at {}", model_path);
-            None
+            ai_backend
         };
+        let (session, active_backend) =
+            if !model_path.is_empty() && std::path::Path::new(model_path).exists() {
+                info!("Loading ArcFace ONNX model from {}", model_path);
+                let built = build_session_from_file(
+                    std::path::Path::new(model_path),
+                    ProviderConfig::new(ort_backend, ai_device_id),
+                    SessionTuning::default(),
+                )?;
+                (Some(Arc::new(Mutex::new(built.session))), built.backend)
+            } else {
+                warn!("ArcFace model not found at {}", model_path);
+                (None, AiBackend::Cpu)
+            };
 
         Ok(Self {
             session,
+            active_backend,
             input_size: (112, 112), // ArcFace standard input size
         })
     }
@@ -50,6 +62,10 @@ impl FaceRecognizer {
             // Generate deterministic embeddings based on image content
             self.generate_placeholder_embedding(normalized_face)
         }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        self.active_backend.as_str()
     }
 
     fn generate_arcface_embedding(

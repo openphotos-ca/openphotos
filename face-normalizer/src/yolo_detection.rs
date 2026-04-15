@@ -1,10 +1,11 @@
 use anyhow::Result;
 use image::{DynamicImage, GenericImageView, RgbImage};
 use ndarray::{s, Array4, ArrayView3};
-use ort::{
-    session::{builder::GraphOptimizationLevel, Session},
-    value::Value,
+use ort::{session::Session, value::Value};
+use ort_session::{
+    build_session_from_file, ProviderConfig, SessionOptimizationLevel, SessionTuning,
 };
+use rknn_runtime::{AiBackend, RknnModel, RknnRuntime, TensorFormat, TensorOutput, TensorSpec};
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -676,11 +677,19 @@ pub struct Detection {
 
 pub struct YoloDetector {
     session: Option<Arc<Mutex<Session>>>,
+    rknn_model: Option<Arc<RknnModel>>,
+    active_backend: Mutex<InferenceBackend>,
     input_size: (u32, u32),
     confidence_threshold: f32,
     nms_threshold: f32,
     model_type: ModelType,
     oiv7_classes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferenceBackend {
+    Ort(AiBackend),
+    Rknn,
 }
 
 #[derive(Debug, Clone)]
@@ -706,49 +715,115 @@ impl YoloDetector {
 
     /// Create a new YOLO detector
     pub fn new(model_path: Option<&Path>) -> Result<Self> {
-        let (session, model_type) = if let Some(path) = model_path {
-            if path.exists() && path.metadata()?.len() > 1000 {
-                // Only load if file is valid (> 1KB)
-                let session = Session::builder()
-                    .unwrap()
-                    .with_optimization_level(GraphOptimizationLevel::Level3)
-                    .unwrap()
-                    .with_intra_threads(4)
-                    .unwrap()
-                    .commit_from_file(path)
-                    .unwrap();
+        Self::new_with_backend(model_path, AiBackend::Cpu, 0, None, None)
+    }
 
-                // Detect model type from filename or output shape
-                let model_type = if path.to_string_lossy().contains("oiv7") {
+    pub fn new_with_backend(
+        model_path: Option<&Path>,
+        ai_backend: AiBackend,
+        ai_device_id: i32,
+        rknn_runtime: Option<Arc<RknnRuntime>>,
+        rknn_model_path: Option<&Path>,
+    ) -> Result<Self> {
+        let ort_backend = if ai_backend.prefers_rknn() {
+            AiBackend::Cpu
+        } else {
+            ai_backend
+        };
+        let (cpu_session, ort_backend) = match model_path {
+            Some(path) if path.exists() && path.metadata()?.len() > 1000 => {
+                let built = match build_session_from_file(
+                    path,
+                    ProviderConfig::new(ort_backend, ai_device_id),
+                    SessionTuning {
+                        optimization_level: SessionOptimizationLevel::Level3,
+                        intra_threads: Some(4),
+                    },
+                ) {
+                    Ok(built) => built,
+                    Err(err) if ai_backend.prefers_rknn() => {
+                        info!(
+                            "Falling back to RKNN-only face-normalizer YOLO setup because ONNX session failed: {}",
+                            err
+                        );
+                        return Self::finish_construction(
+                            None,
+                            None,
+                            model_path,
+                            ai_backend,
+                            rknn_runtime,
+                            rknn_model_path,
+                        );
+                    }
+                    Err(err) => return Err(err),
+                };
+                (
+                    Some(Arc::new(Mutex::new(built.session))),
+                    Some(built.backend),
+                )
+            }
+            Some(path) => {
+                warn!(
+                    "YOLO model not found or invalid at {:?}, CPU inference disabled",
+                    path
+                );
+                (None, None)
+            }
+            None => (None, None),
+        };
+        Self::finish_construction(
+            cpu_session,
+            ort_backend,
+            model_path,
+            ai_backend,
+            rknn_runtime,
+            rknn_model_path,
+        )
+    }
+
+    fn finish_construction(
+        cpu_session: Option<Arc<Mutex<Session>>>,
+        ort_backend: Option<AiBackend>,
+        model_path: Option<&Path>,
+        ai_backend: AiBackend,
+        rknn_runtime: Option<Arc<RknnRuntime>>,
+        rknn_model_path: Option<&Path>,
+    ) -> Result<Self> {
+        let model_type = model_path
+            .or(rknn_model_path)
+            .map(|path| {
+                if path.to_string_lossy().contains("oiv7") {
                     ModelType::Oiv7
                 } else {
                     ModelType::Coco
-                };
+                }
+            })
+            .unwrap_or(ModelType::Coco);
 
-                info!("Loaded YOLO model: {:?} type", model_type);
-                (Some(Arc::new(Mutex::new(session))), model_type)
-            } else {
-                warn!(
-                    "YOLO model not found or invalid at {:?}, using mock detector",
-                    path
-                );
-                (None, ModelType::Coco)
-            }
+        let rknn_model = if ai_backend.prefers_rknn() {
+            try_load_rknn_model("face-normalizer YOLO", rknn_runtime, rknn_model_path)?
         } else {
-            (None, ModelType::Coco)
+            None
         };
 
-        // Load OIV7 classes if needed
         let oiv7_classes = if matches!(model_type, ModelType::Oiv7) {
             Self::load_oiv7_classes().ok()
         } else {
             None
         };
 
+        let active_backend = if ai_backend.prefers_rknn() && rknn_model.is_some() {
+            InferenceBackend::Rknn
+        } else {
+            InferenceBackend::Ort(ort_backend.unwrap_or(AiBackend::Cpu))
+        };
+
         Ok(Self {
-            session,
+            session: cpu_session,
+            rknn_model,
+            active_backend: Mutex::new(active_backend),
             input_size: (640, 640),
-            confidence_threshold: 0.1, // Low threshold - let CLI do the filtering
+            confidence_threshold: 0.1,
             nms_threshold: 0.45,
             model_type,
             oiv7_classes,
@@ -757,12 +832,45 @@ impl YoloDetector {
 
     /// Detect objects in an image
     pub fn detect(&self, image: &DynamicImage) -> Result<Vec<Detection>> {
-        if let Some(ref session) = self.session {
-            // Real YOLO detection
-            self.detect_with_yolo(session.clone(), image)
-        } else {
-            // Mock detection for testing
-            self.mock_detect(image)
+        match *self.active_backend.lock().unwrap() {
+            InferenceBackend::Ort(_) => {
+                if let Some(ref session) = self.session {
+                    self.detect_with_yolo(session.clone(), image)
+                } else {
+                    self.mock_detect(image)
+                }
+            }
+            InferenceBackend::Rknn => {
+                if let Some(ref model) = self.rknn_model {
+                    match self.detect_with_rknn(model.clone(), image) {
+                        Ok(detections) => Ok(detections),
+                        Err(err) => {
+                            warn!(
+                                "face-normalizer YOLO RKNN inference failed, downgrading to CPU/mock backend: {}",
+                                err
+                            );
+                            *self.active_backend.lock().unwrap() =
+                                InferenceBackend::Ort(AiBackend::Cpu);
+                            if let Some(ref session) = self.session {
+                                self.detect_with_yolo(session.clone(), image)
+                            } else {
+                                self.mock_detect(image)
+                            }
+                        }
+                    }
+                } else if let Some(ref session) = self.session {
+                    self.detect_with_yolo(session.clone(), image)
+                } else {
+                    self.mock_detect(image)
+                }
+            }
+        }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        match *self.active_backend.lock().unwrap() {
+            InferenceBackend::Ort(backend) => backend.as_str(),
+            InferenceBackend::Rknn => "rknn",
         }
     }
 
@@ -779,17 +887,8 @@ impl YoloDetector {
         let input_value = Value::from_array(input)?;
         let mut session_lock = session.lock().unwrap();
         let outputs = session_lock.run(ort::inputs![input_value])?;
-
-        // Get output tensor
-        let (output_shape, output_data) = outputs[0].try_extract_tensor::<f32>()?;
-        let output_array = ArrayView3::from_shape(
-            (
-                output_shape[0] as usize,
-                output_shape[1] as usize,
-                output_shape[2] as usize,
-            ),
-            output_data,
-        )?;
+        let outputs = ort_outputs_to_tensors(&outputs)?;
+        let output_array = output_array_from_tensor(select_yolo_output(&outputs)?)?;
 
         // Post-process to get detections
         let detections = self.postprocess_output(&output_array, image.width(), image.height())?;
@@ -798,6 +897,20 @@ impl YoloDetector {
         let final_detections = self.non_max_suppression(detections);
 
         Ok(final_detections)
+    }
+
+    fn detect_with_rknn(
+        &self,
+        model: Arc<RknnModel>,
+        image: &DynamicImage,
+    ) -> Result<Vec<Detection>> {
+        let input = self.preprocess_image(image)?;
+        let input_shape = vec![1, 3, self.input_size.1 as usize, self.input_size.0 as usize];
+        let input_data = input.iter().copied().collect::<Vec<_>>();
+        let outputs = model.run_nchw_f32(&input_shape, &input_data)?;
+        let output_array = output_array_from_tensor(select_yolo_output(&outputs)?)?;
+        let detections = self.postprocess_output(&output_array, image.width(), image.height())?;
+        Ok(self.non_max_suppression(detections))
     }
 
     /// Mock detection for testing without model
@@ -1064,6 +1177,88 @@ impl YoloDetector {
         // Animal detected if significant brown pixels and texture
         brown_pixels > sample_size / 10 && texture_variation > sample_size / 5
     }
+}
+
+fn try_load_rknn_model(
+    label: &str,
+    runtime: Option<Arc<RknnRuntime>>,
+    model_path: Option<&Path>,
+) -> Result<Option<Arc<RknnModel>>> {
+    let Some(model_path) = model_path else {
+        info!("{label} RKNN model path not configured, using CPU backend");
+        return Ok(None);
+    };
+    if !model_path.exists() {
+        info!(
+            "{} RKNN model not found at {}, using CPU backend",
+            label,
+            model_path.display()
+        );
+        return Ok(None);
+    }
+    let Some(runtime) = runtime else {
+        info!("{label} RKNN runtime unavailable, using CPU backend");
+        return Ok(None);
+    };
+    match runtime.load_model(model_path) {
+        Ok(model) => {
+            info!("Loaded {} RKNN model from {}", label, model_path.display());
+            Ok(Some(Arc::new(model)))
+        }
+        Err(err) => {
+            info!(
+                "Failed to load {} RKNN model {}, using CPU backend: {:#}",
+                label,
+                model_path.display(),
+                err
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn ort_outputs_to_tensors(outputs: &ort::session::SessionOutputs<'_>) -> Result<Vec<TensorOutput>> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value))| {
+            let (shape, data) = value.try_extract_tensor::<f32>()?;
+            Ok(TensorOutput {
+                spec: TensorSpec {
+                    index,
+                    name: Some(name.to_string()),
+                    dims: shape.iter().map(|dim| *dim as usize).collect(),
+                    element_count: data.len(),
+                    format: TensorFormat::Undefined,
+                },
+                data: data.to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn select_yolo_output<'a>(outputs: &'a [TensorOutput]) -> Result<&'a TensorOutput> {
+    outputs
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("YOLO model produced no outputs"))
+}
+
+fn output_array_from_tensor<'a>(output: &'a TensorOutput) -> Result<ArrayView3<'a, f32>> {
+    if output.spec.dims.len() != 3 {
+        return Err(anyhow::anyhow!(
+            "expected YOLO tensor with 3 dims, got {:?}",
+            output.spec.dims
+        ));
+    }
+    ArrayView3::from_shape(
+        (
+            output.spec.dims[0],
+            output.spec.dims[1],
+            output.spec.dims[2],
+        ),
+        output.data.as_slice(),
+    )
+    .map_err(Into::into)
 }
 
 #[cfg(test)]

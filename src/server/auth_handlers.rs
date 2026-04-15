@@ -4214,9 +4214,21 @@ pub(crate) async fn index_video_for_user(
             FaceData, FaceDetector, FaceNormalizer, FaceRecognizer, SIMILARITY_THRESHOLD,
         };
         let models_dir = state.model_file("face");
-        let detector = FaceDetector::new(&models_dir.join("det_10g.onnx").to_string_lossy())?;
+        let detector_rknn_path = state.rknn_model_file("face/det_10g.rknn");
+        let detector = FaceDetector::new_with_backend(
+            &models_dir.join("det_10g.onnx").to_string_lossy(),
+            state.ai_backend,
+            state.ai_device_id,
+            state.rknn_runtime.clone(),
+            Some(&detector_rknn_path),
+        )?;
         let normalizer = FaceNormalizer::new();
-        let recognizer = FaceRecognizer::new(&models_dir.join("w600k_r50.onnx").to_string_lossy())?;
+        let recognizer = FaceRecognizer::new_with_backend(
+            &models_dir.join("w600k_r50.onnx").to_string_lossy(),
+            state.ai_backend,
+            state.ai_device_id,
+            None,
+        )?;
 
         let mut candidates: Vec<(i64, FaceData)> = Vec::new();
         for (idx, (t, img)) in frames.iter().enumerate() {

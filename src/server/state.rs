@@ -1,17 +1,18 @@
+use crate::ai_config::AiRuntimeConfig;
 use crate::auth::oauth::{OAuthConfig, OAuthService};
 use crate::auth::AuthService;
-use crate::clip::{textual::TextualEncoder, visual::VisualEncoder, ClipConfig, ModelType};
+use crate::clip::{textual::TextualEncoder, visual::VisualEncoder, ClipConfig};
+use crate::database::embeddings::EmbeddingStore;
 use crate::database::meta_store::MetaStore;
 use crate::database::multi_tenant::MultiTenantDatabase;
 use crate::database::pg_meta_store::PgMetaStore;
-use crate::database::{embeddings::EmbeddingStore, Database};
 use crate::face_processing::FaceService;
 use crate::server::updates::UpdateService;
 use crate::yolo_detection::YoloDetector;
 use anyhow::Result;
 use chrono::Utc;
-use ort::execution_providers::CPUExecutionProvider;
 use parking_lot::RwLock;
+use rknn_runtime::{AiBackend, RknnRuntime};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc as StdArc;
@@ -24,7 +25,11 @@ pub struct AppState {
     pub yolo_detector: Arc<YoloDetector>,
     pub face_service: Arc<FaceService>,
     pub default_model: String,
+    pub ai_backend: AiBackend,
+    pub ai_device_id: i32,
     pub model_path: PathBuf,
+    pub rknn_model_path: PathBuf,
+    pub rknn_runtime: Option<Arc<RknnRuntime>>,
     pub model_configs: HashMap<String, ClipConfig>,
     pub auth_service: Arc<AuthService>,
     pub oauth_service: Option<Arc<OAuthService>>,
@@ -115,12 +120,14 @@ impl AppState {
         )
         .unwrap_or(1)
     }
-    pub async fn new(db_path: &str, model_configs: Vec<ClipConfig>) -> Result<Self> {
+    pub async fn new(
+        db_path: &str,
+        model_configs: Vec<ClipConfig>,
+        ai_config: AiRuntimeConfig,
+    ) -> Result<Self> {
         // Initialize a single ONNX Runtime environment early and deterministically.
         // Ignore AlreadyInitialized errors to allow hot-reload/dev runs.
-        let _ = ort::init()
-            .with_execution_providers([CPUExecutionProvider::default().build()])
-            .commit();
+        let _ = ort::init().commit();
         // Database creation is handled per-user by MultiTenantDatabase
         // Use the configured data directory from CLI/env
 
@@ -132,6 +139,23 @@ impl AppState {
         // Load models
         let mut visual_encoders = HashMap::new();
         let mut textual_encoders = HashMap::new();
+        let rknn_runtime = if ai_config.backend.prefers_rknn() {
+            match RknnRuntime::load(ai_config.runtime_lib_override.as_deref()) {
+                Ok(runtime) => {
+                    tracing::info!("Loaded RKNN runtime from {}", runtime.loaded_from.display());
+                    Some(Arc::new(runtime))
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "RKNN runtime unavailable, using CPU fallbacks for all AI models: {:#}",
+                        err
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         let default_model = model_configs
             .first()
@@ -146,9 +170,18 @@ impl AppState {
 
         for config in model_configs {
             let model_name = config.model_name.clone();
+            let visual_rknn_path = ai_config.rknn_model_file(format!("{}/visual.rknn", model_name));
+            let textual_rknn_path =
+                ai_config.rknn_model_file(format!("{}/textual.rknn", model_name));
 
             // Try to load visual encoder
-            match VisualEncoder::new(config.clone()) {
+            match VisualEncoder::new_with_backend(
+                config.clone(),
+                ai_config.backend,
+                ai_config.device_id,
+                rknn_runtime.clone(),
+                Some(&visual_rknn_path),
+            ) {
                 Ok(encoder) => {
                     visual_encoders.insert(model_name.clone(), encoder);
                     tracing::info!("Loaded visual encoder: {}", model_name);
@@ -159,7 +192,13 @@ impl AppState {
             }
 
             // Try to load textual encoder
-            match TextualEncoder::new(config) {
+            match TextualEncoder::new_with_backend(
+                config,
+                ai_config.backend,
+                ai_config.device_id,
+                rknn_runtime.clone(),
+                Some(&textual_rknn_path),
+            ) {
                 Ok(encoder) => {
                     textual_encoders.insert(model_name.clone(), encoder);
                     tracing::info!("Loaded textual encoder: {}", model_name);
@@ -176,7 +215,14 @@ impl AppState {
 
         // Initialize YOLO detector
         let yolo_path = model_path.join("yolov8m-oiv7.onnx");
-        let yolo_detector = Arc::new(YoloDetector::new(Some(&yolo_path))?);
+        let yolo_rknn_path = ai_config.rknn_model_file("yolov8m-oiv7.rknn");
+        let yolo_detector = Arc::new(YoloDetector::new_with_backend(
+            Some(&yolo_path),
+            ai_config.backend,
+            ai_config.device_id,
+            rknn_runtime.clone(),
+            Some(&yolo_rknn_path),
+        )?);
 
         // Optional Postgres embeddings backend (connect early so face service can use it)
         let pg_client = if std::env::var("EMBEDDINGS_BACKEND")
@@ -211,6 +257,10 @@ impl AppState {
         let face_models_dir = model_path.join("face");
         let face_service = Arc::new(FaceService::new(
             Some(face_models_dir.as_path()),
+            ai_config.backend,
+            ai_config.device_id,
+            rknn_runtime.clone(),
+            Some(ai_config.rknn_model_root.as_path()),
             pg_client.clone(),
         )?);
 
@@ -299,7 +349,7 @@ impl AppState {
             .unwrap_or(7);
         tokio::spawn(async move {
             use std::time::{Duration, SystemTime};
-            use tracing::{info, warn};
+            use tracing::info;
             let ttl = Duration::from_secs(ttl_days * 24 * 3600);
             let mut interval = tokio::time::interval(Duration::from_secs(48 * 3600));
             loop {
@@ -471,7 +521,11 @@ impl AppState {
             yolo_detector,
             face_service,
             default_model,
+            ai_backend: ai_config.backend,
+            ai_device_id: ai_config.device_id,
             model_path,
+            rknn_model_path: ai_config.rknn_model_root,
+            rknn_runtime,
             model_configs: config_map,
             auth_service,
             oauth_service,
@@ -506,6 +560,10 @@ impl AppState {
 
     pub fn model_file(&self, relative_path: impl AsRef<Path>) -> PathBuf {
         self.model_path.join(relative_path)
+    }
+
+    pub fn rknn_model_file(&self, relative_path: impl AsRef<Path>) -> PathBuf {
+        self.rknn_model_path.join(relative_path)
     }
 
     /// Get or create an upload events broadcast channel for a user

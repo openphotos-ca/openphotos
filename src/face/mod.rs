@@ -13,6 +13,7 @@ pub use types::{DetectedFace, FaceEmbedding, Person};
 use anyhow::Result;
 use std::path::Path;
 use image::DynamicImage;
+use rknn_runtime::AiBackend;
 
 /// High-level face processing pipeline
 pub struct FaceProcessor {
@@ -23,9 +24,21 @@ pub struct FaceProcessor {
 
 impl FaceProcessor {
     pub fn new(models_path: &Path) -> Result<Self> {
-        let detector = FaceDetector::new(&models_path.join("face/det_10g.onnx"))?;
+        Self::new_with_backend(models_path, AiBackend::Cpu, 0)
+    }
+
+    pub fn new_with_backend(models_path: &Path, ai_backend: AiBackend, ai_device_id: i32) -> Result<Self> {
+        let detector = FaceDetector::new_with_backend(
+            &models_path.join("face/det_10g.onnx"),
+            ai_backend,
+            ai_device_id,
+        )?;
         let normalizer = FaceNormalizer::new();
-        let recognizer = FaceRecognizer::new(&models_path.join("face/w600k_r50.onnx"))?;
+        let recognizer = FaceRecognizer::new_with_backend(
+            &models_path.join("face/w600k_r50.onnx"),
+            ai_backend,
+            ai_device_id,
+        )?;
         
         Ok(Self {
             detector,

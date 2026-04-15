@@ -1,60 +1,123 @@
-use anyhow::{anyhow, Result};
+use anyhow::Result;
 use image::{DynamicImage, GenericImageView};
-use log::{debug, info, warn};
 use ndarray::Array4;
-use ort::{
-    execution_providers::CPUExecutionProvider,
-    session::{Session, SessionOutputs},
-    value::Value,
-};
+use ort::{session::Session, value::Value};
+use ort_session::{build_session_from_file, ProviderConfig, SessionTuning};
+use rknn_runtime::{AiBackend, RknnModel, RknnRuntime, TensorFormat, TensorOutput, TensorSpec};
 use std::sync::{Arc, Mutex};
+use tracing::{debug, info, warn};
 
 use crate::types::{BoundingBox, FaceDetection, FacialLandmarks};
 
 pub struct FaceDetector {
     session: Option<Arc<Mutex<Session>>>,
+    rknn_model: Option<Arc<RknnModel>>,
+    active_backend: Mutex<InferenceBackend>,
     input_size: (i32, i32),
     min_score: f32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InferenceBackend {
+    Ort(AiBackend),
+    Rknn,
+}
+
 impl FaceDetector {
     pub fn new(model_path: &str) -> Result<Self> {
+        Self::new_with_backend(model_path, AiBackend::Cpu, 0, None, None)
+    }
+
+    pub fn new_with_backend(
+        model_path: &str,
+        ai_backend: AiBackend,
+        ai_device_id: i32,
+        rknn_runtime: Option<Arc<RknnRuntime>>,
+        rknn_model_path: Option<&std::path::Path>,
+    ) -> Result<Self> {
         info!(
             "Initializing RetinaFace Detector with model: {}",
             model_path
         );
 
-        let session = if !model_path.is_empty() && std::path::Path::new(model_path).exists() {
-            info!("Loading RetinaFace ONNX model from {}", model_path);
-
-            // Initialize ONNX Runtime
-            // Reuse global ORT environment if already initialized
-            let _ = ort::init()
-                .with_execution_providers([CPUExecutionProvider::default().build()])
-                .commit()
-                .or_else(|_| Ok::<bool, ort::Error>(false))?;
-
-            // Create session
-            Some(Arc::new(Mutex::new(
-                Session::builder()?.commit_from_file(model_path)?,
-            )))
+        let ort_backend = if ai_backend.prefers_rknn() {
+            AiBackend::Cpu
         } else {
-            warn!("RetinaFace model not found at {}", model_path);
+            ai_backend
+        };
+        let (session, ort_backend) =
+            if !model_path.is_empty() && std::path::Path::new(model_path).exists() {
+                info!("Loading RetinaFace ONNX model from {}", model_path);
+                let built = build_session_from_file(
+                    std::path::Path::new(model_path),
+                    ProviderConfig::new(ort_backend, ai_device_id),
+                    SessionTuning::default(),
+                )?;
+                (
+                    Some(Arc::new(Mutex::new(built.session))),
+                    Some(built.backend),
+                )
+            } else {
+                warn!("RetinaFace model not found at {}", model_path);
+                (None, None)
+            };
+
+        let rknn_model = if ai_backend.prefers_rknn() {
+            try_load_rknn_model("RetinaFace", rknn_runtime, rknn_model_path)?
+        } else {
             None
+        };
+
+        let active_backend = if ai_backend.prefers_rknn() && rknn_model.is_some() {
+            InferenceBackend::Rknn
+        } else {
+            InferenceBackend::Ort(ort_backend.unwrap_or(AiBackend::Cpu))
         };
 
         Ok(Self {
             session,
+            rknn_model,
+            active_backend: Mutex::new(active_backend),
             input_size: (640, 640), // RetinaFace standard input
             min_score: 0.5,         // Match Python's det_thresh
         })
     }
 
     pub fn detect(&self, image: &DynamicImage) -> Result<Vec<FaceDetection>> {
+        match *self.active_backend.lock().unwrap() {
+            InferenceBackend::Ort(_) => self.detect_via_cpu_or_placeholder(image),
+            InferenceBackend::Rknn => {
+                if let Some(model) = &self.rknn_model {
+                    match self.detect_with_rknn(image, model) {
+                        Ok(detections) => Ok(detections),
+                        Err(err) => {
+                            warn!(
+                                "RetinaFace RKNN inference failed, downgrading to CPU fallback: {}",
+                                err
+                            );
+                            *self.active_backend.lock().unwrap() =
+                                InferenceBackend::Ort(AiBackend::Cpu);
+                            self.detect_via_cpu_or_placeholder(image)
+                        }
+                    }
+                } else {
+                    self.detect_via_cpu_or_placeholder(image)
+                }
+            }
+        }
+    }
+
+    pub fn backend_name(&self) -> &'static str {
+        match *self.active_backend.lock().unwrap() {
+            InferenceBackend::Ort(backend) => backend.as_str(),
+            InferenceBackend::Rknn => "rknn",
+        }
+    }
+
+    fn detect_via_cpu_or_placeholder(&self, image: &DynamicImage) -> Result<Vec<FaceDetection>> {
         if let Some(session_cell) = &self.session {
             self.detect_with_retinaface(image, session_cell)
         } else {
-            // Only allow placeholder detections when explicitly enabled for testing
             let allow_placeholder = std::env::var("FACE_ALLOW_PLACEHOLDER")
                 .ok()
                 .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
@@ -100,7 +163,8 @@ impl FaceDetector {
         );
 
         // Preprocess image for RetinaFace
-        let input_tensor = self.preprocess_image(&rgb_image)?;
+        let input_array = self.preprocess_image(&rgb_image)?;
+        let input_tensor = Value::from_array(input_array)?;
 
         // Run inference
         let inputs = ort::inputs!["input.1" => input_tensor];
@@ -109,6 +173,7 @@ impl FaceDetector {
         let outputs = session.run(inputs)?;
         let dt = t0.elapsed();
         info!("[FACE] ONNX session.run completed in {:.2?}", dt);
+        let outputs = ort_outputs_to_tensors(&outputs)?;
 
         // Process outputs with proper coordinate scaling
         let mut detections =
@@ -133,7 +198,35 @@ impl FaceDetector {
         Ok(detections)
     }
 
-    fn preprocess_image(&self, image: &image::RgbImage) -> Result<Value> {
+    fn detect_with_rknn(
+        &self,
+        image: &DynamicImage,
+        model: &Arc<RknnModel>,
+    ) -> Result<Vec<FaceDetection>> {
+        let rgb_image = image.to_rgb8();
+        let (orig_width, orig_height) = rgb_image.dimensions();
+
+        let im_ratio = orig_height as f32 / orig_width as f32;
+        let model_ratio = self.input_size.1 as f32 / self.input_size.0 as f32;
+        let (_new_width, new_height) = if im_ratio > model_ratio {
+            let new_height = self.input_size.1 as u32;
+            let new_width = (new_height as f32 / im_ratio) as u32;
+            (new_width, new_height)
+        } else {
+            let new_width = self.input_size.0 as u32;
+            let new_height = (new_width as f32 * im_ratio) as u32;
+            (new_width, new_height)
+        };
+        let det_scale = new_height as f32 / orig_height as f32;
+
+        let input_array = self.preprocess_image(&rgb_image)?;
+        let input_shape = vec![1, 3, self.input_size.1 as usize, self.input_size.0 as usize];
+        let input_data = input_array.iter().copied().collect::<Vec<_>>();
+        let outputs = model.run_nchw_f32(&input_shape, &input_data)?;
+        self.postprocess_retinaface_outputs(&outputs, det_scale, orig_width, orig_height)
+    }
+
+    fn preprocess_image(&self, image: &image::RgbImage) -> Result<Array4<f32>> {
         // InsightFace preprocessing - CRITICAL: preserve aspect ratio with zero padding!
         // This matches InsightFace detect() method exactly:
         // 1. Calculate aspect ratio preserving resize
@@ -188,19 +281,19 @@ impl FaceDetector {
 
         // Rest of the array remains zeros (padding)
 
-        Ok(Value::from_array(array)?.into())
+        Ok(array)
     }
 
     fn postprocess_retinaface_outputs(
         &self,
-        outputs: &SessionOutputs<'_>,
+        outputs: &[TensorOutput],
         det_scale: f32,
         orig_width: u32,
         orig_height: u32,
     ) -> Result<Vec<FaceDetection>> {
         debug!("RetinaFace model outputs {} tensors", outputs.len());
         // List output names for quick debugging
-        let mut names: Vec<String> = outputs.iter().map(|(n, _)| n.to_string()).collect();
+        let mut names: Vec<String> = outputs.iter().filter_map(|o| o.spec.name.clone()).collect();
         names.sort();
         debug!("Output names: {:?}", names);
 
@@ -212,29 +305,28 @@ impl FaceDetector {
         // idx=1 (stride 16): scores=net_outs[1], bbox=net_outs[4], kps=net_outs[7] -> "471", "474", "477"
         // idx=2 (stride 32): scores=net_outs[2], bbox=net_outs[5], kps=net_outs[8] -> "494", "497", "500"
 
-        let input_size = (640, 640); // Model input size
         let stride_configs = vec![
-            (8, "448", "451", "454"),  // stride 8: cls, bbox, landmarks
-            (16, "471", "474", "477"), // stride 16: cls, bbox, landmarks
-            (32, "494", "497", "500"), // stride 32: cls, bbox, landmarks
+            (8, "448", "451", "454", 0usize, 3usize, 6usize), // stride 8
+            (16, "471", "474", "477", 1usize, 4usize, 7usize), // stride 16
+            (32, "494", "497", "500", 2usize, 5usize, 8usize), // stride 32
         ];
 
         let mut all_boxes = Vec::new();
         let mut all_scores = Vec::new();
         let mut all_landmarks = Vec::new();
 
-        for (stride, cls_key, bbox_key, ldm_key) in stride_configs {
+        for (stride, cls_key, bbox_key, ldm_key, cls_idx, bbox_idx, ldm_idx) in stride_configs {
             // Get outputs by name (matching InsightFace exactly)
-            let cls_output = outputs.iter().find(|(name, _)| *name == cls_key);
-            let bbox_output = outputs.iter().find(|(name, _)| *name == bbox_key);
-            let ldm_output = outputs.iter().find(|(name, _)| *name == ldm_key);
+            let cls_output = find_retina_output(outputs, cls_key, cls_idx);
+            let bbox_output = find_retina_output(outputs, bbox_key, bbox_idx);
+            let ldm_output = find_retina_output(outputs, ldm_key, ldm_idx);
 
-            if let (Some((_, cls_tensor)), Some((_, bbox_tensor)), Some((_, ldm_tensor))) =
+            if let (Some(cls_tensor), Some(bbox_tensor), Some(ldm_tensor)) =
                 (cls_output, bbox_output, ldm_output)
             {
-                let (_, cls_data) = cls_tensor.try_extract_tensor::<f32>()?;
-                let (_, bbox_data) = bbox_tensor.try_extract_tensor::<f32>()?;
-                let (_, ldm_data) = ldm_tensor.try_extract_tensor::<f32>()?;
+                let cls_data = cls_tensor.data.as_slice();
+                let bbox_data = bbox_tensor.data.as_slice();
+                let ldm_data = ldm_tensor.data.as_slice();
 
                 debug!(
                     "Processing stride {}: cls_len={}, bbox_len={}, ldm_len={}",
@@ -700,4 +792,73 @@ impl FaceDetector {
 
         Ok(keep)
     }
+}
+
+fn try_load_rknn_model(
+    label: &str,
+    runtime: Option<Arc<RknnRuntime>>,
+    model_path: Option<&std::path::Path>,
+) -> Result<Option<Arc<RknnModel>>> {
+    let Some(model_path) = model_path else {
+        info!("{label} RKNN model path not configured, using CPU backend");
+        return Ok(None);
+    };
+    if !model_path.exists() {
+        info!(
+            "{} RKNN model not found at {}, using CPU backend",
+            label,
+            model_path.display()
+        );
+        return Ok(None);
+    }
+    let Some(runtime) = runtime else {
+        info!("{label} RKNN runtime unavailable, using CPU backend");
+        return Ok(None);
+    };
+    match runtime.load_model(model_path) {
+        Ok(model) => {
+            info!("Loaded {} RKNN model from {}", label, model_path.display());
+            Ok(Some(Arc::new(model)))
+        }
+        Err(err) => {
+            info!(
+                "Failed to load {} RKNN model {}, using CPU backend: {:#}",
+                label,
+                model_path.display(),
+                err
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn ort_outputs_to_tensors(outputs: &ort::session::SessionOutputs<'_>) -> Result<Vec<TensorOutput>> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value))| {
+            let (shape, data) = value.try_extract_tensor::<f32>()?;
+            Ok(TensorOutput {
+                spec: TensorSpec {
+                    index,
+                    name: Some(name.to_string()),
+                    dims: shape.iter().map(|dim| *dim as usize).collect(),
+                    element_count: data.len(),
+                    format: TensorFormat::Undefined,
+                },
+                data: data.to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn find_retina_output<'a>(
+    outputs: &'a [TensorOutput],
+    expected_name: &str,
+    fallback_index: usize,
+) -> Option<&'a TensorOutput> {
+    outputs
+        .iter()
+        .find(|output| output.spec.name.as_deref() == Some(expected_name))
+        .or_else(|| outputs.get(fallback_index))
 }

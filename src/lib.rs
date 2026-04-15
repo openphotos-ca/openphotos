@@ -1,3 +1,4 @@
+pub mod ai_config;
 pub mod auth;
 pub mod clip;
 pub mod database;

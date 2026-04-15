@@ -65,7 +65,7 @@ dependencies = [
 
 [[package]]
 name = "albumbud"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "argon2",
@@ -103,10 +103,12 @@ dependencies = [
  "openssl",
  "openssl-sys",
  "ort",
+ "ort-session",
  "parking_lot",
  "rand 0.8.5",
  "regex",
  "reqwest 0.12.23",
+ "rknn-runtime",
  "rsa",
  "semver",
  "serde",
@@ -1390,7 +1392,9 @@ dependencies = [
  "nalgebra 0.32.6",
  "ndarray",
  "ort",
+ "ort-session",
  "reqwest 0.11.27",
+ "rknn-runtime",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -3332,6 +3336,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "ort-session"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "ort",
+ "rknn-runtime",
+]
+
+[[package]]
 name = "ort-sys"
 version = "2.0.0-rc.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4123,6 +4137,14 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rknn-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "libloading",
 ]
 
 [[package]]

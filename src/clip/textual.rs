@@ -1,22 +1,29 @@
 use anyhow::{Context, Result};
 use ndarray::Array2;
-use ort::{
-    session::{
-        builder::{GraphOptimizationLevel, SessionBuilder},
-        Session,
-    },
-    value::Value,
+use ort::{session::Session, value::Value};
+use ort_session::{
+    build_session_from_file, ProviderConfig, SessionOptimizationLevel, SessionTuning,
 };
 use parking_lot::Mutex;
+use rknn_runtime::{AiBackend, RknnModel, RknnRuntime, TensorFormat, TensorOutput, TensorSpec};
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use tokenizers::tokenizer::Tokenizer;
 use tracing::{debug, info, instrument};
 
 use super::{normalize_embedding, ClipConfig};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EncoderBackend {
+    Ort(AiBackend),
+    Rknn,
+}
+
 pub struct TextualEncoder {
-    session: Mutex<Session>,
+    cpu_session: Option<Arc<Mutex<Session>>>,
+    rknn_model: Option<Arc<RknnModel>>,
+    active_backend: Mutex<EncoderBackend>,
     tokenizer: Tokenizer,
     config: ClipConfig,
     context_length: usize,
@@ -24,6 +31,16 @@ pub struct TextualEncoder {
 
 impl TextualEncoder {
     pub fn new(config: ClipConfig) -> Result<Self> {
+        Self::new_with_backend(config, AiBackend::Cpu, 0, None, None)
+    }
+
+    pub fn new_with_backend(
+        config: ClipConfig,
+        ai_backend: AiBackend,
+        ai_device_id: i32,
+        rknn_runtime: Option<Arc<RknnRuntime>>,
+        rknn_model_path: Option<&Path>,
+    ) -> Result<Self> {
         let model_path = Path::new(&config.model_path)
             .join(&config.model_name)
             .join("textual.onnx");
@@ -35,11 +52,26 @@ impl TextualEncoder {
         info!("Loading CLIP textual model from: {:?}", model_path);
         info!("Loading tokenizer from: {:?}", tokenizer_path);
 
-        // Load ONNX model
-        let session = SessionBuilder::new()?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_intra_threads(1)?
-            .commit_from_file(model_path)?;
+        let ort_backend = if ai_backend.prefers_rknn() {
+            AiBackend::Cpu
+        } else {
+            ai_backend
+        };
+        let (cpu_session, ort_backend) =
+            match build_ort_session(&model_path, ort_backend, ai_device_id) {
+                Ok(bundle) => (
+                    Some(Arc::new(Mutex::new(bundle.session))),
+                    Some(bundle.backend),
+                ),
+                Err(err) if ai_backend.prefers_rknn() => {
+                    info!(
+                    "Falling back to RKNN-only CLIP textual setup because CPU session failed: {}",
+                    err
+                );
+                    (None, None)
+                }
+                Err(err) => return Err(err),
+            };
 
         // Load tokenizer
         let mut tokenizer = Tokenizer::from_file(tokenizer_path)
@@ -51,11 +83,41 @@ impl TextualEncoder {
         // Let the tokenizer handle special tokens properly - don't override padding
         // The CLIP tokenizer should already be configured correctly in the JSON file
 
-        debug!("Textual model inputs: {:?}", session.inputs.len());
-        debug!("Textual model outputs: {:?}", session.outputs.len());
+        let rknn_model = if ai_backend.prefers_rknn() && supports_rknn_text(&config) {
+            try_load_rknn_model("CLIP textual", rknn_runtime, rknn_model_path)?
+        } else {
+            if ai_backend.prefers_rknn() && !supports_rknn_text(&config) {
+                info!(
+                    "CLIP textual model {:?} requires unsupported multi-input RKNN flow, using CPU backend",
+                    config.model_type
+                );
+            }
+            None
+        };
+
+        if cpu_session.is_none() && rknn_model.is_none() {
+            return Err(anyhow::anyhow!(
+                "failed to initialize any CLIP textual backend for {:?}",
+                model_path
+            ));
+        }
+
+        let active_backend = if ai_backend.prefers_rknn() && rknn_model.is_some() {
+            EncoderBackend::Rknn
+        } else {
+            EncoderBackend::Ort(ort_backend.unwrap_or(AiBackend::Cpu))
+        };
+
+        if let Some(session) = &cpu_session {
+            let session = session.lock();
+            debug!("Textual model inputs: {:?}", session.inputs.len());
+            debug!("Textual model outputs: {:?}", session.outputs.len());
+        }
 
         Ok(Self {
-            session: Mutex::new(session),
+            cpu_session,
+            rknn_model,
+            active_backend: Mutex::new(active_backend),
             tokenizer,
             config,
             context_length,
@@ -95,15 +157,39 @@ impl TextualEncoder {
 
         eprintln!("Padded tokens: {:?}", &input_ids[..10]); // Show first 10 tokens
 
-        // Check model type to use appropriate tensor types and inputs
-        let session_guard = self.session.lock();
+        let backend = *self.active_backend.lock();
+        match backend {
+            EncoderBackend::Ort(_) => self.encode_with_ort(&input_ids),
+            EncoderBackend::Rknn => match self.encode_with_rknn(&input_ids) {
+                Ok(embedding) => Ok(embedding),
+                Err(err) => {
+                    if self.cpu_session.is_some() {
+                        info!(
+                            "RKNN CLIP textual inference failed, downgrading to CPU fallback: {}",
+                            err
+                        );
+                        *self.active_backend.lock() = EncoderBackend::Ort(AiBackend::Cpu);
+                        self.encode_with_ort(&input_ids)
+                    } else {
+                        Err(err)
+                    }
+                }
+            },
+        }
+    }
+
+    fn encode_with_ort(&self, input_ids: &[u32]) -> Result<Vec<f32>> {
+        let session = self
+            .cpu_session
+            .as_ref()
+            .context("CLIP textual ONNX backend is unavailable")?;
+        let session_guard = session.lock();
         let input_names: Vec<String> = session_guard
             .inputs
             .iter()
             .map(|i| i.name.clone())
             .collect();
         drop(session_guard);
-
         let mut inputs: HashMap<String, Value> = HashMap::new();
 
         if self.config.is_multilingual {
@@ -160,25 +246,40 @@ impl TextualEncoder {
         }
 
         // Run inference
-        let mut session_guard = self.session.lock();
+        let mut session_guard = session.lock();
         let outputs = session_guard.run(inputs)?;
+        let outputs = ort_outputs_to_tensors(&outputs)?;
+        self.normalize_output(select_textual_output(&outputs)?)
+    }
 
-        // Get the embedding output - try common output names
-        let output_key = if outputs.contains_key("embedding") {
-            "embedding" // ← CRITICAL FIX: OpenAI CLIP models use 'embedding' output name
-        } else if outputs.contains_key("output") {
-            "output"
-        } else if outputs.contains_key("text_features") {
-            "text_features"
+    fn encode_with_rknn(&self, input_ids: &[u32]) -> Result<Vec<f32>> {
+        let model = self
+            .rknn_model
+            .as_ref()
+            .context("CLIP textual RKNN backend is unavailable")?;
+        let outputs = if self.config.is_multilingual {
+            match self.config.model_type {
+                crate::clip::ModelType::XlmRobertaClip => {
+                    let ids_vec = input_ids.iter().map(|&id| id as i64).collect::<Vec<_>>();
+                    model.run_tokens_i64(&[1, self.context_length], &ids_vec)?
+                }
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "multi-input RKNN textual execution is not supported for {:?}",
+                        self.config.model_type
+                    ))
+                }
+            }
         } else {
-            outputs.keys().next().context("No output found")?
+            let ids_vec = input_ids.iter().map(|&id| id as i32).collect::<Vec<_>>();
+            model.run_tokens_i32(&[1, self.context_length], &ids_vec)?
         };
+        self.normalize_output(select_textual_output(&outputs)?)
+    }
 
-        let output_value = &outputs[output_key];
-
-        let (shape, embedding_data) = output_value
-            .try_extract_tensor::<f32>()
-            .context("Failed to extract embedding tensor")?;
+    fn normalize_output(&self, output: &TensorOutput) -> Result<Vec<f32>> {
+        let shape = &output.spec.dims;
+        let embedding_data = &output.data;
 
         let embedding_vec = if self.config.is_multilingual {
             match self.config.model_type {
@@ -249,6 +350,109 @@ impl TextualEncoder {
     pub fn embedding_dim(&self) -> usize {
         self.config.embedding_dim
     }
+}
+
+fn supports_rknn_text(config: &ClipConfig) -> bool {
+    !config.is_multilingual || matches!(config.model_type, crate::clip::ModelType::XlmRobertaClip)
+}
+
+fn build_ort_session(
+    model_path: &Path,
+    backend: AiBackend,
+    device_id: i32,
+) -> Result<ort_session::SessionWithBackend> {
+    build_session_from_file(
+        model_path,
+        ProviderConfig::new(backend, device_id),
+        SessionTuning {
+            optimization_level: SessionOptimizationLevel::Level3,
+            intra_threads: Some(1),
+        },
+    )
+    .with_context(|| {
+        format!(
+            "failed to load CLIP textual ONNX model {}",
+            model_path.display()
+        )
+    })
+}
+
+fn try_load_rknn_model(
+    label: &str,
+    runtime: Option<Arc<RknnRuntime>>,
+    model_path: Option<&Path>,
+) -> Result<Option<Arc<RknnModel>>> {
+    let Some(model_path) = model_path else {
+        info!("{label} RKNN model path not configured, using CPU backend");
+        return Ok(None);
+    };
+    if !model_path.exists() {
+        info!(
+            "{} RKNN model not found at {}, using CPU backend",
+            label,
+            model_path.display()
+        );
+        return Ok(None);
+    }
+    let Some(runtime) = runtime else {
+        info!("{label} RKNN runtime unavailable, using CPU backend");
+        return Ok(None);
+    };
+    match runtime.load_model(model_path) {
+        Ok(model) => {
+            info!("Loaded {} RKNN model from {}", label, model_path.display());
+            Ok(Some(Arc::new(model)))
+        }
+        Err(err) => {
+            info!(
+                "Failed to load {} RKNN model {}, using CPU backend: {:#}",
+                label,
+                model_path.display(),
+                err
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn ort_outputs_to_tensors(outputs: &ort::session::SessionOutputs<'_>) -> Result<Vec<TensorOutput>> {
+    outputs
+        .iter()
+        .enumerate()
+        .map(|(index, (name, value))| {
+            let (shape, data) = value
+                .try_extract_tensor::<f32>()
+                .context("Failed to extract CLIP textual tensor")?;
+            Ok(TensorOutput {
+                spec: TensorSpec {
+                    index,
+                    name: Some(name.to_string()),
+                    dims: shape.iter().map(|dim| *dim as usize).collect(),
+                    element_count: data.len(),
+                    format: TensorFormat::Undefined,
+                },
+                data: data.to_vec(),
+            })
+        })
+        .collect()
+}
+
+fn select_textual_output<'a>(outputs: &'a [TensorOutput]) -> Result<&'a TensorOutput> {
+    outputs
+        .iter()
+        .find(|output| output.spec.name.as_deref() == Some("embedding"))
+        .or_else(|| {
+            outputs
+                .iter()
+                .find(|output| output.spec.name.as_deref() == Some("output"))
+        })
+        .or_else(|| {
+            outputs
+                .iter()
+                .find(|output| output.spec.name.as_deref() == Some("text_features"))
+        })
+        .or_else(|| outputs.first())
+        .context("No CLIP textual output found")
 }
 
 // Alternative simple tokenizer if tokenizer.json is not available

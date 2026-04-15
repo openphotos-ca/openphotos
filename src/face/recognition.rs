@@ -2,12 +2,14 @@ use anyhow::{anyhow, Result};
 use image::RgbImage;
 use log::{debug, info, warn};
 use ndarray::Array4;
+use ort_session::{build_session_from_file, ProviderConfig, SessionTuning};
 use ort::{
-    execution_providers::CPUExecutionProvider,
     session::{Session, SessionOutputs},
     value::Value
 };
+use rknn_runtime::AiBackend;
 use std::cell::RefCell;
+use std::path::Path;
 
 pub struct FaceRecognizer {
     session: Option<RefCell<Session>>,
@@ -15,23 +17,23 @@ pub struct FaceRecognizer {
 }
 
 impl FaceRecognizer {
-    pub fn new(model_path: &str) -> Result<Self> {
-        info!("Initializing ArcFace Recognizer with model: {}", model_path);
+    pub fn new(model_path: &Path) -> Result<Self> {
+        Self::new_with_backend(model_path, AiBackend::Cpu, 0)
+    }
 
-        let session = if !model_path.is_empty() && std::path::Path::new(model_path).exists() {
-            info!("Loading ArcFace ONNX model from {}", model_path);
-            
-            // Initialize ONNX Runtime (reuse existing initialization)
-            ort::init()
-                .with_execution_providers([CPUExecutionProvider::default().build()])
-                .commit()
-                .or_else(|_| Ok::<bool, ort::Error>(false))?; // Ignore if already initialized
-            
-            // Create session
-            Some(RefCell::new(Session::builder()?
-                .commit_from_file(model_path)?))
+    pub fn new_with_backend(model_path: &Path, ai_backend: AiBackend, ai_device_id: i32) -> Result<Self> {
+        info!("Initializing ArcFace Recognizer with model: {}", model_path.display());
+
+        let session = if model_path.exists() {
+            info!("Loading ArcFace ONNX model from {}", model_path.display());
+            let built = build_session_from_file(
+                model_path,
+                ProviderConfig::new(ai_backend, ai_device_id),
+                SessionTuning::default(),
+            )?;
+            Some(RefCell::new(built.session))
         } else {
-            warn!("ArcFace model not found at {}", model_path);
+            warn!("ArcFace model not found at {}", model_path.display());
             None
         };
 

@@ -7,6 +7,8 @@ edition = "2021"
 # ONNX Runtime for model inference
 # Align ONNX Runtime with server crate to avoid duplicate/ABI-mismatched ORT in one process
 ort = { version = "=2.0.0-rc.10", features = ["download-binaries"] }
+rknn-runtime = { path = "../rknn-runtime" }
+ort-session = { path = "../ort-session" }
 
 # Image processing
 image = { version = "0.24", features = ["jpeg", "png"] }
@@ -56,4 +58,8 @@ path = "src/face_clustering_main.rs"
 
 [features]
 default = []
-gpu = ["ort/cuda"]
+gpu = ["gpu-cuda"]
+gpu-cuda = ["ort-session/cuda"]
+gpu-coreml = ["ort-session/coreml"]
+gpu-directml = ["ort-session/directml"]
+gpu-migraphx = ["ort-session/migraphx"]

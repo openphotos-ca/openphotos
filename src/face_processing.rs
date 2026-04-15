@@ -4,6 +4,7 @@ use duckdb::params;
 use image::imageops::FilterType;
 use image::GenericImageView;
 use once_cell::sync::Lazy;
+use rknn_runtime::{AiBackend, RknnRuntime};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -61,6 +62,10 @@ pub struct FaceService {
 impl FaceService {
     pub fn new(
         face_models_dir: Option<&Path>,
+        ai_backend: AiBackend,
+        ai_device_id: i32,
+        rknn_runtime: Option<Arc<RknnRuntime>>,
+        rknn_models_dir: Option<&Path>,
         pg_client: Option<Arc<tokio_postgres::Client>>,
     ) -> Result<Self> {
         match face_models_dir {
@@ -93,10 +98,24 @@ impl FaceService {
 
                 // Initialize face processing components
                 info!("[FACE] Loading detector model at {:?}", detector_path);
-                let detector = FaceDetector::new(&detector_path.to_string_lossy())?;
+                let detector_rknn_path = rknn_models_dir.map(|root| root.join("face/det_10g.rknn"));
+                let detector = FaceDetector::new_with_backend(
+                    &detector_path.to_string_lossy(),
+                    ai_backend,
+                    ai_device_id,
+                    rknn_runtime.clone(),
+                    detector_rknn_path.as_deref(),
+                )?;
+                info!("[FACE] RetinaFace backend: {}", detector.backend_name());
                 let normalizer = FaceNormalizer::new();
                 info!("[FACE] Loading recognizer model at {:?}", recognizer_path);
-                let recognizer = FaceRecognizer::new(&recognizer_path.to_string_lossy())?;
+                let recognizer = FaceRecognizer::new_with_backend(
+                    &recognizer_path.to_string_lossy(),
+                    ai_backend,
+                    ai_device_id,
+                    None,
+                )?;
+                info!("[FACE] ArcFace backend: {}", recognizer.backend_name());
                 let clusterer = FaceClusterer::new(CLUSTERING_EPS, MIN_SAMPLES);
 
                 // Initialize YOLO for person detection pre-filtering
@@ -107,11 +126,21 @@ impl FaceService {
                     .join("yolov8n.onnx");
                 let yolo = if yolo_path.exists() {
                     info!("[FACE] Loading YOLO detector from: {:?}", yolo_path);
-                    Some(YoloDetector::new(Some(&yolo_path))?)
+                    let yolo_rknn_path = rknn_models_dir.map(|root| root.join("yolov8n.rknn"));
+                    Some(YoloDetector::new_with_backend(
+                        Some(&yolo_path),
+                        ai_backend,
+                        ai_device_id,
+                        rknn_runtime.clone(),
+                        yolo_rknn_path.as_deref(),
+                    )?)
                 } else {
                     warn!("[FACE] YOLO model not found at {:?}, using face detection without pre-filtering", yolo_path);
                     None
                 };
+                if let Some(ref yolo) = yolo {
+                    info!("[FACE] Face YOLO backend: {}", yolo.backend_name());
+                }
 
                 info!("[FACE] Face processing initialized successfully");
                 Ok(Self {

@@ -203,6 +203,7 @@ fn process_image_for_faces_in_regions(
                     face_detection.bbox.y2,
                 ),
                 confidence: face_detection.confidence,
+                aligned_thumbnail: None,
             });
         } else {
             info!("  Filtered out face detection outside person regions: ({:.0},{:.0}) to ({:.0},{:.0})", 
