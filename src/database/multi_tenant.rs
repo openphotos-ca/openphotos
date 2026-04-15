@@ -1981,6 +1981,7 @@ impl MultiTenantDatabase {
                 confidence REAL NOT NULL,
                 embedding FLOAT[512],
                 face_thumbnail BLOB,
+                time_ms INTEGER,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             );
             
@@ -2003,6 +2004,10 @@ impl MultiTenantDatabase {
         // Ensure user_id column exists for multi-tenant scoping and index it
         let _ = conn.execute(
             "ALTER TABLE faces_embed ADD COLUMN IF NOT EXISTS user_id VARCHAR",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE faces_embed ADD COLUMN IF NOT EXISTS time_ms INTEGER",
             [],
         );
         let _ = conn.execute(
