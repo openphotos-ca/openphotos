@@ -9,11 +9,41 @@ BACKEND="duckdb"   # duckdb | postgres
 PG_INIT="0"
 BUILD_LINUX="0"
 LINUX_TARGET=""
-LINUX_OUT_DIR="dist/linux"
+LINUX_OUT_DIR=""
 BUILD_WINDOWS="0"
 WINDOWS_TARGET=""
-WINDOWS_OUT_DIR="dist/windows"
-DOCKER_IMAGE="${DOCKER_IMAGE:-rust:1-bookworm}"
+WINDOWS_OUT_DIR=""
+DOCKER_IMAGE="${DOCKER_IMAGE:-rust:1.90-bookworm}"
+GPU_BACKEND="${OPENPHOTOS_GPU_BACKEND:-cpu}"
+
+repair_cargo_registry_crate() {
+  local registry_root="$1"
+  local crate_name="$2"
+  local crate_version="$3"
+  local required_rel_path="$4"
+  local crate_src_dir
+  local crate_archive
+
+  if [ -d "${registry_root}/cache" ]; then
+    while IFS= read -r -d '' crate_archive; do
+      if ! tar -tf "${crate_archive}" "${crate_name}-${crate_version}/${required_rel_path}" >/dev/null 2>&1; then
+        echo "Detected incomplete Cargo registry archive: ${crate_archive}" >&2
+        echo "Removing it so Cargo can re-download ${crate_name} ${crate_version}." >&2
+        rm -f "${crate_archive}"
+      fi
+    done < <(find "${registry_root}/cache" -mindepth 2 -maxdepth 2 -type f -name "${crate_name}-${crate_version}.crate" -print0 2>/dev/null || true)
+  fi
+
+  if [ -d "${registry_root}/src" ]; then
+    while IFS= read -r -d '' crate_src_dir; do
+      if [ ! -f "${crate_src_dir}/${required_rel_path}" ]; then
+        echo "Detected incomplete Cargo registry source: ${crate_src_dir}" >&2
+        echo "Removing it so Cargo can re-extract ${crate_name} ${crate_version}." >&2
+        rm -rf "${crate_src_dir}"
+      fi
+    done < <(find "${registry_root}/src" -mindepth 2 -maxdepth 2 -type d -name "${crate_name}-${crate_version}" -print0 2>/dev/null || true)
+  fi
+}
 
 usage() {
   echo "Usage: $0 [--db duckdb|postgres] [--pg-init] [--build-linux ...]" >&2
@@ -21,12 +51,54 @@ usage() {
   echo "  --pg-init         Initialize Postgres schema before starting (reads POSTGRES_* env)" >&2
   echo "  --build-linux     Build Linux release binaries (openphotos + rustus) in Docker and exit" >&2
   echo "  --linux-target    Rust target triple (default: x86_64-unknown-linux-gnu)" >&2
-  echo "  --linux-out       Output directory (default: dist/linux)" >&2
+  echo "  --linux-out       Output directory (default depends on OPENPHOTOS_GPU_BACKEND)" >&2
   echo "  --build-windows   Build Windows 64-bit release binaries (openphotos.exe + rustus.exe) in Docker and exit" >&2
   echo "  --windows-target  Rust target triple (default: x86_64-pc-windows-msvc)" >&2
-  echo "  --windows-out     Output directory (default: dist/windows)" >&2
-  echo "  DOCKER_IMAGE      Builder image (default: rust:1-bookworm)" >&2
+  echo "  --windows-out     Output directory (default depends on OPENPHOTOS_GPU_BACKEND)" >&2
+  echo "  OPENPHOTOS_GPU_BACKEND  cpu | cuda | directml | migraphx (default: cpu)" >&2
+  echo "  DOCKER_IMAGE      Builder image (default: rust:1.90-bookworm)" >&2
   exit 1
+}
+
+normalize_gpu_backend() {
+  local raw="${1:-cpu}"
+  case "${raw}" in
+    ""|cpu|cuda|directml|migraphx)
+      echo "${raw:-cpu}"
+      ;;
+    *)
+      echo "ERROR: unsupported OPENPHOTOS_GPU_BACKEND='${raw}' (expected cpu, cuda, directml, or migraphx)" >&2
+      exit 1
+      ;;
+  esac
+}
+
+default_linux_out_dir() {
+  case "$1" in
+    cuda) echo "dist/linux-nvidia" ;;
+    migraphx) echo "dist/linux-amd-rocm" ;;
+    *) echo "dist/linux" ;;
+  esac
+}
+
+default_windows_out_dir() {
+  case "$1" in
+    directml) echo "dist/windows-gpu" ;;
+    *) echo "dist/windows" ;;
+  esac
+}
+
+gpu_feature_name() {
+  case "$1" in
+    cpu) echo "" ;;
+    cuda) echo "gpu-cuda" ;;
+    directml) echo "gpu-directml" ;;
+    migraphx) echo "gpu-migraphx" ;;
+    *)
+      echo "ERROR: unsupported GPU backend '$1'" >&2
+      exit 1
+      ;;
+  esac
 }
 
 while [ $# -gt 0 ]; do
@@ -62,6 +134,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+GPU_BACKEND="$(normalize_gpu_backend "${GPU_BACKEND}")"
+if [ -z "${LINUX_OUT_DIR}" ]; then
+  LINUX_OUT_DIR="$(default_linux_out_dir "${GPU_BACKEND}")"
+fi
+if [ -z "${WINDOWS_OUT_DIR}" ]; then
+  WINDOWS_OUT_DIR="$(default_windows_out_dir "${GPU_BACKEND}")"
+fi
+
 # Build Linux release binaries using Docker on macOS.
 # Produces:
 #   - ${LINUX_OUT_DIR}/${target}/openphotos
@@ -70,18 +150,90 @@ build_linux_release() {
   local target="${LINUX_TARGET:-x86_64-unknown-linux-gnu}"
   local repo_root
   repo_root="$(cd "$(dirname "$0")" && pwd)"
+  local gpu_feature=""
+  local container_ort_lib_location=""
+  local container_ort_url=""
+  local default_migraphx_archive=""
+  local ort_linux_version="${ORT_LINUX_VERSION:-1.22.0}"
 
   if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: docker not found. Install Docker Desktop (or a compatible docker CLI) and retry." >&2
     exit 1
   fi
 
-  # Share host Cargo caches with the container to avoid re-downloading the crate index/deps on every run.
+  case "${GPU_BACKEND}" in
+    directml)
+      echo "ERROR: OPENPHOTOS_GPU_BACKEND=directml is only supported for native Windows builds." >&2
+      exit 1
+      ;;
+    cuda|migraphx)
+      if [ "${target}" != "x86_64-unknown-linux-gnu" ]; then
+        echo "ERROR: OPENPHOTOS_GPU_BACKEND=${GPU_BACKEND} currently supports only x86_64-unknown-linux-gnu artifacts." >&2
+        exit 1
+      fi
+      ;;
+  esac
+
+  if [ -n "${ORT_LIB_LOCATION:-}" ]; then
+    case "${ORT_LIB_LOCATION}" in
+      "${repo_root}")
+        container_ort_lib_location="/work"
+        ;;
+      "${repo_root}"/*)
+        container_ort_lib_location="/work/${ORT_LIB_LOCATION#${repo_root}/}"
+        ;;
+      /*)
+        echo "ERROR: ORT_LIB_LOCATION must be inside the repo root for Docker Linux builds, or use ORT_LINUX_URL instead." >&2
+        exit 1
+        ;;
+      *)
+        container_ort_lib_location="${ORT_LIB_LOCATION}"
+        ;;
+    esac
+  fi
+  if [ -n "${ORT_LINUX_URL:-}" ]; then
+    case "${ORT_LINUX_URL}" in
+      http://*|https://*)
+        container_ort_url="${ORT_LINUX_URL}"
+        ;;
+      "${repo_root}")
+        if [ ! -f "${ORT_LINUX_URL}" ]; then
+          echo "ERROR: ORT_LINUX_URL local archive not found: ${ORT_LINUX_URL}" >&2
+          exit 1
+        fi
+        container_ort_url="/work"
+        ;;
+      "${repo_root}"/*)
+        if [ ! -f "${ORT_LINUX_URL}" ]; then
+          echo "ERROR: ORT_LINUX_URL local archive not found: ${ORT_LINUX_URL}" >&2
+          exit 1
+        fi
+        container_ort_url="/work/${ORT_LINUX_URL#${repo_root}/}"
+        ;;
+      /*)
+        echo "ERROR: ORT_LINUX_URL local archive must be inside the repo root for Docker Linux builds, or use a remote URL." >&2
+        exit 1
+        ;;
+      *)
+        if [ ! -f "${repo_root}/${ORT_LINUX_URL#./}" ]; then
+          echo "ERROR: ORT_LINUX_URL local archive not found under repo root: ${repo_root}/${ORT_LINUX_URL#./}" >&2
+          exit 1
+        fi
+        container_ort_url="/work/${ORT_LINUX_URL#./}"
+        ;;
+    esac
+  elif [ "${GPU_BACKEND}" = "migraphx" ] && [ -z "${container_ort_lib_location}" ]; then
+    default_migraphx_archive="${repo_root}/dist/onnxruntime-migraphx/onnxruntime-linux-x64-migraphx-${ort_linux_version}.tgz"
+    if [ -f "${default_migraphx_archive}" ]; then
+      container_ort_url="/work/${default_migraphx_archive#${repo_root}/}"
+      echo "Using local MIGraphX ONNX Runtime archive: ${default_migraphx_archive}" >&2
+    fi
+  fi
+
   # IMPORTANT: do not mount the full CARGO_HOME (it would shadow /usr/local/cargo/bin inside the image).
-  local cargo_cache_root="${CARGO_CACHE_DIR:-$HOME/.cargo}"
-  local cargo_registry_cache="${cargo_cache_root}/registry"
-  local cargo_git_cache="${cargo_cache_root}/git"
-  mkdir -p "${cargo_registry_cache}" "${cargo_git_cache}"
+  local host_cache_root="${LINUX_CACHE_DIR:-${CACHE_DIR:-$HOME/.cache}}"
+  local ort_cache="${host_cache_root}/ort.pyke.io"
+  mkdir -p "${ort_cache}"
 
   local docker_platform=""
   case "${target}" in
@@ -95,6 +247,10 @@ build_linux_release() {
   local docker_image_key=""
   docker_image_key="$(printf '%s' "${DOCKER_IMAGE}" | tr '/:@.-' '_')"
   local cargo_target_dir="/work/target-linux/${target}/${docker_image_key}"
+  local cargo_build_jobs="${CARGO_BUILD_JOBS:-2}"
+  local cargo_net_retry="${CARGO_NET_RETRY:-10}"
+  local cargo_http_timeout="${CARGO_HTTP_TIMEOUT:-600}"
+  local linux_cargo_cache_backend="${LINUX_CARGO_CACHE_BACKEND:-volume}"
 
   local features_args=()
   # Default to disabling libheif for Linux builds: Debian/Ubuntu repos often ship an older
@@ -110,6 +266,10 @@ build_linux_release() {
   if [ "${ENABLE_EE:-0}" = "1" ]; then
     features_args+=("--features" "ee")
   fi
+  gpu_feature="$(gpu_feature_name "${GPU_BACKEND}")"
+  if [ -n "${gpu_feature}" ]; then
+    features_args+=("--features" "${gpu_feature}")
+  fi
 
   mkdir -p "${repo_root}/${LINUX_OUT_DIR}/${target}"
 
@@ -119,13 +279,17 @@ build_linux_release() {
   if [ -n "${docker_platform}" ]; then
     echo "  Docker: --platform=${docker_platform}"
   fi
+  echo "  GPU backend: ${GPU_BACKEND}"
   echo "  Out:    ${LINUX_OUT_DIR}/${target}/openphotos"
+  echo "  Cargo jobs: ${cargo_build_jobs}"
+  echo "  Cargo cache: ${linux_cargo_cache_backend}"
+  echo "  Cargo retry/timeout: ${cargo_net_retry}/${cargo_http_timeout}s"
   echo
 
   # For common GNU targets, the stock toolchain is enough. Keep extra packages minimal.
   # If you enable USE_LIBHEIF=1, install libheif headers so libheif-sys can link.
   local extra_apt=()
-  extra_apt+=("build-essential" "pkg-config" "cmake" "perl" "ca-certificates")
+  extra_apt+=("build-essential" "pkg-config" "cmake" "perl" "ca-certificates" "curl")
   # Needed by `rav1e` (pulled in via AVIF support in the `image` crate) on x86_64.
   if [ "${docker_platform}" = "linux/amd64" ]; then
     extra_apt+=("nasm")
@@ -140,20 +304,58 @@ build_linux_release() {
   fi
 
   local cache_mounts=(
-    -v "${cargo_registry_cache}:/usr/local/cargo/registry"
-    -v "${cargo_git_cache}:/usr/local/cargo/git"
+    -v "${ort_cache}:/root/.cache/ort.pyke.io"
   )
+  case "${linux_cargo_cache_backend}" in
+    volume)
+      local linux_cargo_registry_volume="${LINUX_CARGO_REGISTRY_VOLUME:-openphotos-linux-cargo-registry}"
+      local linux_cargo_git_volume="${LINUX_CARGO_GIT_VOLUME:-openphotos-linux-cargo-git}"
+      cache_mounts+=(
+        -v "${linux_cargo_registry_volume}:/usr/local/cargo/registry"
+        -v "${linux_cargo_git_volume}:/usr/local/cargo/git"
+      )
+      ;;
+    host)
+      # Host bind-mounted Cargo registry caches can be unreliable under Docker Desktop on macOS
+      # during large native builds. Keep this mode available for debugging, but default to volumes.
+      local cargo_cache_root="${CARGO_CACHE_DIR:-$HOME/.cargo}"
+      local cargo_registry_cache="${cargo_cache_root}/registry"
+      local cargo_git_cache="${cargo_cache_root}/git"
+      mkdir -p "${cargo_registry_cache}" "${cargo_git_cache}"
+      repair_cargo_registry_crate "${cargo_registry_cache}" "zerovec" "0.11.4" "src/map2d/cursor.rs"
+      repair_cargo_registry_crate "${cargo_registry_cache}" "rav1e" "0.7.1" "src/x86/cdef_avx512.asm"
+      repair_cargo_registry_crate "${cargo_registry_cache}" "url" "2.5.4" "src/host.rs"
+      cache_mounts+=(
+        -v "${cargo_registry_cache}:/usr/local/cargo/registry"
+        -v "${cargo_git_cache}:/usr/local/cargo/git"
+      )
+      ;;
+    *)
+      echo "ERROR: unsupported LINUX_CARGO_CACHE_BACKEND='${linux_cargo_cache_backend}' (expected volume or host)" >&2
+      exit 1
+      ;;
+  esac
 
   docker run --rm "${platform_args[@]}" \
     -v "${repo_root}:/work" \
     "${cache_mounts[@]}" \
     -w /work \
+    -e CARGO_BUILD_JOBS="${cargo_build_jobs}" \
+    -e CARGO_NET_RETRY="${cargo_net_retry}" \
+    -e CARGO_HTTP_TIMEOUT="${cargo_http_timeout}" \
     -e CARGO_TARGET_DIR="${cargo_target_dir}" \
+    -e ORT_LINUX_VERSION \
+    -e ORT_LINUX_URL="${container_ort_url}" \
+    -e ORT_LIB_LOCATION="${container_ort_lib_location}" \
     "${DOCKER_IMAGE}" \
     bash -c "
       set -euo pipefail
       export CARGO_HTTP_MULTIPLEXING=\${CARGO_HTTP_MULTIPLEXING:-false}
-      apt-get update >/dev/null
+      if ! apt-get update -o Acquire::Retries=5 -o APT::Update::Error-Mode=any >/dev/null; then
+        echo 'ERROR: apt-get update failed inside the Linux builder container.' >&2
+        echo 'Docker could not refresh Debian package indexes; check Docker DNS/network access to deb.debian.org and retry.' >&2
+        exit 12
+      fi
       DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ${extra_apt[*]} >/dev/null
       if [ '${use_libheif}' = '1' ]; then
         if ! pkg-config --exists 'libheif >= 1.16' 2>/dev/null; then
@@ -182,6 +384,61 @@ build_linux_release() {
       if command -v rustup >/dev/null 2>&1; then
         rustup target add '${target}' >/dev/null || true
       fi
+
+      # ONNX Runtime: prefetch with retries and use an explicit library location so DNS
+      # hiccups fail with a clear message instead of surfacing as an ort-sys panic.
+      ort_ver=\"\${ORT_LINUX_VERSION:-1.22.0}\"
+      ort_requested='${GPU_BACKEND}'
+      ort_existing=\"\${ORT_LIB_LOCATION:-}\"
+      case \"\${ort_requested}\" in
+        cpu)
+          ort_default_url=\"https://cdn.pyke.io/0/pyke:ort-rs/ms@\${ort_ver}/${target}.tgz\"
+          ;;
+        cuda)
+          ort_default_url=\"https://cdn.pyke.io/0/pyke:ort-rs/ms@\${ort_ver}/${target}+cu12.tgz\"
+          ;;
+        migraphx)
+          ort_default_url=\"\"
+          ;;
+        *)
+          echo \"ERROR: unsupported Linux GPU backend '\${ort_requested}'.\" >&2
+          exit 14
+          ;;
+      esac
+
+      if [ -n \"\${ort_existing}\" ]; then
+        if [ ! -d \"\${ort_existing}\" ]; then
+          echo \"ERROR: ORT_LIB_LOCATION does not exist inside the builder: \${ort_existing}\" >&2
+          exit 15
+        fi
+        export ORT_LIB_LOCATION=\"\${ort_existing}\"
+      else
+        if [ \"\${ort_requested}\" = \"migraphx\" ] && [ -z \"\${ORT_LINUX_URL:-}\" ]; then
+          echo 'ERROR: OPENPHOTOS_GPU_BACKEND=migraphx requires ORT_LINUX_URL or ORT_LIB_LOCATION.' >&2
+          echo 'Set ORT_LINUX_URL to a MIGraphX-enabled ONNX Runtime package, or mount ORT_LIB_LOCATION under the repo root.' >&2
+          exit 16
+        fi
+        ort_url=\"\${ORT_LINUX_URL:-\${ort_default_url}}\"
+        ort_dir=\"/work/target-linux/onnxruntime-\${ort_ver}-${target}-${ort_requested}\"
+        if [ ! -f \"\${ort_dir}/onnxruntime/lib/libonnxruntime.so\" ] && [ ! -f \"\${ort_dir}/onnxruntime/lib/libonnxruntime.a\" ]; then
+          echo \"Downloading ONNX Runtime v\${ort_ver} (${target}, backend=\${ort_requested})...\"
+          rm -rf \"\${ort_dir}\"
+          mkdir -p \"\${ort_dir}\"
+          if [ -f \"\${ort_url}\" ]; then
+            echo \"Using local ONNX Runtime archive \${ort_url}\"
+            cp \"\${ort_url}\" /tmp/ort-linux.tgz
+          elif ! curl -fL --retry 5 --retry-delay 2 --retry-connrefused --retry-all-errors \"\${ort_url}\" -o /tmp/ort-linux.tgz; then
+            echo \"ERROR: failed to download ONNX Runtime from \${ort_url}.\" >&2
+            echo 'Check Docker DNS/network access to cdn.pyke.io and retry, or set ORT_LINUX_URL to a reachable mirror or local archive path.' >&2
+            exit 13
+          fi
+          tar -xzf /tmp/ort-linux.tgz -C \"\${ort_dir}\"
+        fi
+        export ORT_LIB_LOCATION=\"\${ort_dir}/onnxruntime\"
+      fi
+      export ORT_PREFER_DYNAMIC_LINK=1
+      export ORT_SKIP_DOWNLOAD=1
+
       host_triple=\"\$(rustc -vV | sed -n 's/^host: //p' || true)\"
       bin_dir='${cargo_target_dir}/release'
       target_args=()
@@ -257,10 +514,26 @@ build_windows_release() {
   local target="${WINDOWS_TARGET:-x86_64-pc-windows-msvc}"
   local repo_root
   repo_root="$(cd "$(dirname "$0")" && pwd)"
+  local gpu_feature=""
+  local features_args=()
 
   if ! command -v docker >/dev/null 2>&1; then
     echo "ERROR: docker not found. Install Docker Desktop (or a compatible docker CLI) and retry." >&2
     exit 1
+  fi
+
+  if [ "${GPU_BACKEND}" != "cpu" ]; then
+    echo "ERROR: OPENPHOTOS_GPU_BACKEND=${GPU_BACKEND} is not supported by the xwin cross-build." >&2
+    echo "Build Windows GPU artifacts natively on Windows via scripts/build_windows_installer.sh with OPENPHOTOS_GPU_BACKEND=directml." >&2
+    exit 1
+  fi
+
+  if [ "${ENABLE_EE:-0}" = "1" ]; then
+    features_args+=("--features" "ee")
+  fi
+  gpu_feature="$(gpu_feature_name "${GPU_BACKEND}")"
+  if [ -n "${gpu_feature}" ]; then
+    features_args+=("--features" "${gpu_feature}")
   fi
 
   # Windows cross-compile is done via MSVC target using cargo-xwin.
@@ -271,34 +544,64 @@ build_windows_release() {
   echo "  Image:  ${DOCKER_IMAGE}"
   echo "  Target: ${target}"
   echo "  Docker: --platform=linux/amd64"
+  echo "  GPU backend: ${GPU_BACKEND}"
   echo "  Out:    ${WINDOWS_OUT_DIR}/${target}/openphotos.exe"
   echo "          ${WINDOWS_OUT_DIR}/${target}/rustus.exe"
   echo
-
-  # Share host Cargo caches with the container to avoid re-downloading the crate index/deps.
-  local cargo_cache_root="${CARGO_CACHE_DIR:-$HOME/.cargo}"
-  local cargo_registry_cache="${cargo_cache_root}/registry"
-  local cargo_git_cache="${cargo_cache_root}/git"
-  mkdir -p "${cargo_registry_cache}" "${cargo_git_cache}"
 
   # Share host caches for cargo-xwin (Windows SDK/CRT) and ort (ONNX Runtime prebuilt binaries).
   local host_cache_root="${CACHE_DIR:-$HOME/.cache}"
   local cargo_xwin_cache="${host_cache_root}/cargo-xwin"
   local ort_cache="${host_cache_root}/ort.pyke.io"
   mkdir -p "${cargo_xwin_cache}" "${ort_cache}"
+  local cargo_build_jobs="${CARGO_BUILD_JOBS:-2}"
+  local windows_cargo_cache_backend="${WINDOWS_CARGO_CACHE_BACKEND:-volume}"
+  echo "  Cargo jobs: ${cargo_build_jobs}"
+  echo "  Cargo cache: ${windows_cargo_cache_backend}"
 
   local cache_mounts=(
-    -v "${cargo_registry_cache}:/usr/local/cargo/registry"
-    -v "${cargo_git_cache}:/usr/local/cargo/git"
     -v "${cargo_xwin_cache}:/root/.cache/cargo-xwin"
     -v "${ort_cache}:/root/.cache/ort.pyke.io"
   )
+  case "${windows_cargo_cache_backend}" in
+    volume)
+      local cargo_registry_volume="${WINDOWS_CARGO_REGISTRY_VOLUME:-openphotos-cargo-registry}"
+      local cargo_git_volume="${WINDOWS_CARGO_GIT_VOLUME:-openphotos-cargo-git}"
+      cache_mounts+=(
+        -v "${cargo_registry_volume}:/usr/local/cargo/registry"
+        -v "${cargo_git_volume}:/usr/local/cargo/git"
+      )
+      ;;
+    host)
+      # Host bind-mounted Cargo registry caches can be unreliable under Docker Desktop on macOS
+      # during very large cross-builds. Keep this mode available, but prefer Docker volumes.
+      local cargo_cache_root="${CARGO_CACHE_DIR:-$HOME/.cargo}"
+      local cargo_registry_cache="${cargo_cache_root}/registry"
+      local cargo_git_cache="${cargo_cache_root}/git"
+      mkdir -p "${cargo_registry_cache}" "${cargo_git_cache}"
+      repair_cargo_registry_crate "${cargo_registry_cache}" "zerovec" "0.11.4" "src/map2d/cursor.rs"
+      repair_cargo_registry_crate "${cargo_registry_cache}" "rav1e" "0.7.1" "src/x86/cdef_avx512.asm"
+      repair_cargo_registry_crate "${cargo_registry_cache}" "url" "2.5.4" "src/host.rs"
+      cache_mounts+=(
+        -v "${cargo_registry_cache}:/usr/local/cargo/registry"
+        -v "${cargo_git_cache}:/usr/local/cargo/git"
+      )
+      ;;
+    *)
+      echo "ERROR: WINDOWS_CARGO_CACHE_BACKEND must be 'volume' or 'host'." >&2
+      exit 1
+      ;;
+  esac
 
   docker run --rm --platform linux/amd64 \
     -v "${repo_root}:/work" \
     "${cache_mounts[@]}" \
     -w /work \
+    -e CARGO_BUILD_JOBS="${cargo_build_jobs}" \
     -e CARGO_TARGET_DIR=/work/target-win \
+    -e DUCKDB_WIN_VERSION \
+    -e ORT_WIN_VERSION \
+    -e ORT_WIN_URL \
     "${DOCKER_IMAGE}" \
     bash -c "
       set -euo pipefail
@@ -388,7 +691,7 @@ build_windows_release() {
       export TARGET_CPU=\"\${WIN_TARGET_CPU:-haswell}\"
 
       export RUSTFLAGS=\"\${RUSTFLAGS:-} -L native=\${extra_lib_dir}\"
-      cargo xwin build --release --no-default-features --bin openphotos --target '${target}'
+      cargo xwin build --release --no-default-features --bin openphotos --target '${target}' ${features_args[*]}
       # Build rustus without default features for Windows to avoid rdkafka/cpp toolchain
       # requirements in the cross-build container.
       cargo xwin build --release --manifest-path rustus/Cargo.toml --no-default-features --bin rustus --target '${target}'
@@ -523,6 +826,11 @@ fi
 if [ "${ENABLE_EE:-0}" = "1" ]; then
   echo -e "${CYAN}Building with EE features enabled${NC}"
   FEATURES_ARGS+=("--features" "ee")
+fi
+GPU_FEATURE="$(gpu_feature_name "${GPU_BACKEND}")"
+if [ -n "${GPU_FEATURE}" ]; then
+  echo -e "${CYAN}Building with GPU backend feature: ${GPU_BACKEND}${NC}"
+  FEATURES_ARGS+=("--features" "${GPU_FEATURE}")
 fi
 cargo build --release --locked --no-default-features ${FEATURES_ARGS[@]}
 
