@@ -1,9 +1,8 @@
 use axum::extract::Query;
-use axum::http::HeaderValue;
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
-    response::sse::{Event, Sse},
+    response::{sse::{Event, Sse}, IntoResponse},
     Json,
 };
 use futures::StreamExt;
@@ -11,7 +10,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tokio::time::{self, Duration};
 use tokio_stream::{wrappers::BroadcastStream, wrappers::IntervalStream};
@@ -67,6 +66,53 @@ async fn compute_backup_id_for_path(path: &Path, user_id: &str) -> Option<String
     .await
     .ok()
     .flatten()
+}
+
+fn upload_metadata_value(metadata: Option<&HashMap<String, String>>, keys: &[&str]) -> Option<String> {
+    metadata
+        .and_then(|map| {
+            keys.iter().find_map(|key| {
+                map.get(*key)
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+        })
+}
+
+fn emit_upload_ingested_event(
+    state: &Arc<AppState>,
+    user_id: &str,
+    asset_id: &str,
+    path: &Path,
+    metadata: Option<&HashMap<String, String>>,
+) {
+    let tx = state.get_or_create_upload_channel(user_id);
+    let content_id = upload_metadata_value(metadata, &["content_id", "contentId", "content-id"]);
+    let backup_id = upload_metadata_value(metadata, &["backup_id", "backupId", "backup-id"]);
+    let _ = tx.send(
+        serde_json::json!({
+            "type": "upload_ingested",
+            "user_id": user_id,
+            "asset_id": asset_id,
+            "content_id": content_id,
+            "backup_id": backup_id,
+            "path": path.to_string_lossy(),
+            "ts": chrono::Utc::now().timestamp()
+        })
+        .to_string(),
+    );
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UploadsIngestedRequest {
+    #[serde(default)]
+    pub content_ids: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UploadsIngestedResponse {
+    pub ingested_content_ids: Vec<String>,
 }
 
 pub async fn handle_rustus_hook(
@@ -1265,17 +1311,7 @@ pub(crate) async fn ingest_finished_upload(
                 .await;
         }
         // Notify via SSE and clean sidecar .info
-        let tx = state.get_or_create_upload_channel(user_id);
-        let _ = tx.send(
-            serde_json::json!({
-                "type": "upload_ingested",
-                "user_id": user_id,
-                "asset_id": asset_id,
-                "path": dest_path.to_string_lossy(),
-                "ts": chrono::Utc::now().timestamp()
-            })
-            .to_string(),
-        );
+        emit_upload_ingested_event(state, user_id, &asset_id, &dest_path, metadata.as_ref());
         let sidecar = src_path.with_extension("info");
         let _ = tokio::fs::remove_file(&sidecar).await;
         return Ok(());
@@ -1463,17 +1499,7 @@ pub(crate) async fn ingest_finished_upload(
         // runaway memory usage. DuckDB auto-checkpoints as needed; we keep explicit checkpoints
         // only in coarse-grained maintenance jobs (e.g., end-of-reindex).
         // Notify via SSE
-        let tx = state.get_or_create_upload_channel(user_id);
-        let _ = tx.send(
-            serde_json::json!({
-                "type": "upload_ingested",
-                "user_id": user_id,
-                "asset_id": asset_id,
-                "path": dest_path.to_string_lossy(),
-                "ts": chrono::Utc::now().timestamp()
-            })
-            .to_string(),
-        );
+        emit_upload_ingested_event(state, user_id, &asset_id, &dest_path, metadata.as_ref());
         tracing::info!(target: "upload", "[UPLOAD] SSE emitted (user={}, asset_id={})", user_id, asset_id);
         // Remove sidecar .info if present
         let sidecar = src_path.with_extension("info");
@@ -1879,17 +1905,7 @@ pub(crate) async fn ingest_finished_upload(
     }
 
     // Notify via SSE
-    let tx = state.get_or_create_upload_channel(user_id);
-    let _ = tx.send(
-        serde_json::json!({
-            "type": "upload_ingested",
-            "user_id": user_id,
-            "asset_id": asset_id,
-            "path": dest_path.to_string_lossy(),
-            "ts": chrono::Utc::now().timestamp()
-        })
-        .to_string(),
-    );
+    emit_upload_ingested_event(state, user_id, &asset_id, &dest_path, metadata.as_ref());
     tracing::info!(target: "upload", "[UPLOAD] SSE emitted (user={}, asset_id={})", user_id, asset_id);
     // Update sync stats for successful ingest
     state.record_sync_ingest(
@@ -2147,17 +2163,7 @@ async fn ingest_locked_upload(
         if let Err(e) = reindex_single_asset(state, user_id, &asset_id_b58) {
             tracing::warn!(target:"upload", "[UPLOAD-LOCKED] reindex (PG) failed for {}: {}", asset_id_b58, e);
         }
-        let tx = state.get_or_create_upload_channel(user_id);
-        let _ = tx.send(
-            serde_json::json!({
-                "type": "upload_ingested",
-                "user_id": user_id,
-                "asset_id": asset_id_b58,
-                "path": dest_path.to_string_lossy(),
-                "ts": chrono::Utc::now().timestamp()
-            })
-            .to_string(),
-        );
+        emit_upload_ingested_event(state, user_id, &asset_id_b58, &dest_path, Some(&metadata));
         return Ok(());
     } else {
         // DuckDB path (original)
@@ -2638,17 +2644,7 @@ async fn ingest_locked_upload(
     if let Err(e) = reindex_single_asset(state, user_id, &asset_id_b58) {
         tracing::warn!(target:"upload", "[UPLOAD-LOCKED] reindex failed for {}: {}", asset_id_b58, e);
     }
-    let tx = state.get_or_create_upload_channel(user_id);
-    let _ = tx.send(
-        serde_json::json!({
-            "type": "upload_ingested",
-            "user_id": user_id,
-            "asset_id": asset_id_b58,
-            "path": dest_path.to_string_lossy(),
-            "ts": chrono::Utc::now().timestamp()
-        })
-        .to_string(),
-    );
+    emit_upload_ingested_event(state, user_id, &asset_id_b58, &dest_path, Some(&metadata));
     tracing::info!(target:"upload", "[UPLOAD-LOCKED] ingested locked {} (user={}, upload_id={}, asset_id={})", if is_thumb {"thumb"} else {"orig"}, user_id, upload_id, asset_id_b58);
     Ok(())
 }
@@ -3252,6 +3248,96 @@ fn try_pair_live_by_filename(
 pub struct UploadsStreamQuery {
     pub token: Option<String>,
     pub user_id: Option<String>,
+}
+
+#[tracing::instrument(skip(state, headers, payload))]
+pub async fn uploads_ingested(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(payload): Json<UploadsIngestedRequest>,
+) -> Result<impl IntoResponse, crate::server::AppError> {
+    let user = auth_user_from_headers(&headers, &state).await?;
+    let requested: Vec<String> = payload
+        .content_ids
+        .into_iter()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+        .take(2_000)
+        .collect();
+    if requested.is_empty() {
+        return Ok(Json(UploadsIngestedResponse {
+            ingested_content_ids: Vec::new(),
+        }));
+    }
+
+    let ingested_content_ids = if let Some(pg) = &state.pg_client {
+        let mut params: Vec<&(dyn tokio_postgres::types::ToSql + Sync)> = Vec::new();
+        params.push(&user.organization_id);
+        params.push(&user.user_id);
+        let mut placeholders: Vec<String> = Vec::with_capacity(requested.len());
+        for (i, content_id) in requested.iter().enumerate() {
+            placeholders.push(format!("${}", i + 3));
+            params.push(content_id);
+        }
+        let sql = format!(
+            "SELECT DISTINCT content_id
+             FROM photos
+             WHERE organization_id = $1
+               AND user_id = $2
+               AND COALESCE(delete_time, 0) = 0
+               AND COALESCE(content_id, '') <> ''
+               AND COALESCE(locked, FALSE) = FALSE
+               AND COALESCE(is_live_photo, FALSE) = FALSE
+               AND content_id IN ({})",
+            placeholders.join(",")
+        );
+        pg.query(&sql, &params)
+            .await
+            .map_err(|e| crate::server::AppError(anyhow::anyhow!(e.to_string())))?
+            .into_iter()
+            .filter_map(|row| row.try_get::<_, String>(0).ok())
+            .collect()
+    } else {
+        let data_db = state.get_user_data_database(&user.user_id)?;
+        let mut query = String::from(
+            "SELECT DISTINCT content_id
+             FROM photos
+             WHERE organization_id = ?
+               AND user_id = ?
+               AND COALESCE(delete_time, 0) = 0
+               AND COALESCE(content_id, '') <> ''
+               AND COALESCE(locked, FALSE) = FALSE
+               AND COALESCE(is_live_photo, FALSE) = FALSE
+               AND content_id IN (",
+        );
+        query.push_str(&vec!["?"; requested.len()].join(","));
+        query.push(')');
+        let mut params: Vec<Box<dyn duckdb::ToSql>> = Vec::with_capacity(2 + requested.len());
+        params.push(Box::new(user.organization_id));
+        params.push(Box::new(user.user_id.clone()));
+        for content_id in &requested {
+            params.push(Box::new(content_id.clone()));
+        }
+        let conn = data_db.lock();
+        let mut stmt = conn
+            .prepare(&query)
+            .map_err(|e| crate::server::AppError(anyhow::anyhow!(e.to_string())))?;
+        let mapped = stmt
+            .query_map(
+                duckdb::params_from_iter(params.iter().map(|param| &**param)),
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|e| crate::server::AppError(anyhow::anyhow!(e.to_string())))?;
+        let mut rows = Vec::new();
+        for row in mapped {
+            if let Ok(content_id) = row {
+                rows.push(content_id);
+            }
+        }
+        rows
+    };
+
+    Ok(Json(UploadsIngestedResponse { ingested_content_ids }))
 }
 
 #[tracing::instrument(skip(state, headers))]

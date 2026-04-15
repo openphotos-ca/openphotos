@@ -697,6 +697,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/api/uploads/stream",
             get(crate::server::upload_hooks::uploads_stream),
         )
+        .route(
+            "/api/uploads/ingested",
+            post(crate::server::upload_hooks::uploads_ingested),
+        )
 
         // Set body limit to 64MB for image uploads
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
