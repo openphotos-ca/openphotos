@@ -38,6 +38,11 @@ import { useToast } from '@/hooks/use-toast';
 
 const PHOTOS_PER_PAGE_GRID = 100;
 const PHOTOS_PER_PAGE_TIMELINE = 500;
+const FULLSCREEN_DISPLAY_DEFAULT_MAX_SIDE = 2560;
+const FULLSCREEN_DISPLAY_MIN_MAX_SIDE = 512;
+const FULLSCREEN_DISPLAY_MAX_MAX_SIDE = 2560;
+const IMAGE_FILENAME_RE = /\.(avif|bmp|dng|gif|heic|heif|jpe?g|png|tiff?|webp)$/i;
+const VIDEO_FILENAME_RE = /\.(3gp|avi|m4v|mkv|mov|mp4|webm)$/i;
 
 // Small utility: Uint8Array -> hex string
 function toHex(u8: Uint8Array): string {
@@ -54,6 +59,47 @@ function isPhotoLocked(p: Photo | null | undefined): boolean {
 function isPhotoFavorite(p: Photo | null | undefined): boolean {
   if (!p) return false;
   return Number((p as any).favorites ?? 0) === 1;
+}
+
+function inferMediaKind(photo: Photo | null | undefined): 'image' | 'video' | 'ambiguous' {
+  if (!photo) return 'ambiguous';
+  if (photo.is_video) return 'video';
+
+  const mime = (photo.mime_type || '').toLowerCase();
+  if (mime.startsWith('video/')) return 'video';
+  if (mime.startsWith('image/')) return 'image';
+
+  const filename = (photo.filename || '').toLowerCase();
+  if (VIDEO_FILENAME_RE.test(filename)) return 'video';
+  if (IMAGE_FILENAME_RE.test(filename)) return 'image';
+
+  return 'ambiguous';
+}
+
+function buildUrlWithParams(
+  baseUrl: string,
+  params: Record<string, string | number | undefined>,
+): string {
+  const origin =
+    typeof window !== 'undefined' ? window.location.origin : 'http://127.0.0.1';
+  const url = new URL(baseUrl, origin);
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === undefined || value === null || value === '') {
+      url.searchParams.delete(key);
+      return;
+    }
+    url.searchParams.set(key, String(value));
+  });
+  return url.toString();
+}
+
+function isSameOriginBrowserUrl(url: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return new URL(url, window.location.origin).origin === window.location.origin;
+  } catch {
+    return false;
+  }
 }
 
 function photoDynamicRangeLabel(p: Photo | null | undefined): string {
@@ -890,6 +936,7 @@ export default function HomePage() {
   const [scrubbing, setScrubbing] = useState(false);
   const desiredSeekRef = useRef<number | null>(null);
   const [forcedIsVideo, setForcedIsVideo] = useState<boolean | null>(null);
+  const [viewerImageReadyAssetId, setViewerImageReadyAssetId] = useState<string | null>(null);
   const [showInfo, setShowInfo] = useState(false);
   const [assetPersons, setAssetPersons] = useState<Array<{ person_id: string; display_name?: string; birth_date?: string }>>([]);
   const [viewerFavorite, setViewerFavorite] = useState<boolean>(false);
@@ -905,6 +952,39 @@ export default function HomePage() {
   const [measuredDims, setMeasuredDims] = useState<Record<string, { w: number; h: number }>>({});
   // Albums list (for AlbumPickerDialog)
   const { data: allAlbums = [] } = useQuery({ queryKey: ['albums'], queryFn: () => photosApi.getAlbums(), staleTime: 60_000 });
+
+  const fullscreenDisplayMaxSide = useMemo(() => {
+    const dpr =
+      typeof window !== 'undefined' && Number.isFinite(window.devicePixelRatio)
+        ? window.devicePixelRatio || 1
+        : 1;
+    const requested = Math.ceil(
+      Math.max(containerDimensions.width, containerDimensions.height, 0) * dpr,
+    );
+    const safeRequested =
+      Number.isFinite(requested) && requested > 0
+        ? requested
+        : FULLSCREEN_DISPLAY_DEFAULT_MAX_SIDE;
+    return Math.min(
+      FULLSCREEN_DISPLAY_MAX_MAX_SIDE,
+      Math.max(FULLSCREEN_DISPLAY_MIN_MAX_SIDE, safeRequested),
+    );
+  }, [containerDimensions.height, containerDimensions.width]);
+
+  const buildFullscreenDisplayUrl = useCallback((assetId: string) => {
+    return buildUrlWithParams(photosApi.getImageUrl(assetId), {
+      format: 'display',
+      max_side: fullscreenDisplayMaxSide,
+    });
+  }, [fullscreenDisplayMaxSide]);
+  const viewerDisplayUrl = useMemo(() => {
+    if (!viewerPhoto) return null;
+    return buildFullscreenDisplayUrl(viewerPhoto.asset_id);
+  }, [viewerPhoto, buildFullscreenDisplayUrl]);
+  const viewerNativeOriginalEnabled = useMemo(() => {
+    if (!viewerPhoto || !viewerDisplayUrl || isPhotoLocked(viewerPhoto)) return false;
+    return isSameOriginBrowserUrl(viewerDisplayUrl);
+  }, [viewerPhoto, viewerDisplayUrl]);
 
   // Close Albums chips overlay when other dialogs/panels open
   useEffect(() => {
@@ -944,8 +1024,9 @@ export default function HomePage() {
     setForcedIsVideo(null);
     const token = useAuthStore.getState().token;
     if (!viewerPhoto || !token) return;
-    // If we already know it's a video, no need to probe
-    if (viewerPhoto.is_video) { setForcedIsVideo(true); return; }
+    const inferredKind = inferMediaKind(viewerPhoto);
+    if (inferredKind === 'video') { setForcedIsVideo(true); return; }
+    if (inferredKind === 'image') { setForcedIsVideo(false); return; }
     (async () => {
       try {
         const res = await fetch(`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}`, {
@@ -1267,6 +1348,15 @@ export default function HomePage() {
 
   // Try to start playback for videos when viewer opens
   useEffect(() => {
+    if (!viewerPhoto) {
+      setViewerImageReadyAssetId(null);
+      return;
+    }
+    setViewerImageReadyAssetId(null);
+  }, [viewerPhoto?.asset_id]);
+
+  // Try to start playback for videos when viewer opens
+  useEffect(() => {
     if (!viewerPhoto) return;
     const isVid = (forcedIsVideo ?? viewerPhoto.is_video);
     if (!isVid) return;
@@ -1374,45 +1464,56 @@ export default function HomePage() {
     }
   }, [zoom, viewerIndex]);
 
-  // Prefetch full-size images for current and upcoming items to speed navigation
-  const prefetchFullMapRef = useRef<Map<string, string>>(new Map());
-  const prefetchingRef = useRef<Set<string>>(new Set());
+  // Prefetch only the next still image after the current fullscreen image is actually visible.
+  const prefetchedDisplayAssetIdsRef = useRef<Map<string, true>>(new Map());
+  const prefetchInFlightRef = useRef<Map<string, HTMLImageElement>>(new Map());
   const MAX_PREFETCH = 12;
 
-  const prefetchFull = useCallback(async (assetId: string) => {
-    if (!assetId) return;
-    if (!token) return;
-    if (prefetchFullMapRef.current.has(assetId) || prefetchingRef.current.has(assetId)) return;
-    prefetchingRef.current.add(assetId);
-    try {
-      const res = await fetch(`/api/images/${encodeURIComponent(assetId)}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) return;
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const map = prefetchFullMapRef.current;
-      if (!map.has(assetId)) {
-        if (map.size >= MAX_PREFETCH) {
-          const firstKey = map.keys().next().value as string | undefined;
-          if (firstKey) { const old = map.get(firstKey)!; try { URL.revokeObjectURL(old); } catch {} map.delete(firstKey); }
-        }
-        map.set(assetId, url);
+  const prefetchDisplayImage = useCallback((photo: Photo | null | undefined) => {
+    if (!photo || isPhotoLocked(photo) || inferMediaKind(photo) !== 'image') return;
+
+    const url = buildFullscreenDisplayUrl(photo.asset_id);
+    if (!isSameOriginBrowserUrl(url)) return;
+    if (prefetchedDisplayAssetIdsRef.current.has(photo.asset_id)) return;
+
+    prefetchedDisplayAssetIdsRef.current.set(photo.asset_id, true);
+    while (prefetchedDisplayAssetIdsRef.current.size > MAX_PREFETCH) {
+      const oldestKey = prefetchedDisplayAssetIdsRef.current.keys().next().value as
+        | string
+        | undefined;
+      if (!oldestKey) break;
+      prefetchedDisplayAssetIdsRef.current.delete(oldestKey);
+    }
+
+    const img = new Image();
+    img.decoding = 'async';
+    const cleanup = () => {
+      if (prefetchInFlightRef.current.get(photo.asset_id) === img) {
+        prefetchInFlightRef.current.delete(photo.asset_id);
       }
-    } catch {}
-    finally { prefetchingRef.current.delete(assetId); }
-  }, [token]);
+    };
+    img.onload = cleanup;
+    img.onerror = cleanup;
+    prefetchInFlightRef.current.set(photo.asset_id, img);
+    while (prefetchInFlightRef.current.size > MAX_PREFETCH) {
+      const oldestKey = prefetchInFlightRef.current.keys().next().value as string | undefined;
+      if (!oldestKey) break;
+      if (oldestKey === photo.asset_id) break;
+      prefetchInFlightRef.current.delete(oldestKey);
+    }
+    img.src = url;
+  }, [buildFullscreenDisplayUrl]);
 
   useEffect(() => {
     const vp = viewerPhoto;
-    if (!vp || !token) return;
+    if (!vp) return;
+    if ((forcedIsVideo ?? vp.is_video) || viewerImageReadyAssetId !== vp.asset_id) return;
+
     const idx = currentIndexRef.current ?? viewerIndex ?? 0;
-    const ids: string[] = [];
-    ids.push(vp.asset_id);
-    if (idx + 1 < displayPhotos.length) ids.push(displayPhotos[idx + 1].asset_id);
-    if (idx + 2 < displayPhotos.length) ids.push(displayPhotos[idx + 2].asset_id);
-    ids.forEach((id) => prefetchFull(id));
-  }, [viewerPhoto, viewerIndex, displayPhotos.length, token, prefetchFull]);
+    const nextPhoto =
+      idx + 1 < displayPhotos.length ? displayPhotos[idx + 1] : null;
+    prefetchDisplayImage(nextPhoto);
+  }, [viewerPhoto, forcedIsVideo, viewerImageReadyAssetId, viewerIndex, displayPhotos, prefetchDisplayImage]);
 
   // Touch handlers: swipe navigation when zoom==1; pan/pinch when zoom>1 or two fingers
   const getTouchDist = (t: React.TouchList) => {
@@ -2171,8 +2272,13 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
                   assetId={viewerPhoto.asset_id}
                   alt={viewerPhoto.filename}
                   variant="original"
-                  progressive={!(((viewerPhoto?.mime_type || '').toLowerCase().includes('image/avif')) || ((viewerPhoto?.filename || '').toLowerCase().endsWith('.avif')))}
-                  prefetchFullUrl={prefetchFullMapRef.current.get(viewerPhoto.asset_id) || undefined}
+                  progressive
+                  preferNativeOriginal={viewerNativeOriginalEnabled}
+                  onOriginalLoad={(loadedAssetId) => setViewerImageReadyAssetId(loadedAssetId)}
+                  urlMap={viewerDisplayUrl ? {
+                    thumbnail: photosApi.getThumbnailUrl(viewerPhoto.asset_id),
+                    original: viewerDisplayUrl,
+                  } : undefined}
                   className="fullscreen-image"
                   style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})`, transition: isPanning ? 'none' : 'transform 0.05s linear' }}
                 />

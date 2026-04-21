@@ -298,6 +298,11 @@ export class ApiClient {
     return `${this.baseUrl}/images/${encodedAssetId}`;
   }
 
+  getThumbnailUrl(assetId: string): string {
+    const encodedAssetId = encodeURIComponent(assetId);
+    return `${this.baseUrl}/thumbnails/${encodedAssetId}`;
+  }
+
   getFaceThumbnailUrl(personId: string): string {
     // Use query param endpoint which supports cookie/Authorization fallback
     return `${this.baseUrl}/face-thumbnail?personId=${encodeURIComponent(personId)}`;

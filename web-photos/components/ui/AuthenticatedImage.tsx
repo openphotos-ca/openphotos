@@ -135,6 +135,15 @@ async function ensureViewerUserId(token: string | null): Promise<string | null> 
   return pendingViewerUserIdHydration;
 }
 
+function isSameOriginUrl(url: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return new URL(url, window.location.origin).origin === window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
 interface AuthenticatedImageProps {
   assetId: string;
   alt: string;
@@ -146,6 +155,8 @@ interface AuthenticatedImageProps {
   prefetchFullUrl?: string; // optional preloaded full image object URL
   lazy?: boolean; // when true, defers fetching until in view (default: true for thumbnails)
   lazyRootMargin?: string; // IntersectionObserver root margin (default: '800px')
+  preferNativeOriginal?: boolean; // for same-origin unlocked fullscreen loads
+  onOriginalLoad?: (assetId: string) => void;
   // Optional URL overrides for fetching. When present, these take precedence
   // over the default `/api/{thumbnails|images}/:assetId` endpoints.
   urlMap?: { thumbnail?: string; original?: string };
@@ -163,6 +174,8 @@ export function AuthenticatedImage({
   prefetchFullUrl,
   lazy,
   lazyRootMargin,
+  preferNativeOriginal = false,
+  onOriginalLoad,
   urlMap,
   ...props 
 }: AuthenticatedImageProps) {
@@ -179,6 +192,8 @@ export function AuthenticatedImage({
   const [upgrading, setUpgrading] = useState(false); // indicates higher quality (e.g., AVIF) is loading
   const [fullOwned, setFullOwned] = useState(false); // whether this component created fullUrl (so it should revoke)
   const fullErrorRetriesRef = useRef<Map<string, number>>(new Map());
+  const originalLoadNotifiedForRef = useRef<string | null>(null);
+  const fullImageRef = useRef<HTMLImageElement | null>(null);
   const token = useAuthStore(s => s.token);
   const viewerUserId = useAuthStore(s => s.user?.user_id ?? null);
 
@@ -186,17 +201,40 @@ export function AuthenticatedImage({
   const isUnlocked = useE2EEStore(s => s.isUnlocked);
 
   const lazyEnabled = (lazy ?? (variant === 'thumbnail')) && !(progressive && variant === 'original');
+  const defaultThumbnailUrl = urlMap?.thumbnail ?? `/api/thumbnails/${encodeURIComponent(assetId)}`;
+  const defaultOriginalUrl = urlMap?.original ?? `/api/images/${encodeURIComponent(assetId)}`;
+  const canUseNativeProgressive =
+    progressive &&
+    variant === 'original' &&
+    preferNativeOriginal &&
+    isSameOriginUrl(defaultOriginalUrl);
   const { ref: inViewRef, inView } = useInView({
     rootMargin: lazyRootMargin ?? '800px',
     triggerOnce: true,
     fallbackInView: true,
   });
 
+  const notifyOriginalLoad = () => {
+    if (!onOriginalLoad) return;
+    if (originalLoadNotifiedForRef.current === assetId) return;
+    originalLoadNotifiedForRef.current = assetId;
+    onOriginalLoad(assetId);
+  };
+
+  const markProgressiveFullReady = () => {
+    setFullReady(true);
+    setUpgrading(false);
+    notifyOriginalLoad();
+  };
+
   useEffect(() => {
     let isMounted = true;
 		  // Reset state on asset/variant changes to avoid showing previous image while new loads
     setError(false);
     setLockedBlocked(false);
+    originalLoadNotifiedForRef.current = null;
+    fullImageRef.current = null;
+    fullErrorRetriesRef.current.delete(assetId);
     if (progressive && variant === 'original') {
       setThumbUrl(null);
       setThumbOwned(false);
@@ -334,7 +372,7 @@ export function AuthenticatedImage({
 	    };
 
     const fetchImage = async () => {
-      if (!token) {
+      if (!token && !canUseNativeProgressive) {
         logger.debug('AuthenticatedImage: No token available, setting error state');
         setError(true);
         setLoading(false);
@@ -346,7 +384,38 @@ export function AuthenticatedImage({
         setError(false);
 	        logger.debug('[AUTHIMG] fetch start', { assetId, variant, progressive, tokenPresent: !!token, isUnlocked: useE2EEStore.getState().isUnlocked });
 
-	        if (progressive && variant === 'original') {
+		        if (progressive && variant === 'original') {
+		          // Same-origin unlocked fullscreen images can use native browser loading with auth cookie.
+		          if (canUseNativeProgressive) {
+		            if (isMounted) {
+		              setThumbUrl(defaultThumbnailUrl);
+	              setThumbOwned(false);
+	              setFullUrl(defaultOriginalUrl);
+	              setFullOwned(false);
+		              setUpgrading(true);
+		              setLoading(false);
+		            }
+                const nativeLoader = new Image();
+                nativeLoader.decoding = 'async';
+                nativeLoader.onload = () => {
+                  if (!isMounted) return;
+                  markProgressiveFullReady();
+                };
+                nativeLoader.onerror = () => {
+                  if (!isMounted) return;
+                  logger.warn('AuthenticatedImage native progressive load did not complete', {
+                    assetId,
+                    url: defaultOriginalUrl,
+                  });
+                  setUpgrading(false);
+                };
+                nativeLoader.src = defaultOriginalUrl;
+                if (nativeLoader.complete && nativeLoader.naturalWidth > 0) {
+                  markProgressiveFullReady();
+                }
+		            return;
+		          }
+
 	          // Start both requests; show thumbnail immediately when ready, then swap to full when decoded
 	          setUpgrading(true);
 	          const thumbPromise = getOrCreateThumbnailObjectUrl();
@@ -383,10 +452,10 @@ export function AuthenticatedImage({
             const img = new Image();
             img.src = u;
             img.decode?.()
-              .then(() => { if (isMounted) { setFullReady(true); setUpgrading(false); } })
-	              .catch(async () => {
-	                // Prefetched URL may have been revoked; fetch fresh and retry once
-	                if (!isMounted) return;
+		              .then(() => { if (isMounted) { markProgressiveFullReady(); } })
+		              .catch(async () => {
+		                // Prefetched URL may have been revoked; fetch fresh and retry once
+		                if (!isMounted) return;
 	                try {
 	                  const { blob } = await fetchBlobOrDecrypt('images');
 	                  const u2 = URL.createObjectURL(blob);
@@ -394,10 +463,10 @@ export function AuthenticatedImage({
 	                  setFullUrl(u2);
 	                  const img2 = new Image(); img2.src = u2; await img2.decode?.();
 	                } catch {}
-                if (isMounted) { setFullReady(true); setUpgrading(false); }
-              });
-          }).catch((e) => {
-            logger.error('AuthenticatedImage progressive full load error:', e);
+	                if (isMounted) { markProgressiveFullReady(); }
+	              });
+	          }).catch((e) => {
+	            logger.error('AuthenticatedImage progressive full load error:', e);
             if (isMounted) setUpgrading(false);
           });
 
@@ -446,7 +515,33 @@ export function AuthenticatedImage({
 	      isMounted = false;
 	    };
 	  // eslint-disable-next-line react-hooks/exhaustive-deps
-	  }, [assetId, token, viewerUserId, progressive, variant, prefetchFullUrl, isUnlocked, inView, lazyEnabled]);
+		  }, [assetId, token, viewerUserId, progressive, variant, prefetchFullUrl, isUnlocked, inView, lazyEnabled, canUseNativeProgressive, defaultOriginalUrl, defaultThumbnailUrl]);
+
+  useEffect(() => {
+    if (!(progressive && variant === 'original') || !fullUrl || fullReady) return;
+    let rafId: number | null = null;
+    let cancelled = false;
+
+    const checkLoaded = () => {
+      if (cancelled) return;
+      const img = fullImageRef.current;
+      if (img?.complete) {
+        if (img.naturalWidth > 0) {
+          markProgressiveFullReady();
+        } else {
+          setUpgrading(false);
+        }
+        return;
+      }
+      rafId = window.requestAnimationFrame(checkLoaded);
+    };
+
+    checkLoaded();
+    return () => {
+      cancelled = true;
+      if (rafId !== null) window.cancelAnimationFrame(rafId);
+    };
+  }, [fullReady, fullUrl, progressive, variant]);
 
   // Cleanup blob URL when it changes
   useEffect(() => {
@@ -512,12 +607,22 @@ export function AuthenticatedImage({
         )}
         {fullUrl && (
           <img
+            ref={(node) => {
+              fullImageRef.current = node;
+              if (node?.complete && node.naturalWidth > 0) {
+                markProgressiveFullReady();
+              }
+            }}
             src={fullUrl}
             alt={alt}
             className={`absolute inset-0 w-full h-full object-contain transition-opacity duration-200 ${fullReady ? 'opacity-100' : 'opacity-0'}`}
             width={width}
             height={height}
-            onLoad={() => setFullReady(true)}
+            onLoad={() => {
+              // Some browsers can leave `decode()` pending on large object URLs
+              // even though the rendered image has already loaded.
+              markProgressiveFullReady();
+            }}
             onError={async () => {
               const attempts = fullErrorRetriesRef.current.get(assetId) ?? 0;
               if (attempts >= 1) {

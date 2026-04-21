@@ -216,6 +216,10 @@ export const photosApi = {
     return apiClient.getImageUrl(assetId);
   },
 
+  getThumbnailUrl(assetId: string): string {
+    return apiClient.getThumbnailUrl(assetId);
+  },
+
   // Helper to detect base64-encoded asset IDs from CLIP service
   isBase64AssetId(assetId: string): boolean {
     // pHash values are 16-character hexadecimal strings, base64 IDs are longer and contain = padding
