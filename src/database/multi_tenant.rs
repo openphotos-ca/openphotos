@@ -1230,6 +1230,7 @@ impl MultiTenantDatabase {
                 content_hash TEXT,
                 content_id TEXT,
                 backup_id TEXT,
+                visual_backup_id TEXT,
                 created_at INTEGER NOT NULL,
                 modified_at INTEGER NOT NULL,
                 size INTEGER NOT NULL,
@@ -1280,8 +1281,10 @@ impl MultiTenantDatabase {
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS content_id TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS content_hash TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS backup_id TEXT;
+            ALTER TABLE photos ADD COLUMN IF NOT EXISTS visual_backup_id TEXT;
             CREATE INDEX IF NOT EXISTS idx_photos_content_id ON photos(content_id);
             CREATE INDEX IF NOT EXISTS idx_photos_backup_id ON photos(backup_id);
+            CREATE INDEX IF NOT EXISTS idx_photos_visual_backup_id ON photos(visual_backup_id);
             CREATE INDEX IF NOT EXISTS idx_photos_path ON photos(path);
             -- New searchable metadata columns (backfill)
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS caption TEXT;

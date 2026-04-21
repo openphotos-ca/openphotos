@@ -12,6 +12,7 @@ use axum::{
     Json,
 };
 use exif::{In, Tag};
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
@@ -46,6 +47,9 @@ use tower::util::ServiceExt;
 use tower_http::services::ServeFile; // for .oneshot()
 
 // All pHash calculation and caching logic removed - now handled by database during indexing
+
+static CLOUDCHECK_EXISTS_BACKFILLS: Lazy<parking_lot::Mutex<HashSet<String>>> =
+    Lazy::new(|| parking_lot::Mutex::new(HashSet::new()));
 
 fn if_none_match_allows_304(headers: &HeaderMap, etag: &str) -> bool {
     let Some(v) = headers.get(header::IF_NONE_MATCH) else {
@@ -282,11 +286,22 @@ enum RawImageServeMode {
     DerivedJpeg,
 }
 
+const DISPLAY_IMAGE_DEFAULT_MAX_SIDE: u32 = 2560;
+const DISPLAY_IMAGE_MIN_MAX_SIDE: u32 = 512;
+const DISPLAY_IMAGE_MAX_MAX_SIDE: u32 = 2560;
+
 fn query_has_format_param(query: &str, format: &str) -> bool {
     query
         .split('&')
         .filter_map(|kv| kv.split_once('=').or(Some((kv, ""))))
         .any(|(key, value)| key == "format" && value.eq_ignore_ascii_case(format))
+}
+
+fn query_param_value<'a>(query: &'a str, key: &str) -> Option<&'a str> {
+    query
+        .split('&')
+        .filter_map(|kv| kv.split_once('=').or(Some((kv, ""))))
+        .find_map(|(k, v)| if k == key { Some(v) } else { None })
 }
 
 fn raw_image_serve_mode(
@@ -305,6 +320,32 @@ fn raw_image_serve_mode(
     } else {
         RawImageServeMode::DerivedJpeg
     }
+}
+
+fn display_image_max_side_from_query(query: &str) -> u32 {
+    query_param_value(query, "max_side")
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .map(|parsed| parsed.clamp(DISPLAY_IMAGE_MIN_MAX_SIDE, DISPLAY_IMAGE_MAX_MAX_SIDE))
+        .unwrap_or(DISPLAY_IMAGE_DEFAULT_MAX_SIDE)
+}
+
+fn should_serve_display_variant(orig_content_type: &str, is_video: bool, query: &str) -> bool {
+    if is_video
+        || query_has_format_param(query, "original")
+        || !query_has_format_param(query, "display")
+    {
+        return false;
+    }
+    if !orig_content_type.starts_with("image/") {
+        return false;
+    }
+    if orig_content_type.eq_ignore_ascii_case("image/heic")
+        || orig_content_type.eq_ignore_ascii_case("image/heif")
+        || orig_content_type.eq_ignore_ascii_case("image/dng")
+    {
+        return false;
+    }
+    true
 }
 
 fn infer_live_video_content_type(path: &StdPath) -> &'static str {
@@ -1067,7 +1108,35 @@ pub struct ExistsRequest {
     #[serde(default)]
     pub backup_ids: Vec<String>,
     #[serde(default)]
+    pub items: Vec<ExistsItemRequest>,
+    #[serde(default)]
     pub include_deleted_matches: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExistsItemRequest {
+    #[serde(default)]
+    pub match_id: String,
+    #[serde(default)]
+    pub backup_ids: Vec<String>,
+    pub content_id: Option<String>,
+    pub filename: Option<String>,
+    pub created_at: Option<i64>,
+    pub width: Option<i32>,
+    pub height: Option<i32>,
+    pub is_video: Option<bool>,
+}
+
+impl ExistsItemRequest {
+    fn response_match_id(&self) -> Option<&str> {
+        if !self.match_id.trim().is_empty() {
+            return Some(self.match_id.trim());
+        }
+        self.backup_ids
+            .iter()
+            .map(|s| s.trim())
+            .find(|s| !s.is_empty())
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -1079,6 +1148,319 @@ pub struct ExistsResponse {
     pub deleted_asset_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub deleted_backup_ids: Option<Vec<String>>,
+}
+
+fn spawn_cloudcheck_exists_backfill(state: Arc<AppState>, organization_id: i32, user_id: String) {
+    let repair_key = format!("{}:{}", organization_id, user_id);
+    {
+        let mut running = CLOUDCHECK_EXISTS_BACKFILLS.lock();
+        if !running.insert(repair_key.clone()) {
+            return;
+        }
+    }
+
+    tokio::spawn(async move {
+        const VISUAL_BATCH_LIMIT: usize = 120;
+        const VISUAL_TOTAL_LIMIT: usize = 600;
+        const BACKUP_BATCH_LIMIT: usize = 250;
+
+        let mut visual_total = 0usize;
+        let mut visual_rounds = 0usize;
+        loop {
+            let visual_result = backfill_exists_visual_backup_ids_batch(
+                state.as_ref(),
+                organization_id,
+                &user_id,
+                VISUAL_BATCH_LIMIT,
+            )
+            .await;
+            match visual_result {
+                Ok(0) => break,
+                Ok(filled) => {
+                    visual_total += filled;
+                    visual_rounds += 1;
+                    if visual_total >= VISUAL_TOTAL_LIMIT {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "cloudcheck",
+                        "[CLOUDCHECK] background visual_backup_id backfill failed org={} user={} err={}",
+                        organization_id,
+                        user_id,
+                        err
+                    );
+                    break;
+                }
+            }
+        }
+        if visual_total > 0 {
+            tracing::info!(
+                target: "cloudcheck",
+                "[CLOUDCHECK] background visual_backup_id backfill org={} user={} filled={} rounds={}",
+                organization_id,
+                user_id,
+                visual_total,
+                visual_rounds
+            );
+        }
+
+        let backup_result = backfill_exists_backup_ids_batch(
+            state.as_ref(),
+            organization_id,
+            &user_id,
+            BACKUP_BATCH_LIMIT,
+        )
+        .await;
+        match backup_result {
+            Ok(filled) if filled > 0 => {
+                tracing::info!(
+                    target: "cloudcheck",
+                    "[CLOUDCHECK] background backup_id backfill org={} user={} filled={}",
+                    organization_id,
+                    user_id,
+                    filled
+                );
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    target: "cloudcheck",
+                    "[CLOUDCHECK] background backup_id backfill failed org={} user={} err={}",
+                    organization_id,
+                    user_id,
+                    err
+                );
+            }
+        }
+
+        CLOUDCHECK_EXISTS_BACKFILLS.lock().remove(&repair_key);
+    });
+}
+
+async fn compute_visual_backfill_updates(
+    rows: Vec<(String, String)>,
+    user_id: &str,
+) -> Vec<(String, String)> {
+    let mut updates: Vec<(String, String)> = Vec::new();
+    let mut join_set = tokio::task::JoinSet::new();
+    let mut active = 0usize;
+    let concurrency = 6usize;
+    let mut iter = rows.into_iter();
+
+    loop {
+        while active < concurrency {
+            let Some((asset_id, path)) = iter.next() else {
+                break;
+            };
+            let uid = user_id.to_string();
+            join_set.spawn_blocking(move || {
+                let visual_backup_id =
+                    crate::photos::backup_id::visual_from_path(std::path::Path::new(&path), &uid)
+                        .ok();
+                (asset_id, visual_backup_id)
+            });
+            active += 1;
+        }
+
+        let Some(result) = join_set.join_next().await else {
+            break;
+        };
+        active = active.saturating_sub(1);
+        if let Ok((asset_id, Some(visual_backup_id))) = result {
+            updates.push((asset_id, visual_backup_id));
+        }
+    }
+
+    updates
+}
+
+async fn backfill_exists_backup_ids_batch(
+    state: &AppState,
+    organization_id: i32,
+    user_id: &str,
+    limit: usize,
+) -> anyhow::Result<usize> {
+    let limit = limit.clamp(1, 1000) as i64;
+    if let Some(pg) = &state.pg_client {
+        let rows = pg
+            .query(
+                "SELECT asset_id, path
+                 FROM photos
+                 WHERE organization_id=$1 AND user_id=$2
+                   AND COALESCE(delete_time,0)=0
+                   AND COALESCE(locked,FALSE)=FALSE
+                   AND (
+                        COALESCE(mime_type,'') = 'image/jpeg'
+                        OR LOWER(path) LIKE '%.jpg'
+                        OR LOWER(path) LIKE '%.jpeg'
+                        OR LOWER(filename) LIKE '%.jpg'
+                        OR LOWER(filename) LIKE '%.jpeg'
+                   )
+                   AND (backup_id IS NULL OR backup_id = '')
+                 LIMIT $3",
+                &[&organization_id, &user_id, &limit],
+            )
+            .await?;
+        let mut filled = 0usize;
+        for row in rows {
+            let asset_id: String = row.get(0);
+            let path: String = row.get(1);
+            let bid = tokio::task::spawn_blocking({
+                let p = std::path::PathBuf::from(path);
+                let uid = user_id.to_string();
+                move || -> Option<String> {
+                    let bytes = std::fs::read(p).ok()?;
+                    crate::photos::backup_id::from_bytes(&bytes, &uid).ok()
+                }
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(bid) = bid {
+                let _ = pg
+                    .execute(
+                        "UPDATE photos SET backup_id=$1 WHERE organization_id=$2 AND user_id=$3 AND asset_id=$4",
+                        &[&bid, &organization_id, &user_id, &asset_id],
+                    )
+                    .await;
+                filled += 1;
+            }
+        }
+        return Ok(filled);
+    }
+
+    let data_db = state.get_user_data_database(user_id)?;
+    let rows: Vec<(String, String)> = {
+        let conn = data_db.lock();
+        let mut stmt = conn.prepare(
+            "SELECT asset_id, path
+             FROM photos
+             WHERE organization_id=? AND user_id=?
+               AND COALESCE(delete_time,0)=0
+               AND COALESCE(locked,FALSE)=FALSE
+               AND (
+                    COALESCE(mime_type,'') = 'image/jpeg'
+                    OR lower(path) LIKE '%.jpg'
+                    OR lower(path) LIKE '%.jpeg'
+                    OR lower(filename) LIKE '%.jpg'
+                    OR lower(filename) LIKE '%.jpeg'
+               )
+               AND (backup_id IS NULL OR backup_id='')
+             LIMIT ?",
+        )?;
+        let mapped = stmt.query_map(duckdb::params![organization_id, user_id, limit], |row| {
+            Ok::<(String, String), duckdb::Error>((row.get(0)?, row.get(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in mapped {
+            if let Ok(v) = row {
+                out.push(v);
+            }
+        }
+        out
+    };
+    let mut filled = 0usize;
+    for (asset_id, path) in rows {
+        let bid = tokio::task::spawn_blocking({
+            let p = std::path::PathBuf::from(path);
+            let uid = user_id.to_string();
+            move || -> Option<String> {
+                let bytes = std::fs::read(p).ok()?;
+                crate::photos::backup_id::from_bytes(&bytes, &uid).ok()
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+        if let Some(bid) = bid {
+            let conn = data_db.lock();
+            let _ = conn.execute(
+                "UPDATE photos SET backup_id=? WHERE organization_id=? AND user_id=? AND asset_id=?",
+                duckdb::params![&bid, organization_id, user_id, &asset_id],
+            );
+            filled += 1;
+        }
+    }
+    Ok(filled)
+}
+
+async fn backfill_exists_visual_backup_ids_batch(
+    state: &AppState,
+    organization_id: i32,
+    user_id: &str,
+    limit: usize,
+) -> anyhow::Result<usize> {
+    let limit = limit.clamp(1, 250) as i64;
+    if let Some(pg) = &state.pg_client {
+        let rows = pg
+            .query(
+                "SELECT asset_id, path
+                 FROM photos
+                 WHERE organization_id=$1 AND user_id=$2
+                   AND COALESCE(delete_time,0)=0
+                   AND COALESCE(locked,FALSE)=FALSE
+                   AND COALESCE(is_video,FALSE)=FALSE
+                   AND (visual_backup_id IS NULL OR visual_backup_id = '')
+                 LIMIT $3",
+                &[&organization_id, &user_id, &limit],
+            )
+            .await?;
+        let tuples: Vec<(String, String)> = rows
+            .into_iter()
+            .map(|row| (row.get::<_, String>(0), row.get::<_, String>(1)))
+            .collect();
+        let updates = compute_visual_backfill_updates(tuples, user_id).await;
+        let mut filled = 0usize;
+        for (asset_id, visual_backup_id) in updates {
+            let _ = pg
+                .execute(
+                    "UPDATE photos SET visual_backup_id=$1 WHERE organization_id=$2 AND user_id=$3 AND asset_id=$4",
+                    &[&visual_backup_id, &organization_id, &user_id, &asset_id],
+                )
+                .await;
+            filled += 1;
+        }
+        return Ok(filled);
+    }
+
+    let data_db = state.get_user_data_database(user_id)?;
+    let rows: Vec<(String, String)> = {
+        let conn = data_db.lock();
+        let mut stmt = conn.prepare(
+            "SELECT asset_id, path
+             FROM photos
+             WHERE organization_id=? AND user_id=?
+               AND COALESCE(delete_time,0)=0
+               AND COALESCE(locked,FALSE)=FALSE
+               AND COALESCE(is_video,FALSE)=FALSE
+               AND (visual_backup_id IS NULL OR visual_backup_id='')
+             LIMIT ?",
+        )?;
+        let mapped = stmt.query_map(duckdb::params![organization_id, user_id, limit], |row| {
+            Ok::<(String, String), duckdb::Error>((row.get(0)?, row.get(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in mapped {
+            if let Ok(v) = row {
+                out.push(v);
+            }
+        }
+        out
+    };
+    let updates = compute_visual_backfill_updates(rows, user_id).await;
+    let mut filled = 0usize;
+    for (asset_id, visual_backup_id) in updates {
+        let conn = data_db.lock();
+        let _ = conn.execute(
+            "UPDATE photos SET visual_backup_id=? WHERE organization_id=? AND user_id=? AND asset_id=?",
+            duckdb::params![&visual_backup_id, organization_id, user_id, &asset_id],
+        );
+        filled += 1;
+    }
+    Ok(filled)
 }
 
 #[derive(Debug, Deserialize)]
@@ -1186,14 +1568,391 @@ async fn locked_live_video_fully_backed_up_on_disk(
     tokio::fs::metadata(thumb_path).await.is_ok()
 }
 
-#[instrument(skip(state, headers))]
+#[derive(Debug)]
+struct CloudcheckExistsRow {
+    asset_id: String,
+    locked: bool,
+    locked_orig_uploaded: bool,
+    locked_thumb_uploaded: bool,
+    is_live_photo: bool,
+    live_video_path: Option<String>,
+    path: String,
+}
+
+async fn cloudcheck_row_fully_backed_up(
+    state: &Arc<AppState>,
+    user_id: &str,
+    row: &CloudcheckExistsRow,
+) -> bool {
+    let mut orig_ok = row.locked_orig_uploaded;
+    let mut thumb_ok = row.locked_thumb_uploaded;
+    if row.locked && (!orig_ok || !thumb_ok) {
+        let (orig_exists, thumb_exists) =
+            locked_components_exist_on_disk(state, user_id, &row.asset_id).await;
+        orig_ok = orig_ok || orig_exists;
+        thumb_ok = thumb_ok || thumb_exists;
+    }
+
+    let live_ok = if row.is_live_photo {
+        if row.locked {
+            locked_live_video_fully_backed_up_on_disk(state, user_id, &row.live_video_path).await
+        } else {
+            unlocked_live_video_exists_on_disk(
+                state,
+                user_id,
+                &row.asset_id,
+                &row.path,
+                &row.live_video_path,
+            )
+            .await
+        }
+    } else {
+        true
+    };
+
+    if row.locked {
+        orig_ok && thumb_ok && live_ok
+    } else {
+        live_ok
+    }
+}
+
+fn duplicate_filename_like_pattern(filename: &str) -> String {
+    let path = std::path::Path::new(filename);
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(filename);
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    if ext.is_empty() {
+        format!("{}__%", stem)
+    } else {
+        format!("{}__%.{}", stem, ext)
+    }
+}
+
+fn item_already_matched(item: &ExistsItemRequest, active_matches: &HashSet<String>) -> bool {
+    item.response_match_id()
+        .map(|id| active_matches.contains(id))
+        .unwrap_or(false)
+        || item
+            .backup_ids
+            .iter()
+            .any(|id| active_matches.contains(id.trim()))
+}
+
+async fn cloudcheck_metadata_present_matches_pg(
+    state: &Arc<AppState>,
+    pg: &tokio_postgres::Client,
+    organization_id: i32,
+    user_id: &str,
+    items: &[ExistsItemRequest],
+    active_matches: &HashSet<String>,
+) -> Result<HashSet<String>, AppError> {
+    let mut out: HashSet<String> = HashSet::new();
+    for item in items {
+        let Some(match_id) = item.response_match_id().map(str::to_string) else {
+            continue;
+        };
+        if active_matches.contains(&match_id) || item_already_matched(item, active_matches) {
+            continue;
+        }
+        let is_video = item.is_video.unwrap_or(false);
+        let mut rows: Vec<CloudcheckExistsRow> = Vec::new();
+
+        if let Some(content_id) = item
+            .content_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let pg_rows = pg
+                .query(
+                    "SELECT asset_id,
+                            COALESCE(locked, FALSE),
+                            COALESCE(locked_orig_uploaded, FALSE),
+                            COALESCE(locked_thumb_uploaded, FALSE),
+                            COALESCE(is_live_photo, FALSE),
+                            live_video_path,
+                            path
+                     FROM photos
+                     WHERE organization_id = $1 AND user_id = $2
+                       AND COALESCE(delete_time, 0) = 0
+                       AND content_id = $3
+                       AND COALESCE(is_video, FALSE) = $4
+                     LIMIT 5",
+                    &[&organization_id, &user_id, &content_id, &is_video],
+                )
+                .await
+                .map_err(|e| AppError(anyhow::anyhow!(e.to_string())))?;
+            rows = pg_rows
+                .into_iter()
+                .map(|r| CloudcheckExistsRow {
+                    asset_id: r.get(0),
+                    locked: r.get(1),
+                    locked_orig_uploaded: r.get(2),
+                    locked_thumb_uploaded: r.get(3),
+                    is_live_photo: r.get(4),
+                    live_video_path: r.get(5),
+                    path: r.get(6),
+                })
+                .collect();
+        }
+
+        if rows.is_empty() {
+            if let Some(filename) = item
+                .filename
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let like_pattern = duplicate_filename_like_pattern(filename);
+                let width = item.width.unwrap_or(0);
+                let height = item.height.unwrap_or(0);
+                let created_at = item.created_at.unwrap_or(0);
+                let pg_rows = pg
+                    .query(
+                        "SELECT asset_id,
+                                COALESCE(locked, FALSE),
+                                COALESCE(locked_orig_uploaded, FALSE),
+                                COALESCE(locked_thumb_uploaded, FALSE),
+                                COALESCE(is_live_photo, FALSE),
+                                live_video_path,
+                                path
+                         FROM photos
+                         WHERE organization_id = $1 AND user_id = $2
+                           AND COALESCE(delete_time, 0) = 0
+                           AND COALESCE(is_video, FALSE) = $3
+                           AND (LOWER(filename) = LOWER($4) OR LOWER(filename) LIKE LOWER($5))
+                           AND (
+                               ($6::INTEGER > 0 AND $7::INTEGER > 0 AND
+                                ((width = $6 AND height = $7) OR (width = $7 AND height = $6)))
+                               OR ($8::BIGINT > 0 AND ABS(COALESCE(created_at, 0) - $8) <= 604800)
+                           )
+                         LIMIT 3",
+                        &[
+                            &organization_id,
+                            &user_id,
+                            &is_video,
+                            &filename,
+                            &like_pattern,
+                            &width,
+                            &height,
+                            &created_at,
+                        ],
+                    )
+                    .await
+                    .map_err(|e| AppError(anyhow::anyhow!(e.to_string())))?;
+                rows = pg_rows
+                    .into_iter()
+                    .map(|r| CloudcheckExistsRow {
+                        asset_id: r.get(0),
+                        locked: r.get(1),
+                        locked_orig_uploaded: r.get(2),
+                        locked_thumb_uploaded: r.get(3),
+                        is_live_photo: r.get(4),
+                        live_video_path: r.get(5),
+                        path: r.get(6),
+                    })
+                    .collect();
+                if rows.len() > 1 {
+                    tracing::info!(
+                        target: "cloudcheck",
+                        "[CLOUDCHECK] metadata fallback ambiguous filename={} matches={}",
+                        filename,
+                        rows.len()
+                    );
+                    rows.clear();
+                }
+            }
+        }
+
+        for row in rows {
+            if cloudcheck_row_fully_backed_up(state, user_id, &row).await {
+                tracing::info!(
+                    target: "cloudcheck",
+                    "[CLOUDCHECK] metadata fallback matched asset_id={} filename={:?} content_id_present={}",
+                    row.asset_id,
+                    item.filename,
+                    item.content_id.as_deref().map(str::trim).is_some_and(|s| !s.is_empty())
+                );
+                out.insert(match_id);
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+async fn cloudcheck_metadata_present_matches_duckdb(
+    state: &Arc<AppState>,
+    data_db: &crate::database::multi_tenant::DbPool,
+    organization_id: i32,
+    user_id: &str,
+    items: &[ExistsItemRequest],
+    active_matches: &HashSet<String>,
+) -> Result<HashSet<String>, AppError> {
+    let mut out: HashSet<String> = HashSet::new();
+    for item in items {
+        let Some(match_id) = item.response_match_id().map(str::to_string) else {
+            continue;
+        };
+        if active_matches.contains(&match_id) || item_already_matched(item, active_matches) {
+            continue;
+        }
+        let is_video = item.is_video.unwrap_or(false);
+        let mut rows: Vec<CloudcheckExistsRow> = Vec::new();
+
+        if let Some(content_id) = item
+            .content_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            let conn = data_db.lock();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT asset_id,
+                            COALESCE(locked, FALSE),
+                            COALESCE(locked_orig_uploaded, FALSE),
+                            COALESCE(locked_thumb_uploaded, FALSE),
+                            COALESCE(is_live_photo, FALSE),
+                            live_video_path,
+                            path
+                     FROM photos
+                     WHERE organization_id = ? AND user_id = ?
+                       AND COALESCE(delete_time, 0) = 0
+                       AND content_id = ?
+                       AND COALESCE(is_video, FALSE) = ?
+                     LIMIT 5",
+                )
+                .map_err(|e| AppError(anyhow!(e)))?;
+            let mapped = stmt
+                .query_map(
+                    duckdb::params![organization_id, user_id, content_id, is_video],
+                    |r| {
+                        Ok(CloudcheckExistsRow {
+                            asset_id: r.get(0)?,
+                            locked: r.get(1)?,
+                            locked_orig_uploaded: r.get(2)?,
+                            locked_thumb_uploaded: r.get(3)?,
+                            is_live_photo: r.get(4)?,
+                            live_video_path: r.get(5).ok(),
+                            path: r.get(6)?,
+                        })
+                    },
+                )
+                .map_err(|e| AppError(anyhow!(e)))?;
+            for row in mapped.flatten() {
+                rows.push(row);
+            }
+        }
+
+        if rows.is_empty() {
+            if let Some(filename) = item
+                .filename
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let like_pattern = duplicate_filename_like_pattern(filename);
+                let width = item.width.unwrap_or(0);
+                let height = item.height.unwrap_or(0);
+                let created_at = item.created_at.unwrap_or(0);
+                let conn = data_db.lock();
+                let mut stmt = conn
+                    .prepare(
+                        "SELECT asset_id,
+                                COALESCE(locked, FALSE),
+                                COALESCE(locked_orig_uploaded, FALSE),
+                                COALESCE(locked_thumb_uploaded, FALSE),
+                                COALESCE(is_live_photo, FALSE),
+                                live_video_path,
+                                path
+                         FROM photos
+                         WHERE organization_id = ? AND user_id = ?
+                           AND COALESCE(delete_time, 0) = 0
+                           AND COALESCE(is_video, FALSE) = ?
+                           AND (LOWER(filename) = LOWER(?) OR LOWER(filename) LIKE LOWER(?))
+                           AND (
+                               (? > 0 AND ? > 0 AND
+                                ((width = ? AND height = ?) OR (width = ? AND height = ?)))
+                               OR (? > 0 AND ABS(COALESCE(created_at, 0) - ?) <= 604800)
+                           )
+                         LIMIT 3",
+                    )
+                    .map_err(|e| AppError(anyhow!(e)))?;
+                let mapped = stmt
+                    .query_map(
+                        duckdb::params![
+                            organization_id,
+                            user_id,
+                            is_video,
+                            filename,
+                            like_pattern,
+                            width,
+                            height,
+                            width,
+                            height,
+                            height,
+                            width,
+                            created_at,
+                            created_at
+                        ],
+                        |r| {
+                            Ok(CloudcheckExistsRow {
+                                asset_id: r.get(0)?,
+                                locked: r.get(1)?,
+                                locked_orig_uploaded: r.get(2)?,
+                                locked_thumb_uploaded: r.get(3)?,
+                                is_live_photo: r.get(4)?,
+                                live_video_path: r.get(5).ok(),
+                                path: r.get(6)?,
+                            })
+                        },
+                    )
+                    .map_err(|e| AppError(anyhow!(e)))?;
+                for row in mapped.flatten() {
+                    rows.push(row);
+                }
+                if rows.len() > 1 {
+                    tracing::info!(
+                        target: "cloudcheck",
+                        "[CLOUDCHECK] metadata fallback ambiguous filename={} matches={}",
+                        filename,
+                        rows.len()
+                    );
+                    rows.clear();
+                }
+            }
+        }
+
+        for row in rows {
+            if cloudcheck_row_fully_backed_up(state, user_id, &row).await {
+                tracing::info!(
+                    target: "cloudcheck",
+                    "[CLOUDCHECK] metadata fallback matched asset_id={} filename={:?} content_id_present={}",
+                    row.asset_id,
+                    item.filename,
+                    item.content_id.as_deref().map(str::trim).is_some_and(|s| !s.is_empty())
+                );
+                out.insert(match_id);
+                break;
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[instrument(skip(state, headers, payload))]
 pub async fn photos_exist(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Json(payload): Json<ExistsRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let user = get_user_from_headers(&headers, &state.auth_service).await?;
-    if payload.asset_ids.is_empty() && payload.backup_ids.is_empty() {
+    let started_at = Instant::now();
+    if payload.asset_ids.is_empty() && payload.backup_ids.is_empty() && payload.items.is_empty() {
         return Ok(Json(ExistsResponse {
             present_asset_ids: Vec::new(),
             present_backup_ids: None,
@@ -1202,72 +1961,38 @@ pub async fn photos_exist(
         }));
     }
 
-    let use_backup_ids = !payload.backup_ids.is_empty();
-    let requested_ids: &Vec<String> = if use_backup_ids {
-        &payload.backup_ids
+    let mut requested_backup_ids = payload.backup_ids.clone();
+    for item in &payload.items {
+        for id in &item.backup_ids {
+            let id = id.trim();
+            if !id.is_empty() {
+                requested_backup_ids.push(id.to_string());
+            }
+        }
+        if let Some(id) = item.response_match_id() {
+            requested_backup_ids.push(id.to_string());
+        }
+    }
+    requested_backup_ids.sort();
+    requested_backup_ids.dedup();
+
+    let use_backup_ids = !requested_backup_ids.is_empty() || !payload.items.is_empty();
+    let requested_ids: Vec<String> = if use_backup_ids {
+        requested_backup_ids
     } else {
-        &payload.asset_ids
+        payload.asset_ids.clone()
     };
     let requested_set: HashSet<String> = requested_ids.iter().cloned().collect();
 
     if let Some(pg) = &state.pg_client {
-        // On-demand backfill so `backup_id` queries work without a full reindex.
         if use_backup_ids {
-            let rows = pg
-                .query(
-                    "SELECT asset_id, path
-                     FROM photos
-                     WHERE organization_id=$1 AND user_id=$2
-                       AND COALESCE(delete_time,0)=0
-                       AND COALESCE(locked,FALSE)=FALSE
-                       AND (
-                            COALESCE(mime_type,'') = 'image/jpeg'
-                            OR LOWER(path) LIKE '%.jpg'
-                            OR LOWER(path) LIKE '%.jpeg'
-                            OR LOWER(filename) LIKE '%.jpg'
-                            OR LOWER(filename) LIKE '%.jpeg'
-                       )
-                       AND (backup_id IS NULL OR backup_id = '')
-                     LIMIT 10000",
-                    &[&user.organization_id, &user.user_id],
-                )
-                .await
-                .unwrap_or_default();
-            let mut filled: usize = 0;
-            for r in rows {
-                let asset_id: String = r.get(0);
-                let path: String = r.get(1);
-                let bid = tokio::task::spawn_blocking({
-                    let p = std::path::PathBuf::from(path);
-                    let uid = user.user_id.clone();
-                    move || -> Option<String> {
-                        let bytes = std::fs::read(p).ok()?;
-                        crate::photos::backup_id::from_bytes(&bytes, &uid).ok()
-                    }
-                })
-                .await
-                .ok()
-                .flatten();
-                if let Some(bid) = bid {
-                    let _ = pg
-                        .execute(
-                            "UPDATE photos SET backup_id=$1 WHERE organization_id=$2 AND user_id=$3 AND asset_id=$4",
-                            &[&bid, &user.organization_id, &user.user_id, &asset_id],
-                        )
-                        .await;
-                    filled += 1;
-                }
-            }
-            if filled > 0 {
-                tracing::info!(
-                    target: "cloudcheck",
-                    "[CLOUDCHECK] backup_id backfill (pg) filled={}",
-                    filled
-                );
-            }
+            spawn_cloudcheck_exists_backfill(
+                state.clone(),
+                user.organization_id,
+                user.user_id.clone(),
+            );
         }
 
-        let mut present: Vec<String> = Vec::new();
         let mut active_request_matches: HashSet<String> = HashSet::new();
         let mut deleted_requested: HashSet<String> = HashSet::new();
         if !requested_ids.is_empty() {
@@ -1281,7 +2006,8 @@ pub async fn photos_exist(
             }
             let where_clause = if use_backup_ids {
                 format!(
-                    "(backup_id IN ({}) OR asset_id IN ({}))",
+                    "(backup_id IN ({}) OR visual_backup_id IN ({}) OR asset_id IN ({}))",
+                    placeholders.join(","),
                     placeholders.join(","),
                     placeholders.join(",")
                 )
@@ -1291,6 +2017,7 @@ pub async fn photos_exist(
             let sql = format!(
                 "SELECT asset_id,
                         backup_id,
+                        visual_backup_id,
                         COALESCE(locked, FALSE) AS locked,
                         COALESCE(locked_orig_uploaded, FALSE) AS locked_orig_uploaded,
                         COALESCE(locked_thumb_uploaded, FALSE) AS locked_thumb_uploaded,
@@ -1316,12 +2043,13 @@ pub async fn photos_exist(
             for r in rows {
                 let asset_id: String = r.get(0);
                 let backup_id: Option<String> = r.get(1);
-                let locked: bool = r.get(2);
-                let mut orig_ok: bool = r.get(3);
-                let mut thumb_ok: bool = r.get(4);
-                let is_live: bool = r.get(5);
-                let live_video_path: Option<String> = r.get(6);
-                let photo_path: String = r.get(7);
+                let visual_backup_id: Option<String> = r.get(2);
+                let locked: bool = r.get(3);
+                let mut orig_ok: bool = r.get(4);
+                let mut thumb_ok: bool = r.get(5);
+                let is_live: bool = r.get(6);
+                let live_video_path: Option<String> = r.get(7);
+                let photo_path: String = r.get(8);
 
                 if locked {
                     locked_total += 1;
@@ -1398,35 +2126,54 @@ pub async fn photos_exist(
                                 active_request_matches.insert(bid.clone());
                             }
                         }
+                        if let Some(visual_bid) = visual_backup_id.as_ref() {
+                            if requested_set.contains(visual_bid) {
+                                active_request_matches.insert(visual_bid.clone());
+                            }
+                        }
                         if requested_set.contains(&asset_id) {
                             active_request_matches.insert(asset_id.clone());
                         }
                     } else {
                         active_request_matches.insert(asset_id.clone());
                     }
-                    if use_backup_ids {
-                        present.push(backup_id.unwrap_or(asset_id));
-                    } else {
-                        present.push(asset_id);
-                    }
                 }
             }
+            let metadata_matches = if use_backup_ids && !payload.items.is_empty() {
+                cloudcheck_metadata_present_matches_pg(
+                    &state,
+                    pg,
+                    user.organization_id,
+                    &user.user_id,
+                    &payload.items,
+                    &active_request_matches,
+                )
+                .await?
+            } else {
+                HashSet::new()
+            };
+            let metadata_match_count = metadata_matches.len();
+            active_request_matches.extend(metadata_matches);
+            let present_count = active_request_matches.len();
             tracing::info!(
                 target: "cloudcheck",
-                "[CLOUDCHECK] exists (pg) mode={} requested={} matched_rows={} present={} live_total={} live_missing={} locked_total={} locked_incomplete={}",
+                "[CLOUDCHECK] exists (pg) mode={} requested={} items={} matched_rows={} metadata_present={} present={} live_total={} live_missing={} locked_total={} locked_incomplete={} elapsed_ms={}",
                 if use_backup_ids { "backup_id" } else { "asset_id" },
                 requested_ids.len(),
+                payload.items.len(),
                 matched_rows,
-                present.len(),
+                metadata_match_count,
+                present_count,
                 live_total,
                 live_missing,
                 locked_total,
-                locked_incomplete
+                locked_incomplete,
+                started_at.elapsed().as_millis()
             );
 
             if payload.include_deleted_matches {
                 let deleted_sql = format!(
-                    "SELECT asset_id, backup_id
+                    "SELECT asset_id, backup_id, visual_backup_id
                      FROM photos
                      WHERE organization_id = $1 AND user_id = $2
                        AND COALESCE(delete_time, 0) > 0
@@ -1440,10 +2187,16 @@ pub async fn photos_exist(
                 for row in deleted_rows {
                     let deleted_asset_id: String = row.get(0);
                     let deleted_backup_id: Option<String> = row.get(1);
+                    let deleted_visual_backup_id: Option<String> = row.get(2);
                     if use_backup_ids {
                         if let Some(bid) = deleted_backup_id.as_ref() {
                             if requested_set.contains(bid) {
                                 deleted_requested.insert(bid.clone());
+                            }
+                        }
+                        if let Some(visual_bid) = deleted_visual_backup_id.as_ref() {
+                            if requested_set.contains(visual_bid) {
+                                deleted_requested.insert(visual_bid.clone());
                             }
                         }
                         if requested_set.contains(&deleted_asset_id) {
@@ -1488,14 +2241,31 @@ pub async fn photos_exist(
             }
         }
 
-        let deleted_values: Vec<String> = deleted_requested.into_iter().collect();
+        let present_values: Vec<String> = if use_backup_ids {
+            let mut values: Vec<String> = active_request_matches.into_iter().collect();
+            values.sort();
+            values
+        } else {
+            let mut values: Vec<String> = requested_set
+                .intersection(&active_request_matches)
+                .cloned()
+                .collect();
+            values.sort();
+            values
+        };
+        let mut deleted_values: Vec<String> = deleted_requested.into_iter().collect();
+        deleted_values.sort();
         return Ok(Json(ExistsResponse {
             present_asset_ids: if use_backup_ids {
                 Vec::new()
             } else {
-                present.clone()
+                present_values.clone()
             },
-            present_backup_ids: if use_backup_ids { Some(present) } else { None },
+            present_backup_ids: if use_backup_ids {
+                Some(present_values)
+            } else {
+                None
+            },
             deleted_asset_ids: if payload.include_deleted_matches && !use_backup_ids {
                 Some(deleted_values.clone())
             } else {
@@ -1513,79 +2283,17 @@ pub async fn photos_exist(
     let data_db = state.get_user_data_database(&user.user_id)?;
     let org_id = user.organization_id;
 
-    // On-demand backfill so `backup_id` queries work without a full reindex.
     if use_backup_ids {
-        let to_fill: Vec<(String, String)> = {
-            let conn = data_db.lock();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT asset_id, path
-                     FROM photos
-                     WHERE organization_id=? AND user_id=?
-                       AND COALESCE(delete_time,0)=0
-                       AND COALESCE(locked,FALSE)=FALSE
-                       AND (
-                            COALESCE(mime_type,'') = 'image/jpeg'
-                            OR lower(path) LIKE '%.jpg'
-                            OR lower(path) LIKE '%.jpeg'
-                            OR lower(filename) LIKE '%.jpg'
-                            OR lower(filename) LIKE '%.jpeg'
-                       )
-                       AND (backup_id IS NULL OR backup_id='')
-                     LIMIT 10000",
-                )
-                .map_err(|e| AppError(anyhow!(e)))?;
-            let mapped = stmt
-                .query_map(duckdb::params![org_id, &user.user_id], |row| {
-                    Ok::<(String, String), duckdb::Error>((row.get(0)?, row.get(1)?))
-                })
-                .map_err(|e| AppError(anyhow!(e)))?;
-            let mut out: Vec<(String, String)> = Vec::new();
-            for r in mapped {
-                if let Ok(v) = r {
-                    out.push(v);
-                }
-            }
-            out
-        };
-        if !to_fill.is_empty() {
-            let mut filled: usize = 0;
-            for (asset_id, path) in to_fill {
-                let bid = tokio::task::spawn_blocking({
-                    let p = std::path::PathBuf::from(path);
-                    let uid = user.user_id.clone();
-                    move || -> Option<String> {
-                        let bytes = std::fs::read(p).ok()?;
-                        crate::photos::backup_id::from_bytes(&bytes, &uid).ok()
-                    }
-                })
-                .await
-                .ok()
-                .flatten();
-                if let Some(bid) = bid {
-                    let conn = data_db.lock();
-                    let _ = conn.execute(
-                        "UPDATE photos SET backup_id=? WHERE organization_id=? AND user_id=? AND asset_id=?",
-                        duckdb::params![&bid, org_id, &user.user_id, &asset_id],
-                    );
-                    filled += 1;
-                }
-            }
-            tracing::info!(
-                target: "cloudcheck",
-                "[CLOUDCHECK] backup_id backfill (duckdb) filled={}",
-                filled
-            );
-        }
+        spawn_cloudcheck_exists_backfill(state.clone(), org_id, user.user_id.clone());
     }
 
-    let mut present: Vec<String> = Vec::new();
     let mut active_request_matches: HashSet<String> = HashSet::new();
     let mut deleted_requested: HashSet<String> = HashSet::new();
     if !requested_ids.is_empty() {
         let ids = requested_ids.clone();
         let rows: Vec<(
             String,
+            Option<String>,
             Option<String>,
             bool,
             bool,
@@ -1598,6 +2306,7 @@ pub async fn photos_exist(
             let mut q = String::from(
                 "SELECT asset_id,
                         backup_id,
+                        visual_backup_id,
                         COALESCE(locked, FALSE) AS locked,
                         COALESCE(locked_orig_uploaded, FALSE) AS locked_orig_uploaded,
                         COALESCE(locked_thumb_uploaded, FALSE) AS locked_thumb_uploaded,
@@ -1610,6 +2319,8 @@ pub async fn photos_exist(
             if use_backup_ids {
                 q.push_str("(backup_id IN (");
                 q.push_str(&vec!["?"; ids.len()].join(","));
+                q.push_str(") OR visual_backup_id IN (");
+                q.push_str(&vec!["?"; ids.len()].join(","));
                 q.push_str(") OR asset_id IN (");
                 q.push_str(&vec!["?"; ids.len()].join(","));
                 q.push_str("))");
@@ -1620,13 +2331,16 @@ pub async fn photos_exist(
             }
             let mut stmt = conn.prepare(&q).map_err(|e| AppError(anyhow!(e)))?;
             let mut params: Vec<Box<dyn duckdb::ToSql>> =
-                Vec::with_capacity(2 + (ids.len() * if use_backup_ids { 2 } else { 1 }));
+                Vec::with_capacity(2 + (ids.len() * if use_backup_ids { 3 } else { 1 }));
             params.push(Box::new(org_id));
             params.push(Box::new(user.user_id.clone()));
             for id in &ids {
                 params.push(Box::new(id.clone()));
             }
             if use_backup_ids {
+                for id in &ids {
+                    params.push(Box::new(id.clone()));
+                }
                 for id in &ids {
                     params.push(Box::new(id.clone()));
                 }
@@ -1637,15 +2351,17 @@ pub async fn photos_exist(
                     |row| {
                         let asset_id: String = row.get(0)?;
                         let backup_id: Option<String> = row.get(1).ok();
-                        let locked: bool = row.get(2)?;
-                        let orig_ok: bool = row.get(3)?;
-                        let thumb_ok: bool = row.get(4)?;
-                        let is_live: bool = row.get(5)?;
-                        let live_video_path: Option<String> = row.get(6).ok();
-                        let photo_path: String = row.get(7)?;
+                        let visual_backup_id: Option<String> = row.get(2).ok();
+                        let locked: bool = row.get(3)?;
+                        let orig_ok: bool = row.get(4)?;
+                        let thumb_ok: bool = row.get(5)?;
+                        let is_live: bool = row.get(6)?;
+                        let live_video_path: Option<String> = row.get(7).ok();
+                        let photo_path: String = row.get(8)?;
                         Ok((
                             asset_id,
                             backup_id,
+                            visual_backup_id,
                             locked,
                             orig_ok,
                             thumb_ok,
@@ -1658,6 +2374,7 @@ pub async fn photos_exist(
                 .map_err(|e| AppError(anyhow!(e)))?;
             let mut out: Vec<(
                 String,
+                Option<String>,
                 Option<String>,
                 bool,
                 bool,
@@ -1682,6 +2399,7 @@ pub async fn photos_exist(
         for (
             asset_id,
             backup_id,
+            visual_backup_id,
             locked,
             mut orig_ok,
             mut thumb_ok,
@@ -1755,43 +2473,64 @@ pub async fn photos_exist(
                             active_request_matches.insert(bid.clone());
                         }
                     }
+                    if let Some(visual_bid) = visual_backup_id.as_ref() {
+                        if requested_set.contains(visual_bid) {
+                            active_request_matches.insert(visual_bid.clone());
+                        }
+                    }
                     if requested_set.contains(&asset_id) {
                         active_request_matches.insert(asset_id.clone());
                     }
                 } else {
                     active_request_matches.insert(asset_id.clone());
                 }
-                if use_backup_ids {
-                    present.push(backup_id.unwrap_or(asset_id));
-                } else {
-                    present.push(asset_id);
-                }
             }
         }
+        let metadata_matches = if use_backup_ids && !payload.items.is_empty() {
+            cloudcheck_metadata_present_matches_duckdb(
+                &state,
+                &data_db,
+                org_id,
+                &user.user_id,
+                &payload.items,
+                &active_request_matches,
+            )
+            .await?
+        } else {
+            HashSet::new()
+        };
+        let metadata_match_count = metadata_matches.len();
+        active_request_matches.extend(metadata_matches);
+        let present_count = active_request_matches.len();
         tracing::info!(
             target: "cloudcheck",
-            "[CLOUDCHECK] exists (duckdb) mode={} requested={} matched_rows={} present={} live_total={} live_missing={} locked_total={} locked_incomplete={}",
+            "[CLOUDCHECK] exists (duckdb) mode={} requested={} items={} matched_rows={} metadata_present={} present={} live_total={} live_missing={} locked_total={} locked_incomplete={} elapsed_ms={}",
             if use_backup_ids { "backup_id" } else { "asset_id" },
             requested_ids.len(),
+            payload.items.len(),
             matched_rows,
-            present.len(),
+            metadata_match_count,
+            present_count,
             live_total,
             live_missing,
             locked_total,
-            locked_incomplete
+            locked_incomplete,
+            started_at.elapsed().as_millis()
         );
 
         if payload.include_deleted_matches {
             let ids = requested_ids.clone();
-            let deleted_rows: Vec<(String, Option<String>)> = {
+            let deleted_rows: Vec<(String, Option<String>, Option<String>)> = {
                 let conn = data_db.lock();
                 let mut q = String::from(
-                    "SELECT asset_id, backup_id
+                    "SELECT asset_id, backup_id, visual_backup_id
                      FROM photos
                      WHERE organization_id = ? AND user_id = ? AND COALESCE(delete_time, 0) > 0 AND ",
                 );
                 if use_backup_ids {
                     q.push_str("(backup_id IN (");
+                    q.push_str(&vec!["?"; ids.len()].join(","));
+                    q.push_str(") OR visual_backup_id IN (");
                     q.push_str(&vec!["?"; ids.len()].join(","));
                     q.push_str(") OR asset_id IN (");
                     q.push_str(&vec!["?"; ids.len()].join(","));
@@ -1803,7 +2542,7 @@ pub async fn photos_exist(
                 }
                 let mut stmt = conn.prepare(&q).map_err(|e| AppError(anyhow!(e)))?;
                 let mut params: Vec<Box<dyn duckdb::ToSql>> =
-                    Vec::with_capacity(2 + (ids.len() * if use_backup_ids { 2 } else { 1 }));
+                    Vec::with_capacity(2 + (ids.len() * if use_backup_ids { 3 } else { 1 }));
                 params.push(Box::new(org_id));
                 params.push(Box::new(user.user_id.clone()));
                 for id in &ids {
@@ -1813,14 +2552,23 @@ pub async fn photos_exist(
                     for id in &ids {
                         params.push(Box::new(id.clone()));
                     }
+                    for id in &ids {
+                        params.push(Box::new(id.clone()));
+                    }
                 }
                 let mapped = stmt
                     .query_map(
                         duckdb::params_from_iter(params.iter().map(|b| &**b)),
-                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                        |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, Option<String>>(1)?,
+                                row.get::<_, Option<String>>(2)?,
+                            ))
+                        },
                     )
                     .map_err(|e| AppError(anyhow!(e)))?;
-                let mut out: Vec<(String, Option<String>)> = Vec::new();
+                let mut out: Vec<(String, Option<String>, Option<String>)> = Vec::new();
                 for r in mapped {
                     if let Ok(v) = r {
                         out.push(v);
@@ -1828,11 +2576,16 @@ pub async fn photos_exist(
                 }
                 out
             };
-            for (deleted_asset_id, deleted_backup_id) in deleted_rows {
+            for (deleted_asset_id, deleted_backup_id, deleted_visual_backup_id) in deleted_rows {
                 if use_backup_ids {
                     if let Some(bid) = deleted_backup_id.as_ref() {
                         if requested_set.contains(bid) {
                             deleted_requested.insert(bid.clone());
+                        }
+                    }
+                    if let Some(visual_bid) = deleted_visual_backup_id.as_ref() {
+                        if requested_set.contains(visual_bid) {
+                            deleted_requested.insert(visual_bid.clone());
                         }
                     }
                     if requested_set.contains(&deleted_asset_id) {
@@ -1886,14 +2639,31 @@ pub async fn photos_exist(
         }
     }
 
-    let deleted_values: Vec<String> = deleted_requested.into_iter().collect();
+    let present_values: Vec<String> = if use_backup_ids {
+        let mut values: Vec<String> = active_request_matches.into_iter().collect();
+        values.sort();
+        values
+    } else {
+        let mut values: Vec<String> = requested_set
+            .intersection(&active_request_matches)
+            .cloned()
+            .collect();
+        values.sort();
+        values
+    };
+    let mut deleted_values: Vec<String> = deleted_requested.into_iter().collect();
+    deleted_values.sort();
     Ok(Json(ExistsResponse {
         present_asset_ids: if use_backup_ids {
             Vec::new()
         } else {
-            present.clone()
+            present_values.clone()
         },
-        present_backup_ids: if use_backup_ids { Some(present) } else { None },
+        present_backup_ids: if use_backup_ids {
+            Some(present_values)
+        } else {
+            None
+        },
         deleted_asset_ids: if payload.include_deleted_matches && !use_backup_ids {
             Some(deleted_values.clone())
         } else {
@@ -4249,6 +5019,9 @@ pub async fn serve_image(
                 .unwrap_or("application/octet-stream")
                 .to_string()
         });
+        let wants_display_variant =
+            should_serve_display_variant(&orig_content_type, is_video, query);
+        let display_max_side = display_image_max_side_from_query(query);
         if has_gain_map {
             tracing::info!(
                 target: "upload",
@@ -4474,6 +5247,67 @@ pub async fn serve_image(
                 return Ok((headers_map, bytes).into_response());
             }
             RawImageServeMode::OriginalBytes | RawImageServeMode::NotRaw => {}
+        }
+
+        if wants_display_variant {
+            let jpeg_path =
+                state.image_display_jpeg_path_for(&user.user_id, &asset_id, display_max_side);
+            if !jpeg_path.exists() {
+                generate_display_jpeg(&path, &jpeg_path, display_max_side).map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to generate display JPEG for {} (max_side={}): {}",
+                        asset_id,
+                        display_max_side,
+                        e
+                    )
+                })?;
+                tracing::info!(
+                    target: "upload",
+                    "[DISPLAY] Generated JPEG preview for asset_id={} path={} max_side={}",
+                    asset_id,
+                    path,
+                    display_max_side
+                );
+            }
+
+            let etag = tokio::fs::metadata(&jpeg_path)
+                .await
+                .ok()
+                .and_then(|m| weak_etag_from_metadata(&m));
+            if let Some(et) = etag.as_deref() {
+                if if_none_match_allows_304(request.headers(), et) {
+                    let mut headers_map = HeaderMap::new();
+                    headers_map.insert(
+                        header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("image/jpeg"),
+                    );
+                    add_private_cache_headers(&mut headers_map, Some(et));
+                    if let Some(sc) = &pin_set_cookie {
+                        headers_map.insert(
+                            header::SET_COOKIE,
+                            axum::http::HeaderValue::from_str(sc).unwrap(),
+                        );
+                    }
+                    return Ok((StatusCode::NOT_MODIFIED, headers_map).into_response());
+                }
+            }
+
+            let bytes = tokio::fs::read(&jpeg_path).await.map_err(|e| {
+                anyhow::anyhow!("Failed to read display JPEG {}: {}", jpeg_path.display(), e)
+            })?;
+            let mut headers_map = HeaderMap::new();
+            headers_map.insert(
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("image/jpeg"),
+            );
+            add_private_cache_headers(&mut headers_map, etag.as_deref());
+            if let Some(sc) = &pin_set_cookie {
+                headers_map.insert(
+                    header::SET_COOKIE,
+                    axum::http::HeaderValue::from_str(sc).unwrap(),
+                );
+            }
+            return Ok((headers_map, bytes).into_response());
         }
 
         // If this is a video, use ServeFile to support Range seeking / progressive playback.
@@ -7971,8 +8805,9 @@ pub async fn debug_photo_row(
 mod tests {
     use super::{
         cache_matches_raw_placeholder_jpeg, cache_matches_raw_placeholder_webp,
-        generate_display_jpeg, generate_thumbnail, looks_like_declared_image,
-        query_has_format_param, raw_image_serve_mode, sniff_image_content_type, RawImageServeMode,
+        display_image_max_side_from_query, generate_display_jpeg, generate_thumbnail,
+        looks_like_declared_image, query_has_format_param, raw_image_serve_mode,
+        should_serve_display_variant, sniff_image_content_type, RawImageServeMode,
     };
     use std::fs;
 
@@ -8018,6 +8853,62 @@ mod tests {
             RawImageServeMode::NotRaw
         );
         assert!(query_has_format_param("format=original&x=1", "original"));
+    }
+
+    #[test]
+    fn display_variant_is_selected_only_for_standard_stills() {
+        assert!(should_serve_display_variant(
+            "image/jpeg",
+            false,
+            "format=display"
+        ));
+        assert!(should_serve_display_variant(
+            "image/png",
+            false,
+            "foo=1&format=display&bar=2"
+        ));
+        assert!(!should_serve_display_variant(
+            "image/jpeg",
+            true,
+            "format=display"
+        ));
+        assert!(!should_serve_display_variant(
+            "image/jpeg",
+            false,
+            "format=original&format=display"
+        ));
+        assert!(!should_serve_display_variant(
+            "image/heic",
+            false,
+            "format=display"
+        ));
+        assert!(!should_serve_display_variant(
+            "image/dng",
+            false,
+            "format=display"
+        ));
+    }
+
+    #[test]
+    fn display_variant_max_side_defaults_and_clamps() {
+        assert_eq!(display_image_max_side_from_query(""), 2560);
+        assert_eq!(display_image_max_side_from_query("format=display"), 2560);
+        assert_eq!(
+            display_image_max_side_from_query("format=display&max_side=1440"),
+            1440
+        );
+        assert_eq!(
+            display_image_max_side_from_query("format=display&max_side=1"),
+            512
+        );
+        assert_eq!(
+            display_image_max_side_from_query("format=display&max_side=99999"),
+            2560
+        );
+        assert_eq!(
+            display_image_max_side_from_query("format=display&max_side=abc"),
+            2560
+        );
     }
 
     #[test]

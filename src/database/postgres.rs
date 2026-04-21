@@ -259,6 +259,7 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
             content_hash TEXT,
             content_id TEXT,
             backup_id TEXT,
+            visual_backup_id TEXT,
             created_at BIGINT NOT NULL,
             modified_at BIGINT NOT NULL,
             size BIGINT NOT NULL,
@@ -328,6 +329,11 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
     .await;
     try_exec(
         &client,
+        "ALTER TABLE photos ADD COLUMN IF NOT EXISTS visual_backup_id TEXT;",
+    )
+    .await;
+    try_exec(
+        &client,
         "ALTER TABLE photos ADD COLUMN IF NOT EXISTS has_gain_map BOOLEAN DEFAULT FALSE;",
     )
     .await;
@@ -339,6 +345,11 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
     try_exec(
         &client,
         "CREATE INDEX IF NOT EXISTS idx_photos_backup_id ON photos(backup_id);",
+    )
+    .await;
+    try_exec(
+        &client,
+        "CREATE INDEX IF NOT EXISTS idx_photos_visual_backup_id ON photos(visual_backup_id);",
     )
     .await;
     exec(

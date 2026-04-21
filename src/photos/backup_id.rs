@@ -1,6 +1,7 @@
 use anyhow::Result;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::path::Path;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -82,4 +83,36 @@ pub fn from_bytes(bytes: &[u8], user_id: &str) -> Result<String> {
         return compute_hmac_b58_first16(user_id, &stripped);
     }
     compute_hmac_b58_first16(user_id, bytes)
+}
+
+/// Compute a stable image-only fingerprint from upright decoded pixels.
+///
+/// This is intended for cloud-backup presence checks on still images whose container bytes may
+/// change across exports or metadata rewrites (for example HEIC and PNG). The visible image is
+/// flattened onto white, encoded as RGBA bytes, and then HMACed with the user id.
+pub fn visual_from_path(path: &Path, user_id: &str) -> Result<String> {
+    let img = crate::photos::metadata::open_image_any(path)?;
+    let rgba = img.to_rgba8();
+    let (width, height) = rgba.dimensions();
+
+    let mut normalized = Vec::with_capacity((width as usize) * (height as usize) * 4);
+    for px in rgba.pixels() {
+        let [r, g, b, a] = px.0;
+        let alpha = a as u32;
+        let inv_alpha = 255u32.saturating_sub(alpha);
+        let out_r = ((r as u32 * alpha) + (255 * inv_alpha) + 127) / 255;
+        let out_g = ((g as u32 * alpha) + (255 * inv_alpha) + 127) / 255;
+        let out_b = ((b as u32 * alpha) + (255 * inv_alpha) + 127) / 255;
+        normalized.push(out_r as u8);
+        normalized.push(out_g as u8);
+        normalized.push(out_b as u8);
+        normalized.push(255);
+    }
+
+    let mut payload = Vec::with_capacity(16 + normalized.len());
+    payload.extend_from_slice(b"visual-image-v1");
+    payload.extend_from_slice(&width.to_be_bytes());
+    payload.extend_from_slice(&height.to_be_bytes());
+    payload.extend_from_slice(&normalized);
+    compute_hmac_b58_first16(user_id, &payload)
 }

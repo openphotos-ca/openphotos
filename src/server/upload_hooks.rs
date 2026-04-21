@@ -2,7 +2,10 @@ use axum::extract::Query;
 use axum::{
     extract::State,
     http::{header, HeaderMap, StatusCode},
-    response::{sse::{Event, Sse}, IntoResponse},
+    response::{
+        sse::{Event, Sse},
+        IntoResponse,
+    },
     Json,
 };
 use futures::StreamExt;
@@ -68,16 +71,18 @@ async fn compute_backup_id_for_path(path: &Path, user_id: &str) -> Option<String
     .flatten()
 }
 
-fn upload_metadata_value(metadata: Option<&HashMap<String, String>>, keys: &[&str]) -> Option<String> {
-    metadata
-        .and_then(|map| {
-            keys.iter().find_map(|key| {
-                map.get(*key)
-                    .map(|value| value.trim())
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_owned)
-            })
+fn upload_metadata_value(
+    metadata: Option<&HashMap<String, String>>,
+    keys: &[&str],
+) -> Option<String> {
+    metadata.and_then(|map| {
+        keys.iter().find_map(|key| {
+            map.get(*key)
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
         })
+    })
 }
 
 fn emit_upload_ingested_event(
@@ -1310,6 +1315,29 @@ pub(crate) async fn ingest_finished_upload(
                 )
                 .await;
         }
+        if let Some(backup_id) = upload_backup_id
+            .as_ref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            let _ = pg
+                .execute(
+                    "UPDATE photos SET backup_id = $1 WHERE organization_id=$2 AND user_id=$3 AND asset_id=$4",
+                    &[&backup_id, &org_id, &user_id, &asset_id],
+                )
+                .await;
+        }
+        if let Some(visual_backup_id) = meta_get(
+            &metadata,
+            &["visual_backup_id", "visualBackupId", "visual-backup-id"],
+        ) {
+            let _ = pg
+                .execute(
+                    "UPDATE photos SET visual_backup_id = $1 WHERE organization_id=$2 AND asset_id=$3",
+                    &[&visual_backup_id, &org_id, &asset_id],
+                )
+                .await;
+        }
         // Notify via SSE and clean sidecar .info
         emit_upload_ingested_event(state, user_id, &asset_id, &dest_path, metadata.as_ref());
         let sidecar = src_path.with_extension("info");
@@ -1636,6 +1664,17 @@ pub(crate) async fn ingest_finished_upload(
         }
         drop(conn);
     }
+    if let Some(visual_backup_id) = meta_get(
+        &metadata,
+        &["visual_backup_id", "visualBackupId", "visual-backup-id"],
+    ) {
+        let conn = data_db.lock();
+        let _ = conn.execute(
+            "UPDATE photos SET visual_backup_id = ? WHERE asset_id = ?",
+            duckdb::params![&visual_backup_id, &target_asset_id],
+        );
+        drop(conn);
+    }
 
     // If a favorite flag was provided, set favorites accordingly on the asset row
     let is_locked_upload_meta = metadata
@@ -1955,6 +1994,7 @@ async fn ingest_locked_upload(
         .unwrap_or_else(|| "orig".to_string());
     let is_thumb = kind == "thumb";
     let backup_id_opt: Option<String> = metadata.get("backup_id").cloned();
+    let visual_backup_id_opt: Option<String> = metadata.get("visual_backup_id").cloned();
 
     if let Some(matched) = find_deleted_upload_match(
         state.as_ref(),
@@ -2159,6 +2199,17 @@ async fn ingest_locked_upload(
                 )
                 .await;
         }
+        if let Some(visual_bid) = visual_backup_id_opt
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let _ = pg
+                .execute(
+                    "UPDATE photos SET visual_backup_id=$1 WHERE organization_id=$2 AND user_id=$3 AND asset_id=$4",
+                    &[visual_bid, &org_id, &user_id, &asset_id_b58],
+                )
+                .await;
+        }
         // For PG: update text index and emit SSE, then return early to skip DuckDB-only logic below
         if let Err(e) = reindex_single_asset(state, user_id, &asset_id_b58) {
             tracing::warn!(target:"upload", "[UPLOAD-LOCKED] reindex (PG) failed for {}: {}", asset_id_b58, e);
@@ -2321,6 +2372,16 @@ async fn ingest_locked_upload(
             let _ = conn.execute(
                 "UPDATE photos SET backup_id = ? WHERE organization_id = ? AND user_id = ? AND asset_id = ?",
                 duckdb::params![bid, org_id, user_id, &asset_id_b58],
+            );
+        }
+        if let Some(visual_bid) = visual_backup_id_opt
+            .as_ref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            let conn = data_db.lock();
+            let _ = conn.execute(
+                "UPDATE photos SET visual_backup_id = ? WHERE organization_id = ? AND user_id = ? AND asset_id = ?",
+                duckdb::params![visual_bid, org_id, user_id, &asset_id_b58],
             );
         }
 
@@ -3337,7 +3398,9 @@ pub async fn uploads_ingested(
         rows
     };
 
-    Ok(Json(UploadsIngestedResponse { ingested_content_ids }))
+    Ok(Json(UploadsIngestedResponse {
+        ingested_content_ids,
+    }))
 }
 
 #[tracing::instrument(skip(state, headers))]
