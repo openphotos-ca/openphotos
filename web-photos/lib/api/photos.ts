@@ -21,7 +21,7 @@ export const photosApi = {
     return apiClient.get<PhotoListResponse>('/photos', params);
   },
 
-  async getMediaCounts(params?: Partial<PhotoListQuery>): Promise<{ all: number; photos: number; videos: number; locked: number; locked_photos?: number; locked_videos?: number }> {
+  async getMediaCounts(params?: Partial<PhotoListQuery>): Promise<{ all: number; photos: number; videos: number; locked: number; locked_photos?: number; locked_videos?: number; total_size_bytes?: number; trash?: number }> {
     return apiClient.get('/media/counts', params as Record<string, any>);
   },
 

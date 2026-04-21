@@ -29,14 +29,18 @@ import ca.openphotos.android.core.CapabilitiesService;
 import ca.openphotos.android.core.ServerUpdateService;
 import ca.openphotos.android.media.DiskImageCache;
 import ca.openphotos.android.prefs.AppearancePreferences;
+import ca.openphotos.android.server.ServerPhotosService;
 import com.bumptech.glide.Glide;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.textfield.TextInputEditText;
 import com.google.android.material.textfield.TextInputLayout;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.text.DateFormat;
+import java.text.NumberFormat;
 import java.util.Date;
 import java.util.Locale;
 
@@ -57,6 +61,9 @@ public class SettingsFragment extends Fragment {
     private View cardDemoReadonly;
     private View rowAppearance;
     private TextView tvAppearanceValue;
+    private TextView tvLibraryPhotos;
+    private TextView tvLibraryVideos;
+    private TextView tvLibraryTotalSize;
     private TextView tvCacheUsageThumbs;
     private TextView tvCacheUsageImages;
     private TextView tvCacheUsageVideos;
@@ -113,6 +120,9 @@ public class SettingsFragment extends Fragment {
         cardDemoReadonly = view.findViewById(R.id.card_demo_readonly);
         rowAppearance = view.findViewById(R.id.row_appearance);
         tvAppearanceValue = view.findViewById(R.id.tv_appearance_value);
+        tvLibraryPhotos = view.findViewById(R.id.tv_library_photos);
+        tvLibraryVideos = view.findViewById(R.id.tv_library_videos);
+        tvLibraryTotalSize = view.findViewById(R.id.tv_library_total_size);
         tvCacheUsageThumbs = view.findViewById(R.id.tv_cache_usage_thumbs);
         tvCacheUsageImages = view.findViewById(R.id.tv_cache_usage_images);
         tvCacheUsageVideos = view.findViewById(R.id.tv_cache_usage_videos);
@@ -151,6 +161,7 @@ public class SettingsFragment extends Fragment {
         rowNetworkSettings = view.findViewById(R.id.row_network_settings);
 
         loadCapsIntoUi();
+        refreshLibraryStats();
         refreshCacheUsage();
 
         btnApplyCaps.setOnClickListener(v -> applyCaps());
@@ -197,6 +208,7 @@ public class SettingsFragment extends Fragment {
     @Override
     public void onResume() {
         super.onResume();
+        refreshLibraryStats();
         refreshCacheUsage();
         refreshAppearanceSummary();
         bindAccountSummary();
@@ -457,6 +469,70 @@ public class SettingsFragment extends Fragment {
         tvCacheUsageThumbs.setText("Thumbnails usage: " + Formatter.formatShortFileSize(requireContext(), thumbs));
         tvCacheUsageImages.setText("Images usage: " + Formatter.formatShortFileSize(requireContext(), images));
         tvCacheUsageVideos.setText("Videos usage: " + Formatter.formatShortFileSize(requireContext(), videos));
+    }
+
+    private void refreshLibraryStats() {
+        if (tvLibraryPhotos == null || tvLibraryVideos == null || tvLibraryTotalSize == null || appContext == null) return;
+        tvLibraryPhotos.setText("Loading…");
+        tvLibraryVideos.setText("Loading…");
+        tvLibraryTotalSize.setText("Loading…");
+        final String requestedServerUrl = auth != null && auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+        if (requestedServerUrl.isEmpty()) {
+            bindLibraryStatsUnavailable();
+            return;
+        }
+        new Thread(() -> {
+            try {
+                ServerPhotosService svc = new ServerPhotosService(appContext);
+                JSONObject stats = svc.getLibraryStats();
+                final String photos = formatCount(stats.optLong("photos", 0L));
+                final String videos = formatCount(stats.optLong("videos", 0L));
+                final String totalSize = formatLibrarySize(stats.optLong("total_size_bytes", 0L));
+                if (!isAdded()) return;
+                requireActivity().runOnUiThread(() -> {
+                    if (!isAdded() || auth == null) return;
+                    String currentServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+                    if (!requestedServerUrl.equals(currentServerUrl)) return;
+                    tvLibraryPhotos.setText(photos);
+                    tvLibraryVideos.setText(videos);
+                    tvLibraryTotalSize.setText(totalSize);
+                });
+            } catch (Exception ignored) {
+                if (!isAdded()) return;
+                requireActivity().runOnUiThread(() -> {
+                    if (!isAdded() || auth == null) return;
+                    String currentServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
+                    if (!requestedServerUrl.equals(currentServerUrl)) return;
+                    bindLibraryStatsUnavailable();
+                });
+            }
+        }).start();
+    }
+
+    private void bindLibraryStatsUnavailable() {
+        if (tvLibraryPhotos != null) tvLibraryPhotos.setText("Unavailable");
+        if (tvLibraryVideos != null) tvLibraryVideos.setText("Unavailable");
+        if (tvLibraryTotalSize != null) tvLibraryTotalSize.setText("Unavailable");
+    }
+
+    @NonNull
+    private String formatCount(long value) {
+        return NumberFormat.getIntegerInstance(Locale.getDefault()).format(Math.max(0L, value));
+    }
+
+    @NonNull
+    private String formatLibrarySize(long bytes) {
+        String[] units = new String[] {"B", "KB", "MB", "GB", "TB", "PB"};
+        double size = Math.max(0L, bytes);
+        int unitIndex = 0;
+        while (size >= 1000 && unitIndex < units.length - 1) {
+            size /= 1000;
+            unitIndex += 1;
+        }
+        NumberFormat formatter = NumberFormat.getNumberInstance(Locale.getDefault());
+        formatter.setMaximumFractionDigits(unitIndex == 0 ? 0 : 2);
+        formatter.setMinimumFractionDigits(0);
+        return formatter.format(size) + " " + units[unitIndex];
     }
 
     private void applyCaps() {

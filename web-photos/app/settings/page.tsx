@@ -63,6 +63,24 @@ function resolveConnectedServerUrl(apiBase: string): string {
   }
 }
 
+function formatCount(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? new Intl.NumberFormat().format(value)
+    : 'Unavailable';
+}
+
+function formatBytes(value?: number): string {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return 'Unavailable';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+  let size = value;
+  let unitIndex = 0;
+  while (size >= 1000 && unitIndex < units.length - 1) {
+    size /= 1000;
+    unitIndex += 1;
+  }
+  return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: unitIndex === 0 ? 0 : 2 }).format(size)} ${units[unitIndex]}`;
+}
+
 export default function SettingsPage() {
   const queryClient = useQueryClient();
   const [folders, setFolders] = useState<string[]>([]);
@@ -103,11 +121,20 @@ export default function SettingsPage() {
   const [pinError, setPinError] = useState('');
   const [pinSuccess, setPinSuccess] = useState('');
   const [oldVerified, setOldVerified] = useState(false);
+  const { token } = useAuthStore();
   const { data: trashSettings, isFetching: trashLoading } = useQuery({ queryKey: ['trash-settings'], queryFn: () => photosApi.getTrashSettings(), staleTime: 60_000 });
   const [autoPurgeDays, setAutoPurgeDays] = useState<string>('30');
   useEffect(() => {
     if (trashSettings) setAutoPurgeDays(String(trashSettings.auto_purge_days ?? 0));
   }, [trashSettings]);
+  const { data: libraryStats, isFetching: libraryStatsFetching, isError: libraryStatsError } = useQuery({
+    queryKey: ['library-stats'],
+    queryFn: () => photosApi.getMediaCounts({ include_locked: true }),
+    enabled: !!token,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
+    retry: 0,
+  });
   const [savingTrash, setSavingTrash] = useState(false);
   const [purgingTrash, setPurgingTrash] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
@@ -117,7 +144,6 @@ export default function SettingsPage() {
   const [passwordError, setPasswordError] = useState<string>('');
   const [passwordSuccess, setPasswordSuccess] = useState<string>('');
   const { toast } = useToast();
-  const { token } = useAuthStore();
   const router = useRouter();
   // Prefer env API when provided in dev, otherwise same-origin '/api'
   const API = resolveApiBaseUrl(process.env.NEXT_PUBLIC_API_URL || '/api');
@@ -341,6 +367,13 @@ export default function SettingsPage() {
   const connectedServerVersion = capabilitiesLoading
     ? 'Loading…'
     : (serverVersion || 'Unavailable');
+  const libraryStatsLoading = !!token && libraryStatsFetching && !libraryStats;
+  const libraryStatsUnavailable = !token || libraryStatsError;
+  const libraryStatValue = (value?: number, formatter: (value?: number) => string = formatCount) => {
+    if (libraryStatsLoading) return 'Loading…';
+    if (libraryStatsUnavailable) return 'Unavailable';
+    return formatter(value);
+  };
   const showServerUpdateCard = isAdmin && !serverUpdateHidden;
   const serverUpdateLabel = (() => {
     if (serverUpdateLoading && !serverUpdate) return 'Checking…';
@@ -683,6 +716,28 @@ export default function SettingsPage() {
             Demo account: settings are read-only.
           </div>
         )}
+        <Card className="mb-8">
+          <CardHeader>
+            <CardTitle>Cloud Library</CardTitle>
+            <CardDescription>Active cloud media stored for this account.</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid gap-4 sm:grid-cols-3">
+              <div>
+                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Photos</Label>
+                <div className="mt-1 text-sm text-foreground">{libraryStatValue(libraryStats?.photos)}</div>
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Videos</Label>
+                <div className="mt-1 text-sm text-foreground">{libraryStatValue(libraryStats?.videos)}</div>
+              </div>
+              <div>
+                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Total Size</Label>
+                <div className="mt-1 text-sm text-foreground">{libraryStatValue(libraryStats?.total_size_bytes, formatBytes)}</div>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
         <Card className="mb-8">
           <CardHeader>
             <CardTitle>Connection</CardTitle>

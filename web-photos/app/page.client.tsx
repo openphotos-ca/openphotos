@@ -915,6 +915,7 @@ export default function HomePage() {
     if (viewerIndex === null) return null;
     return displayPhotos[viewerIndex] || null;
   }, [viewerIndex, displayPhotos]);
+  const viewerAssetId = viewerPhoto?.asset_id ?? null;
 
   const humanFileSize = (bytes?: number) => {
     const v = typeof bytes === 'number' ? bytes : 0;
@@ -929,7 +930,7 @@ export default function HomePage() {
   const currentIndexRef = useRef<number | null>(null);
   useEffect(() => { currentIndexRef.current = viewerIndex; }, [viewerIndex]);
   const videoViewerRef = useRef<HTMLVideoElement | null>(null);
-  const [videoPaused, setVideoPaused] = useState(false);
+  const [videoPaused, setVideoPaused] = useState(true);
   const [videoMuted, setVideoMuted] = useState(false);
   const [videoDuration, setVideoDuration] = useState(0);
   const [videoTime, setVideoTime] = useState(0);
@@ -952,6 +953,20 @@ export default function HomePage() {
   const [measuredDims, setMeasuredDims] = useState<Record<string, { w: number; h: number }>>({});
   // Albums list (for AlbumPickerDialog)
   const { data: allAlbums = [] } = useQuery({ queryKey: ['albums'], queryFn: () => photosApi.getAlbums(), staleTime: 60_000 });
+
+  useEffect(() => {
+    desiredSeekRef.current = null;
+    setVideoDuration(0);
+    setVideoTime(0);
+    setVideoPaused(true);
+    setScrubbing(false);
+    if (videoViewerRef.current) {
+      try {
+        videoViewerRef.current.pause();
+        videoViewerRef.current.currentTime = 0;
+      } catch {}
+    }
+  }, [viewerAssetId]);
 
   const fullscreenDisplayMaxSide = useMemo(() => {
     const dpr =
@@ -2234,6 +2249,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
                  }}>
               {(forcedIsVideo ?? viewerPhoto.is_video) ? (
                 <video
+                  key={viewerPhoto.asset_id}
                   ref={videoViewerRef}
                   className="block"
                   src={`/api/images/${encodeURIComponent(viewerPhoto.asset_id)}`}

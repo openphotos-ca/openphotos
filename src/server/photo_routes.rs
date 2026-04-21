@@ -4226,8 +4226,16 @@ pub struct MediaCounts {
     pub locked: i64,
     pub locked_photos: i64,
     pub locked_videos: i64,
+    pub total_size_bytes: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub trash: Option<i64>,
+}
+
+fn media_total_size_sql(base: &str) -> String {
+    format!(
+        "SELECT CAST(COALESCE(SUM(COALESCE(p.size, 0)), 0) AS BIGINT) {}",
+        base
+    )
 }
 
 /// Counts for segmented control under current basic filters (favorite/album)
@@ -4275,6 +4283,10 @@ pub async fn media_counts(
              FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
             trash_clause
         );
+        let sql_total_size = format!(
+            "SELECT COALESCE(SUM(COALESCE(p.size,0)),0)::BIGINT FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{}{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
+            fav_clause, trash_clause
+        );
         let all: i64 = pg
             .query_one(&sql_all, &[&org_id, &user.user_id])
             .await
@@ -4299,6 +4311,11 @@ pub async fn media_counts(
         } else {
             (0i64, 0i64, 0i64)
         };
+        let total_size_bytes: i64 = pg
+            .query_one(&sql_total_size, &[&org_id, &user.user_id])
+            .await
+            .map(|r| r.get(0))
+            .unwrap_or(0);
         let trash: i64 = pg
             .query_one(
                 "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2 AND COALESCE(p.delete_time,0) > 0",
@@ -4314,6 +4331,7 @@ pub async fn media_counts(
             locked,
             locked_photos,
             locked_videos,
+            total_size_bytes,
             trash: Some(trash),
         }));
     }
@@ -4525,6 +4543,7 @@ pub async fn media_counts(
                     locked: 0,
                     locked_photos: 0,
                     locked_videos: 0,
+                    total_size_bytes: 0,
                     trash: Some(0),
                 }));
             }
@@ -4556,6 +4575,7 @@ pub async fn media_counts(
                     locked: 0,
                     locked_photos: 0,
                     locked_videos: 0,
+                    total_size_bytes: 0,
                     trash: Some(0),
                 }));
             }
@@ -4615,6 +4635,7 @@ pub async fn media_counts(
             " WHERE p.is_video = 1"
         }
     );
+    let sql_total_size = media_total_size_sql(&base);
 
     let all = conn
         .query_row(&sql_all, [], |row| row.get::<_, i64>(0))
@@ -4624,6 +4645,9 @@ pub async fn media_counts(
         .unwrap_or(0);
     let videos = conn
         .query_row(&sql_videos, [], |row| row.get::<_, i64>(0))
+        .unwrap_or(0);
+    let total_size_bytes = conn
+        .query_row(&sql_total_size, [], |row| row.get::<_, i64>(0))
         .unwrap_or(0);
     // Compute locked_count under same filters but ignoring the locked filter
     let mut base_locked = String::from("FROM photos p");
@@ -4691,6 +4715,7 @@ pub async fn media_counts(
         locked,
         locked_photos,
         locked_videos,
+        total_size_bytes,
         trash: Some(trash),
     }))
 }
@@ -8806,10 +8831,60 @@ mod tests {
     use super::{
         cache_matches_raw_placeholder_jpeg, cache_matches_raw_placeholder_webp,
         display_image_max_side_from_query, generate_display_jpeg, generate_thumbnail,
-        looks_like_declared_image, query_has_format_param, raw_image_serve_mode,
-        should_serve_display_variant, sniff_image_content_type, RawImageServeMode,
+        looks_like_declared_image, media_total_size_sql, query_has_format_param,
+        raw_image_serve_mode, should_serve_display_variant, sniff_image_content_type,
+        RawImageServeMode,
     };
     use std::fs;
+
+    #[test]
+    fn media_counts_total_size_includes_active_locked_and_excludes_trash_live_motion() {
+        let conn = duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        conn.execute_batch(
+            r#"
+            CREATE TABLE photos (
+                organization_id INTEGER,
+                user_id TEXT,
+                is_video BOOLEAN,
+                is_live_photo BOOLEAN,
+                locked BOOLEAN,
+                delete_time INTEGER,
+                size BIGINT
+            );
+            INSERT INTO photos VALUES
+                (1, 'user-a', FALSE, FALSE, FALSE, 0, 100),
+                (1, 'user-a', TRUE,  FALSE, FALSE, 0, 200),
+                (1, 'user-a', FALSE, FALSE, TRUE,  0, 300),
+                (1, 'user-a', FALSE, FALSE, FALSE, 999, 400),
+                (1, 'user-a', TRUE,  TRUE,  FALSE, 0, 500),
+                (1, 'user-b', FALSE, FALSE, FALSE, 0, 600);
+            "#,
+        )
+        .expect("seed media rows");
+
+        let base = "FROM photos p WHERE p.organization_id = 1 AND p.user_id = 'user-a' AND NOT (p.is_video = 1 AND COALESCE(p.is_live_photo, FALSE) = TRUE) AND p.delete_time = 0";
+        let total_size: i64 = conn
+            .query_row(&media_total_size_sql(base), [], |row| row.get(0))
+            .expect("total size");
+        let photos: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) {} AND p.is_video = 0", base),
+                [],
+                |row| row.get(0),
+            )
+            .expect("photo count");
+        let videos: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) {} AND p.is_video = 1", base),
+                [],
+                |row| row.get(0),
+            )
+            .expect("video count");
+
+        assert_eq!(photos, 2);
+        assert_eq!(videos, 1);
+        assert_eq!(total_size, 600);
+    }
 
     #[test]
     fn looks_like_declared_image_accepts_valid_avif_signature() {

@@ -6,7 +6,7 @@ import { useQuery } from '@tanstack/react-query';
 import { photosApi } from '@/lib/api/photos';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 
-export interface Counts { all?: number; photos?: number; videos?: number; locked?: number; locked_photos?: number; locked_videos?: number; trash?: number }
+export interface Counts { all?: number; photos?: number; videos?: number; locked?: number; locked_photos?: number; locked_videos?: number; total_size_bytes?: number; trash?: number }
 
 interface Props {
   counts?: Counts;

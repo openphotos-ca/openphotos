@@ -993,6 +993,17 @@ public final class ServerPhotosService {
     }
 
     /** Fetch media counts for segmented control (All/Photos/Videos), honoring filters like iOS/Web. */
+    public JSONObject getLibraryStats() throws IOException {
+        okhttp3.HttpUrl.Builder hb = okhttp3.HttpUrl.parse(url("/api/media/counts")).newBuilder();
+        hb.addQueryParameter("include_locked", "true");
+        Request req = new Request.Builder().url(hb.build()).get().build();
+        try (Response r = AuthorizedHttpClient.get(app).raw().newCall(req).execute()) {
+            if (!r.isSuccessful()) throw new IOException("HTTP " + r.code());
+            String s = r.body() != null ? r.body().string() : "{}";
+            try { return new JSONObject(s); } catch (Exception e) { throw new IOException("Bad JSON", e); }
+        }
+    }
+
     public JSONObject mediaCounts(boolean favoriteOnly) throws IOException {
         return mediaCounts(favoriteOnly, null, null, null, null);
     }
