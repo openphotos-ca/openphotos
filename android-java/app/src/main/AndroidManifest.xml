@@ -35,7 +35,8 @@
             android:exported="false"
             android:foregroundServiceType="dataSync" />
         <activity android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:screenOrientation="portrait">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
@@ -46,8 +47,7 @@
         <activity android:name=".ui.SlideshowActivity"
             android:exported="false"
             android:theme="@style/Theme.MaterialComponents.NoActionBar"
-            android:screenOrientation="unspecified"
-            android:configChanges="orientation|screenSize"/>
+            android:screenOrientation="portrait"/>
 
         <!-- FileProvider to share cached originals (Share… in viewer) -->
         <provider

@@ -297,8 +297,10 @@ public class UploadForegroundService extends Service {
             }
 
             if (remaining > 0 && !UploadStopController.isUserStopRequested()) {
-                // Keep a constrained fallback request in WorkManager in case OEM policies stop the service.
-                UploadScheduler.enqueueWorkOnly(getApplicationContext(), wifiOnly, "svc_remaining", 60);
+                // Hand off immediately if the foreground service exits while work is still queued.
+                UploadScheduler.enqueueWorkOnly(getApplicationContext(), wifiOnly, "svc_remaining", 0);
+            } else {
+                UploadScheduler.cancelRecoveryOnly(getApplicationContext(), "service_queue_drained");
             }
         } catch (Exception e) {
             if (UploadStopController.isUserStopRequested()) {

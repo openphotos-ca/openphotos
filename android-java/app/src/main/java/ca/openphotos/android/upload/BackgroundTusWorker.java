@@ -54,6 +54,8 @@ public class BackgroundTusWorker extends Worker {
     public Result doWork() {
         final long runStartedAt = System.currentTimeMillis();
         final String owner = "worker:" + getId();
+        final ca.openphotos.android.prefs.SyncPreferences prefs =
+                new ca.openphotos.android.prefs.SyncPreferences(getApplicationContext());
         if (UploadStopController.isUserStopRequested()) {
             Log.i(TAG, "worker skipped due to pending user stop request");
             return Result.success();
@@ -64,6 +66,12 @@ public class BackgroundTusWorker extends Worker {
                 + " network=" + networkSummary());
         if (!UploadRunGate.tryAcquire(owner)) {
             Log.i(TAG, "worker skipped because queue is already draining by " + UploadRunGate.currentOwner());
+            UploadScheduler.enqueueRecoveryOnly(
+                    getApplicationContext(),
+                    prefs.wifiOnly(),
+                    "worker_gate_busy",
+                    UploadScheduler.SERVICE_RECOVERY_DELAY_SEC
+            );
             return Result.success();
         }
         UploadExecutionTracker.setActive(true);
@@ -163,8 +171,6 @@ public class BackgroundTusWorker extends Worker {
             }
             if (remaining > 0 && !UploadStopController.isUserStopRequested()) {
                 Log.i(TAG, "worker reached run cap/stopped, rescheduling for remaining queue");
-                ca.openphotos.android.prefs.SyncPreferences prefs =
-                        new ca.openphotos.android.prefs.SyncPreferences(getApplicationContext());
                 UploadScheduler.enqueueWorkOnly(getApplicationContext(), prefs.wifiOnly(), "worker_remaining", 0);
             } else {
                 Log.i(TAG, "worker queue drained processed=" + processed.get());
