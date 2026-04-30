@@ -35,7 +35,7 @@ const DEFAULT_RELEASES_PAGE_URL: &str = "https://github.com/openphotos-ca/openph
 #[serde(rename_all = "kebab-case")]
 pub enum InstallMode {
     Docker,
-    LinuxDeb,
+    LinuxUniversal,
     MacosPkg,
     WindowsNsis,
     Unknown,
@@ -45,7 +45,7 @@ impl InstallMode {
     pub fn platform_name(&self) -> Option<&'static str> {
         match self {
             Self::Docker => Some("docker"),
-            Self::LinuxDeb => Some("linux"),
+            Self::LinuxUniversal => Some("linux"),
             Self::MacosPkg => Some("macos"),
             Self::WindowsNsis => Some("windows"),
             Self::Unknown => None,
@@ -57,7 +57,10 @@ impl InstallMode {
     }
 
     fn requires_release_artifact(&self) -> bool {
-        matches!(self, Self::LinuxDeb | Self::MacosPkg | Self::WindowsNsis)
+        matches!(
+            self,
+            Self::LinuxUniversal | Self::MacosPkg | Self::WindowsNsis
+        )
     }
 }
 
@@ -65,7 +68,7 @@ impl fmt::Display for InstallMode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let value = match self {
             Self::Docker => "docker",
-            Self::LinuxDeb => "linux-deb",
+            Self::LinuxUniversal => "linux-universal",
             Self::MacosPkg => "macos-pkg",
             Self::WindowsNsis => "windows-nsis",
             Self::Unknown => "unknown",
@@ -81,7 +84,7 @@ impl FromStr for InstallMode {
         let normalized = value.trim().to_ascii_lowercase();
         match normalized.as_str() {
             "docker" => Ok(Self::Docker),
-            "linux-deb" => Ok(Self::LinuxDeb),
+            "linux-universal" | "linux-deb" => Ok(Self::LinuxUniversal),
             "macos-pkg" => Ok(Self::MacosPkg),
             "windows-nsis" => Ok(Self::WindowsNsis),
             "unknown" | "" => Ok(Self::Unknown),
@@ -366,8 +369,13 @@ fn build_status_from_release(
         url: asset.browser_download_url.clone(),
         sha256: None,
     });
-    let install_command = selected_asset
-        .and_then(|asset| build_install_command(&config.install_mode, &asset.browser_download_url));
+    let install_command = selected_asset.and_then(|asset| {
+        build_install_command(
+            &config.install_mode,
+            &asset.browser_download_url,
+            &latest_version_string,
+        )
+    });
     let manual_steps = if available {
         build_manual_steps(&config.install_mode, selected_asset)
     } else {
@@ -419,7 +427,11 @@ fn select_release_asset<'a>(
 fn expected_asset_filenames(install_mode: &InstallMode, arch: &str, version: &str) -> Vec<String> {
     match install_mode {
         InstallMode::Docker => Vec::new(),
-        InstallMode::LinuxDeb => vec![format!("openphotos_{version}_{arch}.deb")],
+        InstallMode::LinuxUniversal => vec![
+            format!("openphotos-linux-installer-{arch}.sh"),
+            format!("openphotos-linux-online_{version}_{arch}.tar.gz"),
+            format!("openphotos-linux_{version}_{arch}.tar.gz"),
+        ],
         InstallMode::MacosPkg => {
             if matches!(arch, "x64" | "arm64" | "universal") {
                 vec![format!("openphotos-macos-{version}.pkg")]
@@ -526,11 +538,11 @@ fn warn_if_deprecated_update_channel_set() {
     }
 }
 
-fn build_install_command(install_mode: &InstallMode, url: &str) -> Option<String> {
+fn build_install_command(install_mode: &InstallMode, url: &str, version: &str) -> Option<String> {
     let filename = install_filename_for_url(url);
     match install_mode {
-        InstallMode::LinuxDeb => Some(format!(
-            "curl -fsSL \"{url}\" -o /tmp/{filename} && sudo dpkg -i /tmp/{filename}"
+        InstallMode::LinuxUniversal => Some(format!(
+            "curl -fsSL https://raw.githubusercontent.com/openphotos-ca/openphotos/refs/heads/main/scripts/install_linux.sh | sudo env \"PATH=$PATH\" bash -s -- --version v{version}"
         )),
         InstallMode::MacosPkg => Some(format!(
             "curl -fsSL \"{url}\" -o /tmp/{filename} && sudo installer -pkg /tmp/{filename} -target /"
@@ -550,10 +562,10 @@ fn build_manual_steps(
             "Confirm the container reports healthy and the server responds on /ping."
                 .to_string(),
         ],
-        (InstallMode::LinuxDeb, Some(_)) => vec![
+        (InstallMode::LinuxUniversal, Some(_)) => vec![
             "Run the install command on the server host with sudo.".to_string(),
-            "Wait for dpkg to finish installing the new package.".to_string(),
-            "Confirm the OpenPhotos service restarts cleanly.".to_string(),
+            "Wait for the universal Linux installer to finish updating OpenPhotos.".to_string(),
+            "Confirm the systemd services restart cleanly.".to_string(),
         ],
         (InstallMode::MacosPkg, Some(_)) => vec![
             "Run the install command on the server host with sudo.".to_string(),
@@ -608,7 +620,7 @@ fn normalize_install_arch(raw: Option<String>, mode: &InstallMode) -> String {
         .trim()
         .to_ascii_lowercase();
     match mode {
-        InstallMode::Docker | InstallMode::LinuxDeb => match normalized.as_str() {
+        InstallMode::Docker | InstallMode::LinuxUniversal => match normalized.as_str() {
             "x86_64" | "x64" | "amd64" => "amd64".to_string(),
             "aarch64" | "arm64" => "arm64".to_string(),
             other => other.to_string(),
@@ -708,7 +720,7 @@ mod tests {
             enabled: true,
             url: DEFAULT_UPDATE_URL.to_string(),
             interval: Duration::from_secs(3600),
-            install_mode: InstallMode::LinuxDeb,
+            install_mode: InstallMode::LinuxUniversal,
             install_arch: "amd64".to_string(),
         }
     }
@@ -740,36 +752,40 @@ mod tests {
         let release = github_release(
             "v0.4.1",
             &[(
-                "openphotos_0.4.1_amd64.deb",
-                "https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos_0.4.1_amd64.deb",
+                "openphotos-linux-installer-amd64.sh",
+                "https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos-linux-installer-amd64.sh",
             )],
         );
 
         let selected =
             select_release_asset(&linux_config(), "0.4.1", &release.assets).expect("asset");
-        assert_eq!(selected.name, "openphotos_0.4.1_amd64.deb");
+        assert_eq!(selected.name, "openphotos-linux-installer-amd64.sh");
     }
 
     #[test]
     fn builds_update_status_from_github_release() {
         let release = github_release(
-            "v0.4.1",
+            "v99.0.0",
             &[(
-                "openphotos_0.4.1_amd64.deb",
-                "https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos_0.4.1_amd64.deb",
+                "openphotos-linux-installer-amd64.sh",
+                "https://github.com/openphotos-ca/openphotos/releases/download/v99.0.0/openphotos-linux-installer-amd64.sh",
             )],
         );
 
         let status = build_status_from_release(&linux_config(), &release).unwrap();
         assert!(status.available);
-        assert_eq!(status.latest_version.as_deref(), Some("0.4.1"));
+        assert_eq!(status.latest_version.as_deref(), Some("99.0.0"));
         assert_eq!(
             status.release_notes_url.as_deref(),
             release.html_url.as_deref()
         );
         assert_eq!(
             status.artifact.as_ref().map(|artifact| artifact.url.as_str()),
-            Some("https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos_0.4.1_amd64.deb")
+            Some("https://github.com/openphotos-ca/openphotos/releases/download/v99.0.0/openphotos-linux-installer-amd64.sh")
+        );
+        assert_eq!(
+            status.install_command.as_deref(),
+            Some("curl -fsSL https://raw.githubusercontent.com/openphotos-ca/openphotos/refs/heads/main/scripts/install_linux.sh | sudo env \"PATH=$PATH\" bash -s -- --version v99.0.0")
         );
         assert_eq!(
             status
@@ -783,10 +799,10 @@ mod tests {
     #[test]
     fn marks_unsupported_when_update_has_no_matching_asset() {
         let release = github_release(
-            "v0.4.1",
+            "v99.0.0",
             &[(
-                "openphotos-windows-0.4.1-x64-setup.exe",
-                "https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos-windows-0.4.1-x64-setup.exe",
+                "openphotos-windows-99.0.0-x64-setup.exe",
+                "https://github.com/openphotos-ca/openphotos/releases/download/v99.0.0/openphotos-windows-99.0.0-x64-setup.exe",
             )],
         );
         let config = UpdateConfig {
@@ -806,7 +822,7 @@ mod tests {
 
     #[test]
     fn docker_updates_use_manual_steps_without_release_asset() {
-        let release = github_release("v0.4.1", &[]);
+        let release = github_release("v99.0.0", &[]);
 
         let status = build_status_from_release(&docker_config(), &release).unwrap();
         assert!(status.available);
@@ -845,14 +861,14 @@ mod tests {
                 channel: DEFAULT_UPDATE_CHANNEL.to_string(),
                 checked_at: Some(Utc::now()),
                 status: UpdateStatusKind::Ok,
-                install_mode: InstallMode::LinuxDeb,
+                install_mode: InstallMode::LinuxUniversal,
                 install_arch: "amd64".to_string(),
                 install_supported: true,
                 release_notes_url: Some("https://example.com/release".to_string()),
                 artifact: Some(SelectedUpdateArtifact {
                     platform: "linux".to_string(),
                     arch: "amd64".to_string(),
-                    url: "https://example.com/openphotos.deb".to_string(),
+                    url: "https://example.com/openphotos-linux-installer-amd64.sh".to_string(),
                     sha256: None,
                 }),
                 install_command: Some("curl ...".to_string()),
@@ -894,8 +910,8 @@ mod tests {
             "html_url": "https://github.com/openphotos-ca/openphotos/releases/tag/v0.4.1",
             "assets": [
                 {
-                    "name": "openphotos_0.4.1_amd64.deb",
-                    "browser_download_url": "https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos_0.4.1_amd64.deb"
+                    "name": "openphotos-linux-installer-amd64.sh",
+                    "browser_download_url": "https://github.com/openphotos-ca/openphotos/releases/download/v0.4.1/openphotos-linux-installer-amd64.sh"
                 }
             ]
         });
@@ -919,7 +935,7 @@ mod tests {
                 enabled: true,
                 url: format!("http://{addr}/repos/openphotos-ca/openphotos/releases/latest"),
                 interval: Duration::from_secs(3600),
-                install_mode: InstallMode::LinuxDeb,
+                install_mode: InstallMode::LinuxUniversal,
                 install_arch: "amd64".to_string(),
             },
             client: Client::builder().build().unwrap(),
@@ -927,7 +943,7 @@ mod tests {
                 enabled: true,
                 url: format!("http://{addr}/repos/openphotos-ca/openphotos/releases/latest"),
                 interval: Duration::from_secs(3600),
-                install_mode: InstallMode::LinuxDeb,
+                install_mode: InstallMode::LinuxUniversal,
                 install_arch: "amd64".to_string(),
             })),
             check_in_progress: AtomicBool::new(false),

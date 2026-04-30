@@ -43,7 +43,7 @@ interface ServerUpdateStatus {
   channel: string;
   checked_at?: string | null;
   status: 'disabled' | 'never_checked' | 'ok' | 'check_failed' | 'unsupported_install_mode';
-  install_mode: 'docker' | 'linux-deb' | 'macos-pkg' | 'windows-nsis' | 'unknown';
+  install_mode: 'docker' | 'linux-universal' | 'macos-pkg' | 'windows-nsis' | 'unknown';
   install_arch: string;
   install_supported: boolean;
   release_notes_url?: string | null;
