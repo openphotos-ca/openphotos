@@ -44,13 +44,35 @@ Download the latest release assets from
 
 - Windows: use the `setup.exe` asset.
 - macOS: use the `.pkg` asset.
-- Ubuntu / Debian Linux: use the `.deb` asset that matches your CPU architecture.
+- Linux: use the one-line installer on common glibc + systemd distributions. It detects `amd64` vs
+  `arm64` and starts installation. If a matching Linux tarball is in the current directory or beside
+  a local `install_linux.sh`, the installer uses that local file instead of downloading the tarball
+  from GitHub:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/openphotos-ca/openphotos/refs/heads/main/scripts/install_linux.sh | sudo env "PATH=$PATH" bash
+```
+
+- Linux release assets include small wrapper scripts, smaller online tarballs, and larger bundled
+  tarballs. The bundled `openphotos-linux_<version>_<arch>.tar.gz` files include the standard
+  models. The online `openphotos-linux-online_<version>_<arch>.tar.gz` installers reuse
+  `openphotos_models.zip` from the same folder when present, or download models from GitHub during
+  setup. With the one-line installer, run the command from the folder containing the local tarball
+  and model ZIP.
 - iOS client: install [OpenPhotos on the App Store](https://apps.apple.com/us/app/openphotos/id6759428882).
 - Other downloads are also listed on the OpenPhotos download page:
   [https://openphotos.ca/download/index.html](https://openphotos.ca/download/index.html).
 
-Native installers provision models during setup when needed, so the first install can take longer
-than later reinstalls.
+Native installers provision or reuse models during setup when needed, so the first install can take
+longer than later reinstalls.
+
+Linux uninstall uses the installed helper. The default keeps data and model folders; `--purge`
+removes data, config, logs, and models too:
+
+```bash
+sudo openphotos-uninstall
+sudo openphotos-uninstall --purge
+```
 
 ### Option B: Use Docker
 
