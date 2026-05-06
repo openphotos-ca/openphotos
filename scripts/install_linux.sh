@@ -18,6 +18,7 @@ fi
 GITHUB_REPO="${OPENPHOTOS_INSTALL_REPO:-openphotos-ca/openphotos}"
 VERSION="${OPENPHOTOS_INSTALL_VERSION:-latest}"
 ASSET_BASE_URL="${OPENPHOTOS_INSTALL_ASSET_BASE_URL:-}"
+PRIMARY_RELEASE_BASE_URL="${OPENPHOTOS_INSTALL_PRIMARY_RELEASE_BASE_URL:-https://openphotos.ca/releases/download}"
 RK3588_MODE="${OPENPHOTOS_RK3588:-auto}"
 STANDARD_MODELS_ASSET="${OPENPHOTOS_MODELS_ASSET:-openphotos_models.zip}"
 RK3588_MODELS_ASSET="${OPENPHOTOS_RK3588_MODELS_ASSET:-openphotos_models_rk3588.zip}"
@@ -29,7 +30,7 @@ CURL_FLAGS=(-fL --retry 5 --retry-delay 2 --retry-max-time 120)
 
 usage() {
   cat <<USAGE
-Install OpenPhotos on Linux from GitHub release assets.
+Install OpenPhotos on Linux from local assets, the OpenPhotos mirror, or GitHub release assets.
 
 Usage:
   ${SCRIPT_NAME} [options]
@@ -37,7 +38,7 @@ Usage:
 Options:
   --version <tag>       Install a specific release tag, for example v0.6.0.
   --repo <owner/repo>   GitHub repo to download from (default: ${GITHUB_REPO}).
-  --asset-base-url <u>  Download wrapper assets from this base URL instead of GitHub.
+  --asset-base-url <u>  Download wrapper/tarball assets only from this base URL.
   --rk3588             Force RK3588 model provisioning on arm64.
   --no-rk3588          Disable automatic RK3588 model provisioning.
   --uninstall          Uninstall OpenPhotos, keeping data and model folders.
@@ -49,6 +50,8 @@ Environment:
   OPENPHOTOS_INSTALL_REPO             Override the GitHub repo.
   OPENPHOTOS_INSTALL_VERSION          Override the release tag.
   OPENPHOTOS_INSTALL_ASSET_BASE_URL   Override the release asset base URL.
+  OPENPHOTOS_INSTALL_PRIMARY_RELEASE_BASE_URL
+                                      Override the primary OpenPhotos mirror base URL.
   OPENPHOTOS_INSTALL_LOCAL_ASSET_DIR  Directory to scan for local installers and model ZIPs.
                                       By default the local script directory and current directory are scanned.
   OPENPHOTOS_MODELS_ASSET             Standard model ZIP name (default: ${STANDARD_MODELS_ASSET}).
@@ -156,18 +159,45 @@ should_enable_rk3588() {
   esac
 }
 
-asset_url_for() {
+asset_urls_for() {
   local asset_name="$1"
   local version="$2"
-  local base="${ASSET_BASE_URL%/}"
+  local override_base="${ASSET_BASE_URL%/}"
+  local primary_base="${PRIMARY_RELEASE_BASE_URL%/}"
 
-  if [[ -n "$base" ]]; then
-    printf '%s/%s\n' "$base" "$asset_name"
-  elif [[ "$version" == "latest" ]]; then
-    printf 'https://github.com/%s/releases/latest/download/%s\n' "$GITHUB_REPO" "$asset_name"
-  else
-    printf 'https://github.com/%s/releases/download/%s/%s\n' "$GITHUB_REPO" "$version" "$asset_name"
+  if [[ -n "$override_base" ]]; then
+    printf '%s/%s\n' "$override_base" "$asset_name"
+    return 0
   fi
+
+  if [[ "$version" == "latest" ]]; then
+    printf '%s/latest/%s\n' "$primary_base" "$asset_name"
+    printf 'https://github.com/%s/releases/latest/download/%s\n' "$GITHUB_REPO" "$asset_name"
+    return 0
+  fi
+
+  printf '%s/%s/%s\n' "$primary_base" "$version" "$asset_name"
+  printf 'https://github.com/%s/releases/download/%s/%s\n' "$GITHUB_REPO" "$version" "$asset_name"
+}
+
+download_release_asset() {
+  local asset_name="$1"
+  local version="$2"
+  local output_path="$3"
+  local url
+
+  require_command curl
+  rm -f "$output_path"
+  while IFS= read -r url; do
+    [[ -n "$url" ]] || continue
+    note "downloading ${asset_name} from ${url}"
+    if curl "${CURL_FLAGS[@]}" -o "$output_path" "$url"; then
+      return 0
+    fi
+  done < <(asset_urls_for "$asset_name" "$version")
+
+  rm -f "$output_path"
+  return 1
 }
 
 as_root() {
@@ -491,7 +521,6 @@ fi
 ARCH="$(detect_arch)"
 VERSION="$(normalize_version "$VERSION")"
 WRAPPER_ASSET="openphotos-linux-installer-${ARCH}.sh"
-WRAPPER_URL="$(asset_url_for "$WRAPPER_ASSET" "$VERSION")"
 WRAPPER_ARGS=()
 LOCAL_INSTALLER_ARCHIVE=""
 
@@ -504,7 +533,11 @@ fi
 
 note "release: ${VERSION}"
 note "architecture: ${ARCH}"
-note "wrapper: ${WRAPPER_URL}"
+if [[ -n "$ASSET_BASE_URL" ]]; then
+  note "wrapper source override: ${ASSET_BASE_URL%/}/${WRAPPER_ASSET}"
+else
+  note "wrapper sources: ${PRIMARY_RELEASE_BASE_URL%/}/$VERSION/${WRAPPER_ASSET} then GitHub"
+fi
 
 if LOCAL_INSTALLER_ARCHIVE="$(find_local_installer_archive "$VERSION" "$ARCH")"; then
   note "local installer archive: ${LOCAL_INSTALLER_ARCHIVE}"
@@ -514,7 +547,7 @@ if [[ "$DRY_RUN" == "1" ]]; then
   if [[ -n "$LOCAL_INSTALLER_ARCHIVE" ]]; then
     printf 'Would install local archive: %s\n' "$LOCAL_INSTALLER_ARCHIVE"
   else
-    printf 'Would run: bash <downloaded %s>' "$WRAPPER_ASSET"
+    printf 'Would run: bash <downloaded %s or remote tarball fallback>' "$WRAPPER_ASSET"
     if [[ "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
       printf ' %q' "${WRAPPER_ARGS[@]}"
     fi
@@ -586,6 +619,24 @@ run_local_installer_archive() {
   fi
   [[ -x "$extract_dir/install.sh" ]] || fail "installer archive does not contain executable install.sh"
   as_root bash "$extract_dir/install.sh"
+}
+
+download_remote_installer_archive() {
+  local version_no_v="${VERSION#v}"
+  local asset_name
+  local output_path
+
+  for asset_name in \
+    "openphotos-linux-online_${version_no_v}_${ARCH}.tar.gz" \
+    "openphotos-linux_${version_no_v}_${ARCH}.tar.gz"; do
+    output_path="$TMP_DIR/$asset_name"
+    if download_release_asset "$asset_name" "$VERSION" "$output_path"; then
+      printf '%s\n' "$output_path"
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 prepare_compat_tools() {
@@ -703,7 +754,7 @@ EOF
 }
 
 if [[ -n "$LOCAL_INSTALLER_ARCHIVE" ]]; then
-  note "using local installer archive instead of downloading from GitHub"
+  note "using local installer archive instead of downloading from remote sources"
   prepare_compat_tools
   stage_release_assets_for_direct_archive
   run_local_installer_archive "$LOCAL_INSTALLER_ARCHIVE"
@@ -715,9 +766,16 @@ if local_wrapper="$(find_local_file "$WRAPPER_ASSET")"; then
   cp "$local_wrapper" "$WRAPPER_PATH"
   note "using local ${WRAPPER_ASSET} from $(dirname "$local_wrapper")"
 else
-  require_command curl
   note "downloading installer wrapper..."
-  curl "${CURL_FLAGS[@]}" -o "$WRAPPER_PATH" "$WRAPPER_URL"
+  if ! download_release_asset "$WRAPPER_ASSET" "$VERSION" "$WRAPPER_PATH"; then
+    note "wrapper download failed; falling back to installer tarball download"
+    prepare_compat_tools
+    stage_release_assets_for_direct_archive
+    remote_archive="$(download_remote_installer_archive)" || fail "could not download ${WRAPPER_ASSET}, openphotos-linux-online_${VERSION#v}_${ARCH}.tar.gz, or openphotos-linux_${VERSION#v}_${ARCH}.tar.gz from the OpenPhotos mirror or GitHub"
+    note "installing $(basename "$remote_archive")..."
+    run_local_installer_archive "$remote_archive"
+    exit 0
+  fi
 fi
 chmod 0755 "$WRAPPER_PATH"
 stage_local_asset "$STANDARD_MODELS_ASSET" "$TMP_DIR" || true
