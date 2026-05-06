@@ -21,6 +21,8 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import ca.openphotos.android.R;
 import ca.openphotos.android.core.AuthManager;
+import ca.openphotos.android.i18n.AndroidI18n;
+import ca.openphotos.android.i18n.AndroidViewLocalizer;
 import ca.openphotos.android.server.FilterParams;
 import ca.openphotos.android.server.ServerPhotosService;
 import com.google.android.material.switchmaterial.SwitchMaterial;
@@ -28,7 +30,7 @@ import com.google.android.material.switchmaterial.SwitchMaterial;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.text.SimpleDateFormat;
+import java.text.DateFormat;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
@@ -69,7 +71,7 @@ public class FiltersDialogFragment extends DialogFragment {
     private final ArrayList<String> countries = new ArrayList<>();
     private final ArrayList<String> cities = new ArrayList<>();
     private FacesAdapter facesAdapter;
-    private final SimpleDateFormat fmt = new SimpleDateFormat("MMM d, yyyy", Locale.US);
+    private final DateFormat fmt = DateFormat.getDateInstance(DateFormat.MEDIUM, Locale.getDefault());
 
     @Nullable
     @Override
@@ -119,13 +121,15 @@ public class FiltersDialogFragment extends DialogFragment {
         star1.setOnClickListener(starL); star2.setOnClickListener(starL); star3.setOnClickListener(starL); star4.setOnClickListener(starL); star5.setOnClickListener(starL);
         root.findViewById(R.id.btn_clear_rating).setOnClickListener(v -> { working.ratingMin = null; bindStars(); });
 
-        // Location (UI-only)
+        // Location
         spCountry = root.findViewById(R.id.sp_country);
         spCity = root.findViewById(R.id.sp_city);
         etRegion = root.findViewById(R.id.et_region);
+        etRegion.setText(working.region != null ? working.region : "");
 
         bindDates(); bindStars();
         fetchMetadataAsync();
+        AndroidViewLocalizer.localize(root);
         return root;
     }
 
@@ -143,7 +147,9 @@ public class FiltersDialogFragment extends DialogFragment {
         working.dateFrom = null; working.dateTo = null; bindDates();
         working.screenshots = false; working.livePhotos = false; if (swScreenshots != null) swScreenshots.setChecked(false); if (swLive != null) swLive.setChecked(false);
         working.ratingMin = null; bindStars();
-        // Location UI-only: clear selections
+        working.country = null;
+        working.region = null;
+        working.city = null;
         if (spCountry != null && spCountry.getAdapter() != null) spCountry.setSelection(0);
         if (spCity != null && spCity.getAdapter() != null) spCity.setSelection(0);
         if (etRegion != null) etRegion.setText("");
@@ -165,6 +171,7 @@ public class FiltersDialogFragment extends DialogFragment {
             }
             bindDates();
         }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH));
+        dlg.setTitle(AndroidI18n.t("Select date"));
         dlg.show();
     }
 
@@ -205,15 +212,30 @@ public class FiltersDialogFragment extends DialogFragment {
                 requireActivity().runOnUiThread(() -> {
                     facesAdapter.submit(faces);
                     ArrayList<String> cx = new ArrayList<>(); cx.add(""); cx.addAll(countries);
+                    addIfMissing(cx, working.country);
                     spCountry.setAdapter(new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_dropdown_item, cx));
+                    spCountry.setSelection(indexOfOrZero(cx, working.country));
                     ArrayList<String> cy = new ArrayList<>(); cy.add(""); cy.addAll(cities);
+                    addIfMissing(cy, working.city);
                     spCity.setAdapter(new ArrayAdapter<>(requireContext(), android.R.layout.simple_spinner_dropdown_item, cy));
+                    spCity.setSelection(indexOfOrZero(cy, working.city));
                 });
             } catch (Exception ignored) { }
         }).start();
     }
 
     private static int dp(Context c, int d) { return Math.round(c.getResources().getDisplayMetrics().density * d); }
+
+    private static void addIfMissing(ArrayList<String> items, @Nullable String value) {
+        if (TextUtils.isEmpty(value) || items.contains(value)) return;
+        items.add(value);
+    }
+
+    private static int indexOfOrZero(ArrayList<String> items, @Nullable String value) {
+        if (TextUtils.isEmpty(value)) return 0;
+        int index = items.indexOf(value);
+        return index >= 0 ? index : 0;
+    }
 
     // Face grid
     static class FaceItem { final String id; final String name; final int count; FaceItem(String id, String name, int count){ this.id=id; this.name=name; this.count=count; }}

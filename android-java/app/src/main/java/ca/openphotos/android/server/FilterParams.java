@@ -21,7 +21,7 @@ public class FilterParams implements Parcelable {
     public boolean livePhotos;
     public Integer ratingMin; // 1..5 or null
     @androidx.annotation.Nullable public String facesMode; // "all" (default backend) or "any"
-    // Location selections (UI-only for now; not applied to query)
+    // Location selections. The Android UI calls province/state "region".
     public String country;
     public String region;
     public String city;
@@ -54,7 +54,15 @@ public class FilterParams implements Parcelable {
             hb.addQueryParameter("filter_faces", String.join(",", faces)); // AND semantics by default
             if (facesMode != null && !facesMode.trim().isEmpty()) hb.addQueryParameter("filter_faces_mode", facesMode.trim());
         }
-        // Country/City/Province are UI-only in this Android pass per spec
+        addTrimmedQueryParameter(hb, "filter_country", country);
+        addTrimmedQueryParameter(hb, "filter_province", region);
+        addTrimmedQueryParameter(hb, "filter_city", city);
+    }
+
+    private static void addTrimmedQueryParameter(HttpUrl.Builder hb, String key, String value) {
+        if (value == null) return;
+        String trimmed = value.trim();
+        if (!trimmed.isEmpty()) hb.addQueryParameter(key, trimmed);
     }
 
     // Parcelable

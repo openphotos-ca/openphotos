@@ -136,11 +136,13 @@
             </FrameLayout>
 
             <com.google.android.material.button.MaterialButton
-                android:id="@+id/btn_local_select"
-                style="@style/Widget.Material3.Button.TextButton"
+                android:id="@+id/btn_local_more"
+                style="@style/Widget.Material3.Button.IconButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Select" />
+                android:contentDescription="More"
+                app:icon="@drawable/ic_more_vert_24"
+                app:iconTint="@color/app_text_primary" />
         </LinearLayout>
 
         <LinearLayout

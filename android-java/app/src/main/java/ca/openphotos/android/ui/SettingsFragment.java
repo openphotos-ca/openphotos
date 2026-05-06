@@ -22,6 +22,7 @@ import androidx.fragment.app.Fragment;
 import androidx.navigation.fragment.NavHostFragment;
 
 import ca.openphotos.android.R;
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.core.AppUpdateService;
 import ca.openphotos.android.core.AppLinks;
 import ca.openphotos.android.core.AuthManager;
@@ -29,6 +30,7 @@ import ca.openphotos.android.core.CapabilitiesService;
 import ca.openphotos.android.core.ServerUpdateService;
 import ca.openphotos.android.media.DiskImageCache;
 import ca.openphotos.android.prefs.AppearancePreferences;
+import ca.openphotos.android.prefs.LanguagePreferences;
 import ca.openphotos.android.server.ServerPhotosService;
 import com.bumptech.glide.Glide;
 import com.google.android.material.button.MaterialButton;
@@ -55,12 +57,15 @@ public class SettingsFragment extends Fragment {
 
     private AuthManager auth;
     private AppearancePreferences appearancePrefs;
+    private LanguagePreferences languagePrefs;
     private DiskImageCache cache;
     private Context appContext;
 
     private View cardDemoReadonly;
     private View rowAppearance;
     private TextView tvAppearanceValue;
+    private View rowLanguage;
+    private TextView tvLanguageValue;
     private TextView tvLibraryPhotos;
     private TextView tvLibraryVideos;
     private TextView tvLibraryTotalSize;
@@ -115,11 +120,14 @@ public class SettingsFragment extends Fragment {
         appContext = requireContext().getApplicationContext();
         auth = AuthManager.get(appContext);
         appearancePrefs = new AppearancePreferences(appContext);
+        languagePrefs = new LanguagePreferences(appContext);
         cache = DiskImageCache.get(appContext);
 
         cardDemoReadonly = view.findViewById(R.id.card_demo_readonly);
         rowAppearance = view.findViewById(R.id.row_appearance);
         tvAppearanceValue = view.findViewById(R.id.tv_appearance_value);
+        rowLanguage = view.findViewById(R.id.row_language);
+        tvLanguageValue = view.findViewById(R.id.tv_language_value);
         tvLibraryPhotos = view.findViewById(R.id.tv_library_photos);
         tvLibraryVideos = view.findViewById(R.id.tv_library_videos);
         tvLibraryTotalSize = view.findViewById(R.id.tv_library_total_size);
@@ -168,6 +176,7 @@ public class SettingsFragment extends Fragment {
         btnRefreshUsage.setOnClickListener(v -> refreshCacheUsage());
         btnClearCache.setOnClickListener(v -> confirmAndClearCache());
         rowAppearance.setOnClickListener(v -> showAppearanceDialog());
+        rowLanguage.setOnClickListener(v -> showLanguageDialog());
 
         rowSecurity.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.securitySettingsFragment));
         rowChangePassword.setOnClickListener(v -> NavHostFragment.findNavController(this).navigate(R.id.changePasswordFragment));
@@ -190,7 +199,7 @@ public class SettingsFragment extends Fragment {
         appUpdateStatus = AppUpdateService.getCachedStatus(appContext);
         bindAppUpdate(appUpdateStatus, false);
         refreshAppUpdate(false);
-        tvAboutVersion.setText(getVersionString());
+        setDynamicText(tvAboutVersion, getVersionString());
         view.findViewById(R.id.btn_about_website).setOnClickListener(v -> openExternalUrl(AppLinks.WEBSITE));
         view.findViewById(R.id.btn_about_privacy).setOnClickListener(v -> openExternalUrl(AppLinks.PRIVACY_POLICY));
         view.findViewById(R.id.btn_about_terms).setOnClickListener(v -> openExternalUrl(AppLinks.TERMS));
@@ -199,6 +208,7 @@ public class SettingsFragment extends Fragment {
         view.findViewById(R.id.btn_about_support_copy)
                 .setOnClickListener(v -> copyToClipboard("support_email", AppLinks.SUPPORT_EMAIL, "Support email copied"));
         refreshAppearanceSummary();
+        refreshLanguageSummary();
 
         boolean demoReadOnly = auth.isDemoUser();
         cardDemoReadonly.setVisibility(demoReadOnly ? View.VISIBLE : View.GONE);
@@ -211,6 +221,7 @@ public class SettingsFragment extends Fragment {
         refreshLibraryStats();
         refreshCacheUsage();
         refreshAppearanceSummary();
+        refreshLanguageSummary();
         bindAccountSummary();
         refreshServerVersion();
         refreshServerUpdate();
@@ -250,12 +261,12 @@ public class SettingsFragment extends Fragment {
     private void bindAccountSummary() {
         if (tvAccountName == null || tvAccountEmail == null || tvAccountServerUrl == null || auth == null) return;
         String email = auth.getUserEmail();
-        tvAccountName.setText(resolveAccountName(email));
-        tvAccountEmail.setText(email != null ? email : "-");
+        setDynamicText(tvAccountName, resolveAccountName(email));
+        setDynamicText(tvAccountEmail, email != null ? email : "-");
         String serverUrl = auth.getServerUrl();
-        tvAccountServerUrl.setText(serverUrl != null && !serverUrl.trim().isEmpty() ? serverUrl : "-");
+        setDynamicText(tvAccountServerUrl, serverUrl != null && !serverUrl.trim().isEmpty() ? serverUrl : "-");
         if (tvNetworkSettingsSummary != null) {
-            tvNetworkSettingsSummary.setText(auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
+            setLocalizedText(tvNetworkSettingsSummary, auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
                     ? "Using Local Network"
                     : (auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.PUBLIC ? "Using External Network" : "Not Configured"));
         }
@@ -265,21 +276,21 @@ public class SettingsFragment extends Fragment {
         if (tvAccountServerVersion == null || auth == null) return;
         final String requestedServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
         if (requestedServerUrl.isEmpty()) {
-            tvAccountServerVersion.setText("Unavailable");
+            setLocalizedText(tvAccountServerVersion, "Unavailable");
             return;
         }
-        tvAccountServerVersion.setText("Loading…");
+        setLocalizedText(tvAccountServerVersion, "Loading…");
         new Thread(() -> {
             CapabilitiesService.Caps caps = CapabilitiesService.get(appContext);
             final String resolvedVersion = caps.version != null && !caps.version.trim().isEmpty()
                     ? caps.version.trim()
-                    : "Unavailable";
+                    : AndroidI18n.t("Unavailable");
             if (!isAdded()) return;
             requireActivity().runOnUiThread(() -> {
                 if (!isAdded() || tvAccountServerVersion == null || auth == null) return;
                 String currentServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
                 if (!requestedServerUrl.equals(currentServerUrl)) return;
-                tvAccountServerVersion.setText(resolvedVersion);
+                setDynamicText(tvAccountServerVersion, resolvedVersion);
             });
         }).start();
     }
@@ -313,10 +324,10 @@ public class SettingsFragment extends Fragment {
                 || tvServerUpdateLatestVersion == null || tvServerUpdateMessage == null) {
             return;
         }
-        String stateLabel = "Unavailable";
-        String currentVersion = tvAccountServerVersion != null ? tvAccountServerVersion.getText().toString() : "Unavailable";
-        String latestVersion = "Unavailable";
-        String message = "Install updates from the web admin UI or directly on the server host.";
+        String stateLabel = AndroidI18n.t("Unavailable");
+        String currentVersion = tvAccountServerVersion != null ? tvAccountServerVersion.getText().toString() : AndroidI18n.t("Unavailable");
+        String latestVersion = AndroidI18n.t("Unavailable");
+        String message = AndroidI18n.t("Install updates from the web admin UI or directly on the server host.");
 
         if (status != null) {
             currentVersion = status.currentVersion != null && !status.currentVersion.trim().isEmpty()
@@ -327,19 +338,19 @@ public class SettingsFragment extends Fragment {
                     : latestVersion;
             switch (status.status) {
                 case "disabled":
-                    stateLabel = "Update checks disabled";
+                    stateLabel = AndroidI18n.t("Update checks disabled");
                     break;
                 case "check_failed":
-                    stateLabel = "Check failed";
+                    stateLabel = AndroidI18n.t("Check failed");
                     break;
                 case "unsupported_install_mode":
-                    stateLabel = "Unsupported install mode";
+                    stateLabel = AndroidI18n.t("Unsupported install mode");
                     break;
                 case "ok":
-                    stateLabel = status.available ? "Update available" : "Up to date";
+                    stateLabel = AndroidI18n.t(status.available ? "Update available" : "Up to date");
                     break;
                 default:
-                    stateLabel = "Never checked";
+                    stateLabel = AndroidI18n.t("Never checked");
                     break;
             }
             if (status.lastError != null && !status.lastError.trim().isEmpty()) {
@@ -349,10 +360,10 @@ public class SettingsFragment extends Fragment {
             message = error.trim() + "\n\n" + message;
         }
 
-        tvServerUpdateStatus.setText(stateLabel);
-        tvServerUpdateCurrentVersion.setText("Current version: " + currentVersion);
-        tvServerUpdateLatestVersion.setText("Latest version: " + latestVersion);
-        tvServerUpdateMessage.setText(message);
+        setDynamicText(tvServerUpdateStatus, stateLabel);
+        setDynamicText(tvServerUpdateCurrentVersion, AndroidI18n.t("Current version") + ": " + currentVersion);
+        setDynamicText(tvServerUpdateLatestVersion, AndroidI18n.t("Latest version") + ": " + latestVersion);
+        setDynamicText(tvServerUpdateMessage, message);
     }
 
     private void refreshAppUpdate(boolean forceRefresh) {
@@ -386,10 +397,10 @@ public class SettingsFragment extends Fragment {
         }
 
         cardAppUpdate.setVisibility(View.VISIBLE);
-        String currentVersion = "Unavailable";
-        String latestVersion = "Unavailable";
-        String stateLabel = "Never checked";
-        String message = "OpenPhotos checks GitHub releases for Android app updates.";
+        String currentVersion = AndroidI18n.t("Unavailable");
+        String latestVersion = AndroidI18n.t("Unavailable");
+        String stateLabel = AndroidI18n.t("Never checked");
+        String message = AndroidI18n.t("OpenPhotos checks GitHub releases for Android app updates.");
         String releaseNotesUrl = null;
         String downloadUrl = null;
         long checkedAtEpochMs = 0L;
@@ -405,42 +416,42 @@ public class SettingsFragment extends Fragment {
             downloadUrl = status.downloadUrl;
             checkedAtEpochMs = status.checkedAtEpochMs;
             if (checking) {
-                stateLabel = "Checking…";
-                message = "Checking the latest GitHub release for Android app updates.";
+                stateLabel = AndroidI18n.t("Checking…");
+                message = AndroidI18n.t("Checking the latest GitHub release for Android app updates.");
             } else {
                 switch (status.status) {
                     case AppUpdateService.STATUS_OK:
-                        stateLabel = status.available ? "Update available" : "Up to date";
+                        stateLabel = AndroidI18n.t(status.available ? "Update available" : "Up to date");
                         message = status.available
-                                ? "A newer Android app version is available. Open release notes or download the APK in your browser."
-                                : "This Android app is up to date.";
+                                ? AndroidI18n.t("A newer Android app version is available. Open release notes or download the APK in your browser.")
+                                : AndroidI18n.t("This Android app is up to date.");
                         break;
                     case AppUpdateService.STATUS_ASSET_MISSING:
-                        stateLabel = "Release missing APK";
-                        message = "A newer Android app version exists, but the latest GitHub release is missing the Android APK asset.";
+                        stateLabel = AndroidI18n.t("Release missing APK");
+                        message = AndroidI18n.t("A newer Android app version exists, but the latest GitHub release is missing the Android APK asset.");
                         break;
                     case AppUpdateService.STATUS_CHECK_FAILED:
-                        stateLabel = "Check failed";
+                        stateLabel = AndroidI18n.t("Check failed");
                         message = status.lastError != null && !status.lastError.trim().isEmpty()
                                 ? status.lastError.trim()
-                                : "Failed to check GitHub for Android app updates.";
+                                : AndroidI18n.t("Failed to check GitHub for Android app updates.");
                         break;
                     default:
-                        stateLabel = "Never checked";
-                        message = "OpenPhotos checks GitHub releases for Android app updates.";
+                        stateLabel = AndroidI18n.t("Never checked");
+                        message = AndroidI18n.t("OpenPhotos checks GitHub releases for Android app updates.");
                         break;
                 }
             }
         } else if (checking) {
-            stateLabel = "Checking…";
-            message = "Checking the latest GitHub release for Android app updates.";
+            stateLabel = AndroidI18n.t("Checking…");
+            message = AndroidI18n.t("Checking the latest GitHub release for Android app updates.");
         }
 
-        tvAppUpdateStatus.setText(stateLabel);
-        tvAppUpdateCurrentVersion.setText("Current version: " + currentVersion);
-        tvAppUpdateLatestVersion.setText("Latest version: " + latestVersion);
-        tvAppUpdateLastChecked.setText("Last checked: " + formatCheckedAt(checkedAtEpochMs));
-        tvAppUpdateMessage.setText(message);
+        setDynamicText(tvAppUpdateStatus, stateLabel);
+        setDynamicText(tvAppUpdateCurrentVersion, AndroidI18n.t("Current version") + ": " + currentVersion);
+        setDynamicText(tvAppUpdateLatestVersion, AndroidI18n.t("Latest version") + ": " + latestVersion);
+        setDynamicText(tvAppUpdateLastChecked, AndroidI18n.t("Last checked") + ": " + formatCheckedAt(checkedAtEpochMs));
+        setDynamicText(tvAppUpdateMessage, message);
         btnAppUpdateCheckNow.setEnabled(!checking);
 
         boolean hasReleaseNotes = releaseNotesUrl != null && !releaseNotesUrl.trim().isEmpty();
@@ -456,7 +467,7 @@ public class SettingsFragment extends Fragment {
     @NonNull
     private String formatCheckedAt(long checkedAtEpochMs) {
         if (checkedAtEpochMs <= 0L) {
-            return "Never";
+            return AndroidI18n.t("Never");
         }
         DateFormat dateFormat = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.SHORT, Locale.getDefault());
         return dateFormat.format(new Date(checkedAtEpochMs));
@@ -466,16 +477,16 @@ public class SettingsFragment extends Fragment {
         long thumbs = cache.usageBytes(DiskImageCache.Bucket.THUMBS) + cache.usageBytes(DiskImageCache.Bucket.FACES);
         long images = cache.usageBytes(DiskImageCache.Bucket.IMAGES);
         long videos = cache.usageBytes(DiskImageCache.Bucket.VIDEOS);
-        tvCacheUsageThumbs.setText("Thumbnails usage: " + Formatter.formatShortFileSize(requireContext(), thumbs));
-        tvCacheUsageImages.setText("Images usage: " + Formatter.formatShortFileSize(requireContext(), images));
-        tvCacheUsageVideos.setText("Videos usage: " + Formatter.formatShortFileSize(requireContext(), videos));
+        setDynamicText(tvCacheUsageThumbs, AndroidI18n.t("Thumbnails usage") + ": " + Formatter.formatShortFileSize(requireContext(), thumbs));
+        setDynamicText(tvCacheUsageImages, AndroidI18n.t("Images usage") + ": " + Formatter.formatShortFileSize(requireContext(), images));
+        setDynamicText(tvCacheUsageVideos, AndroidI18n.t("Videos usage") + ": " + Formatter.formatShortFileSize(requireContext(), videos));
     }
 
     private void refreshLibraryStats() {
         if (tvLibraryPhotos == null || tvLibraryVideos == null || tvLibraryTotalSize == null || appContext == null) return;
-        tvLibraryPhotos.setText("Loading…");
-        tvLibraryVideos.setText("Loading…");
-        tvLibraryTotalSize.setText("Loading…");
+        setLocalizedText(tvLibraryPhotos, "Loading…");
+        setLocalizedText(tvLibraryVideos, "Loading…");
+        setLocalizedText(tvLibraryTotalSize, "Loading…");
         final String requestedServerUrl = auth != null && auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
         if (requestedServerUrl.isEmpty()) {
             bindLibraryStatsUnavailable();
@@ -493,9 +504,9 @@ public class SettingsFragment extends Fragment {
                     if (!isAdded() || auth == null) return;
                     String currentServerUrl = auth.getServerUrl() != null ? auth.getServerUrl().trim() : "";
                     if (!requestedServerUrl.equals(currentServerUrl)) return;
-                    tvLibraryPhotos.setText(photos);
-                    tvLibraryVideos.setText(videos);
-                    tvLibraryTotalSize.setText(totalSize);
+                    setDynamicText(tvLibraryPhotos, photos);
+                    setDynamicText(tvLibraryVideos, videos);
+                    setDynamicText(tvLibraryTotalSize, totalSize);
                 });
             } catch (Exception ignored) {
                 if (!isAdded()) return;
@@ -510,9 +521,19 @@ public class SettingsFragment extends Fragment {
     }
 
     private void bindLibraryStatsUnavailable() {
-        if (tvLibraryPhotos != null) tvLibraryPhotos.setText("Unavailable");
-        if (tvLibraryVideos != null) tvLibraryVideos.setText("Unavailable");
-        if (tvLibraryTotalSize != null) tvLibraryTotalSize.setText("Unavailable");
+        if (tvLibraryPhotos != null) setLocalizedText(tvLibraryPhotos, "Unavailable");
+        if (tvLibraryVideos != null) setLocalizedText(tvLibraryVideos, "Unavailable");
+        if (tvLibraryTotalSize != null) setLocalizedText(tvLibraryTotalSize, "Unavailable");
+    }
+
+    private void setLocalizedText(@NonNull TextView view, @NonNull String source) {
+        view.setTag(R.id.tag_i18n_text_source, source);
+        view.setText(AndroidI18n.t(source));
+    }
+
+    private void setDynamicText(@NonNull TextView view, @NonNull String text) {
+        view.setTag(R.id.tag_i18n_text_source, text);
+        view.setText(text);
     }
 
     @NonNull
@@ -589,7 +610,12 @@ public class SettingsFragment extends Fragment {
 
     private void refreshAppearanceSummary() {
         if (tvAppearanceValue == null || appearancePrefs == null) return;
-        tvAppearanceValue.setText(AppearancePreferences.label(appearancePrefs.mode()));
+        setLocalizedText(tvAppearanceValue, AppearancePreferences.label(appearancePrefs.mode()));
+    }
+
+    private void refreshLanguageSummary() {
+        if (tvLanguageValue == null || languagePrefs == null) return;
+        setLocalizedText(tvLanguageValue, LanguagePreferences.label(languagePrefs.mode()));
     }
 
     private void showAppearanceDialog() {
@@ -598,7 +624,7 @@ public class SettingsFragment extends Fragment {
                 AppearancePreferences.MODE_DARK,
                 AppearancePreferences.MODE_SYSTEM
         };
-        final String[] labels = new String[]{"Light", "Dark", "System"};
+        final String[] labels = new String[]{AndroidI18n.t("Light"), AndroidI18n.t("Dark"), AndroidI18n.t("System")};
         String current = appearancePrefs.mode();
         int checked = 2;
         for (int i = 0; i < modes.length; i++) {
@@ -609,10 +635,10 @@ public class SettingsFragment extends Fragment {
         }
         final int[] selected = new int[]{checked};
         new MaterialAlertDialogBuilder(requireContext())
-                .setTitle("Appearance")
+                .setTitle(AndroidI18n.t("Appearance"))
                 .setSingleChoiceItems(labels, checked, (dialog, which) -> selected[0] = which)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Apply", (dialog, which) -> applyAppearanceMode(modes[selected[0]]))
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
+                .setPositiveButton(AndroidI18n.t("Apply"), (dialog, which) -> applyAppearanceMode(modes[selected[0]]))
                 .show();
     }
 
@@ -622,6 +648,47 @@ public class SettingsFragment extends Fragment {
         appearancePrefs.setMode(mode);
         AppearancePreferences.apply(requireContext());
         refreshAppearanceSummary();
+    }
+
+    private void showLanguageDialog() {
+        final String[] modes = new String[]{
+                LanguagePreferences.MODE_SYSTEM,
+                LanguagePreferences.MODE_EN,
+                LanguagePreferences.MODE_ZH_HANS,
+                LanguagePreferences.MODE_FR,
+                LanguagePreferences.MODE_ES
+        };
+        final String[] labels = new String[]{
+                AndroidI18n.t("System"),
+                "English",
+                "简体中文",
+                "Français",
+                "Español"
+        };
+        String current = languagePrefs.mode();
+        int checked = 0;
+        for (int i = 0; i < modes.length; i++) {
+            if (modes[i].equals(current)) {
+                checked = i;
+                break;
+            }
+        }
+        final int[] selected = new int[]{checked};
+        new MaterialAlertDialogBuilder(requireContext())
+                .setTitle(AndroidI18n.t("Language"))
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> selected[0] = which)
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
+                .setPositiveButton(AndroidI18n.t("Apply"), (dialog, which) -> applyLanguageMode(modes[selected[0]]))
+                .show();
+    }
+
+    private void applyLanguageMode(@NonNull String mode) {
+        String current = languagePrefs.mode();
+        if (current.equals(mode)) return;
+        languagePrefs.setMode(mode);
+        LanguagePreferences.apply(requireContext());
+        refreshLanguageSummary();
+        requireActivity().recreate();
     }
 
     private void clearCacheNow() {

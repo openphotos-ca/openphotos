@@ -21,6 +21,7 @@ import ca.openphotos.android.R;
 import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.e2ee.DeviceUMKStore;
 import ca.openphotos.android.e2ee.E2EEManager;
+import ca.openphotos.android.i18n.AndroidViewLocalizer;
 import ca.openphotos.android.prefs.SecurityPreferences;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.switchmaterial.SwitchMaterial;
@@ -90,6 +91,7 @@ public class SecuritySettingsFragment extends Fragment {
         boolean demoReadOnly = auth.isDemoUser();
         cardDemoReadonly.setVisibility(demoReadOnly ? View.VISIBLE : View.GONE);
         setEditableEnabled(!demoReadOnly);
+        AndroidViewLocalizer.localize(view);
     }
 
     @Override

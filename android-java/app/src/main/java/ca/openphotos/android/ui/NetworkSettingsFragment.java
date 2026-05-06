@@ -21,6 +21,7 @@ import com.google.android.material.textfield.TextInputEditText;
 
 import ca.openphotos.android.R;
 import ca.openphotos.android.core.AuthManager;
+import ca.openphotos.android.i18n.AndroidI18n;
 
 public class NetworkSettingsFragment extends Fragment {
     private AuthManager auth;
@@ -87,7 +88,7 @@ public class NetworkSettingsFragment extends Fragment {
         view.findViewById(R.id.btn_network_test_local).setOnClickListener(v -> testEndpoint(AuthManager.ManualPreferredEndpoint.LOCAL));
         btnRefresh.setOnClickListener(v -> {
             auth.refreshNetworkRouting();
-            Toast.makeText(requireContext(), "Refreshing network route", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("Refreshing network route"), Toast.LENGTH_SHORT).show();
             refreshUi();
         });
         btnUseCurrent.setOnClickListener(v -> {
@@ -107,43 +108,43 @@ public class NetworkSettingsFragment extends Fragment {
     private void saveExternalUrl() {
         String raw = fieldText(etPublicUrl).trim();
         if (!raw.isEmpty() && AuthManager.parseBaseUrl(raw) == null) {
-            Toast.makeText(requireContext(), "External URL is invalid", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("External URL is invalid"), Toast.LENGTH_SHORT).show();
             return;
         }
         String localRaw = fieldText(etLocalUrl).trim();
         if (!localRaw.isEmpty() && AuthManager.parseBaseUrl(localRaw) == null) {
-            Toast.makeText(requireContext(), "Local URL is invalid", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("Local URL is invalid"), Toast.LENGTH_SHORT).show();
             return;
         }
         auth.saveConfiguredBaseUrlsWithoutRefreshing(raw, localRaw);
-        Toast.makeText(requireContext(), "External URL saved", Toast.LENGTH_SHORT).show();
+        Toast.makeText(requireContext(), AndroidI18n.t("External URL saved"), Toast.LENGTH_SHORT).show();
         refreshUi();
     }
 
     private void saveLocalUrl() {
         String raw = fieldText(etLocalUrl).trim();
         if (!raw.isEmpty() && AuthManager.parseBaseUrl(raw) == null) {
-            Toast.makeText(requireContext(), "Local URL is invalid", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("Local URL is invalid"), Toast.LENGTH_SHORT).show();
             return;
         }
         String publicRaw = fieldText(etPublicUrl).trim();
         if (!publicRaw.isEmpty() && AuthManager.parseBaseUrl(publicRaw) == null) {
-            Toast.makeText(requireContext(), "External URL is invalid", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("External URL is invalid"), Toast.LENGTH_SHORT).show();
             return;
         }
         auth.saveConfiguredBaseUrlsWithoutRefreshing(publicRaw, raw);
-        Toast.makeText(requireContext(), "Local URL saved", Toast.LENGTH_SHORT).show();
+        Toast.makeText(requireContext(), AndroidI18n.t("Local URL saved"), Toast.LENGTH_SHORT).show();
         refreshUi();
     }
 
     private void testEndpoint(AuthManager.ManualPreferredEndpoint endpoint) {
         TextView target = endpoint == AuthManager.ManualPreferredEndpoint.LOCAL ? tvLocalTest : tvPublicTest;
-        target.setText("Testing…");
+        target.setText(AndroidI18n.t("Testing…"));
         new Thread(() -> {
             AuthManager.ProbeResult result = auth.testConfiguredEndpoint(endpoint);
             if (!isAdded()) return;
             requireActivity().runOnUiThread(() -> {
-                target.setText(result.message);
+                target.setText(AndroidI18n.t(result.message));
                 target.setTextColor(ContextCompat.getColor(
                         requireContext(),
                         result.success ? R.color.app_success : R.color.app_text_secondary
@@ -158,8 +159,8 @@ public class NetworkSettingsFragment extends Fragment {
         etPublicUrl.setText(auth.getPublicServerUrl());
         etLocalUrl.setText(auth.getLocalServerUrl());
         tvActiveUrl.setText(nonEmpty(auth.getEffectiveServerUrl(), "-"));
-        tvRouting.setText(routingLabel());
-        tvTransport.setText("Transport: " + transportLabel(auth.getNetworkTransport()));
+        tvRouting.setText(AndroidI18n.t(routingLabel()));
+        tvTransport.setText(AndroidI18n.t("Transport") + ": " + AndroidI18n.t(transportLabel(auth.getNetworkTransport())));
         tvProbe.setText(probeLabel());
         swAutoSwitch.setChecked(auth.isAutoSwitchEnabled());
         toggleManualPreferred.setVisibility(auth.isAutoSwitchEnabled() ? View.GONE : View.VISIBLE);
@@ -198,14 +199,14 @@ public class NetworkSettingsFragment extends Fragment {
     private String probeLabel() {
         Boolean success = auth.getLastLocalProbeSucceeded();
         if (success == null) {
-            return "Local probe: never";
+            return AndroidI18n.t("Local probe: never");
         }
         String message = auth.getLastLocalProbeMessage();
         long at = auth.getLastLocalProbeAtElapsedMs();
         long ageSec = at > 0L ? Math.max(0L, (SystemClock.elapsedRealtime() - at) / 1000L) : 0L;
-        return "Local probe: " + (success ? "ok" : "failed")
+        return AndroidI18n.t("Local probe") + ": " + AndroidI18n.t(success ? "ok" : "failed")
                 + (message == null || message.trim().isEmpty() ? "" : " (" + message + ")")
-                + (at > 0L ? " • " + ageSec + "s ago" : "");
+                + (at > 0L ? " • " + ageSec + AndroidI18n.t("s ago") : "");
     }
 
     @NonNull

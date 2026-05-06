@@ -12,6 +12,7 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.DialogFragment;
 
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.server.ServerPhotosService;
 
 /**
@@ -41,15 +42,15 @@ public class InfoBottomSheet extends DialogFragment {
         LinearLayout root = new LinearLayout(requireContext()); root.setOrientation(LinearLayout.VERTICAL); int pad=24; root.setPadding(pad,pad,pad,pad);
         sv.addView(root);
 
-        TextView header = new TextView(requireContext()); header.setText("Loading…"); header.setTextAppearance(android.R.style.TextAppearance_Medium); root.addView(header);
+        TextView header = new TextView(requireContext()); header.setText(AndroidI18n.t("Loading…")); header.setTextAppearance(android.R.style.TextAppearance_Medium); root.addView(header);
         TextView body = new TextView(requireContext()); root.addView(body);
 
         LinearLayout actions = new LinearLayout(requireContext()); actions.setOrientation(LinearLayout.HORIZONTAL);
-        android.widget.Button edit = new android.widget.Button(requireContext()); edit.setText("Edit Metadata"); edit.setOnClickListener(v -> EditMetadataBottomSheet.newInstance(aid).show(getParentFragmentManager(), "editMeta"));
-        android.widget.Button rate = new android.widget.Button(requireContext()); rate.setText("Set Rating"); rate.setOnClickListener(v -> { RateBottomSheet r = RateBottomSheet.newInstance(aid, 0); r.show(getParentFragmentManager(), "rate"); });
+        android.widget.Button edit = new android.widget.Button(requireContext()); edit.setText(AndroidI18n.t("Edit Metadata")); edit.setOnClickListener(v -> EditMetadataBottomSheet.newInstance(aid).show(getParentFragmentManager(), "editMeta"));
+        android.widget.Button rate = new android.widget.Button(requireContext()); rate.setText(AndroidI18n.t("Set Rating")); rate.setOnClickListener(v -> { RateBottomSheet r = RateBottomSheet.newInstance(aid, 0); r.show(getParentFragmentManager(), "rate"); });
         actions.addView(edit); actions.addView(rate); root.addView(actions);
 
-        Dialog d = new android.app.AlertDialog.Builder(requireContext()).setTitle("Info").setView(sv).setPositiveButton("Close", null).create();
+        Dialog d = new android.app.AlertDialog.Builder(requireContext()).setTitle(AndroidI18n.t("Info")).setView(sv).setPositiveButton(AndroidI18n.t("Close"), null).create();
 
         new Thread(() -> {
             try {
@@ -75,8 +76,8 @@ public class InfoBottomSheet extends DialogFragment {
                 }
                 sb.append("People\n");
                 for (int i=0;i<persons.length();i++) { org.json.JSONObject per = persons.getJSONObject(i); String name = per.optString("display_name", per.optString("person_id","(unknown)")); sb.append("• ").append(name).append("\n"); }
-                requireActivity().runOnUiThread(() -> { header.setText("Details"); body.setText(sb); });
-            } catch (Exception e) { requireActivity().runOnUiThread(() -> { header.setText("Error"); body.setText(e.getMessage()); }); }
+                requireActivity().runOnUiThread(() -> { header.setText(AndroidI18n.t("Details")); body.setText(sb); });
+            } catch (Exception e) { requireActivity().runOnUiThread(() -> { header.setText(AndroidI18n.t("Error")); body.setText(e.getMessage()); }); }
         }).start();
 
         return d;

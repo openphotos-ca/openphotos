@@ -20,6 +20,8 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import ca.openphotos.android.R;
+import ca.openphotos.android.i18n.AndroidI18n;
+import ca.openphotos.android.i18n.AndroidViewLocalizer;
 import ca.openphotos.android.server.ServerPhotosService;
 import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.switchmaterial.SwitchMaterial;
@@ -104,6 +106,7 @@ public class AlbumTreeDialogFragment extends DialogFragment {
 
         // Load data
         reloadTreeAsync();
+        AndroidViewLocalizer.localize(root);
         return root;
     }
 
@@ -178,11 +181,11 @@ public class AlbumTreeDialogFragment extends DialogFragment {
 
     private void promptCreate(@Nullable Integer parentId) {
         final EditText input = new EditText(requireContext());
-        input.setHint("Album name"); input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
+        input.setHint(AndroidI18n.t("Album name")); input.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_CAP_WORDS);
         new MaterialAlertDialogBuilder(requireContext())
-                .setTitle(parentId == null ? "New Album" : "New Sub‑album")
+                .setTitle(AndroidI18n.t(parentId == null ? "New Album" : "New Sub‑album"))
                 .setView(input)
-                .setPositiveButton("Create", (d,w)->{
+                .setPositiveButton(AndroidI18n.t("Create"), (d,w)->{
                     String name = input.getText().toString().trim(); if (name.isEmpty()) return;
                     new Thread(() -> {
                         try { new ServerPhotosService(requireContext().getApplicationContext()).createAlbum(name, null, parentId == null ? null : Long.valueOf(parentId));
@@ -190,35 +193,35 @@ public class AlbumTreeDialogFragment extends DialogFragment {
                                 // Notify host and reload
                                 getParentFragmentManager().setFragmentResult(KEY_ALBUMS_UPDATED, new Bundle());
                                 reloadTreeAsync();
-                                android.widget.Toast.makeText(requireContext(), "Album created", android.widget.Toast.LENGTH_SHORT).show();
+                                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Album created"), android.widget.Toast.LENGTH_SHORT).show();
                             });
                         } catch (Exception e) {
-                            requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Create failed", android.widget.Toast.LENGTH_LONG).show());
+                            requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Create failed"), android.widget.Toast.LENGTH_LONG).show());
                         }
                     }).start();
                 })
-                .setNegativeButton("Cancel", null).show();
+                .setNegativeButton(AndroidI18n.t("Cancel"), null).show();
     }
 
     private void confirmDelete(int albumId, String name, boolean isLive) {
         new MaterialAlertDialogBuilder(requireContext())
-                .setTitle("Delete " + name + "?")
-                .setMessage("Delete this album? Sub‑albums are also removed. Photos are not deleted.")
-                .setPositiveButton("Delete", (d,w)->{
+                .setTitle(AndroidI18n.t("Delete") + " " + name + "?")
+                .setMessage(AndroidI18n.t("Delete this album? Sub‑albums are also removed. Photos are not deleted."))
+                .setPositiveButton(AndroidI18n.t("Delete"), (d,w)->{
                     new Thread(() -> {
                         try { new ServerPhotosService(requireContext().getApplicationContext()).deleteAlbum(albumId);
                             requireActivity().runOnUiThread(() -> {
                                 getParentFragmentManager().setFragmentResult(KEY_ALBUMS_UPDATED, new Bundle());
                                 reloadTreeAsync();
                                 if (selectedAlbumId != null && selectedAlbumId == albumId) { selectedAlbumId = null; btnOk.setEnabled(false); }
-                                android.widget.Toast.makeText(requireContext(), "Album deleted", android.widget.Toast.LENGTH_SHORT).show();
+                                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Album deleted"), android.widget.Toast.LENGTH_SHORT).show();
                             });
                         } catch (Exception e) {
-                            requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Delete failed", android.widget.Toast.LENGTH_LONG).show());
+                            requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Delete failed"), android.widget.Toast.LENGTH_LONG).show());
                         }
                     }).start();
                 })
-                .setNegativeButton("Cancel", null).show();
+                .setNegativeButton(AndroidI18n.t("Cancel"), null).show();
     }
 
     // --- Data structures ---

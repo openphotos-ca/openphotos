@@ -9,6 +9,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.fragment.app.DialogFragment;
 
+import ca.openphotos.android.i18n.AndroidI18n;
+
 import java.util.ArrayList;
 
 /** Single-select picker for existing local album/folder paths. */
@@ -39,15 +41,15 @@ public class LocalAlbumPickerDialogFragment extends DialogFragment {
 
         CharSequence[] items = finalPaths.toArray(new CharSequence[0]);
         AlertDialog dialog = new AlertDialog.Builder(requireContext())
-                .setTitle("Choose Album")
+                .setTitle(AndroidI18n.t("Choose Album"))
                 .setSingleChoiceItems(items, -1, (d, which) -> selectedIndex = which)
-                .setPositiveButton("Add", (d, which) -> {
+                .setPositiveButton(AndroidI18n.t("Add"), (d, which) -> {
                     if (selectedIndex < 0 || selectedIndex >= finalPaths.size()) return;
                     Bundle result = new Bundle();
                     result.putString(RESULT_PATH, finalPaths.get(selectedIndex));
                     getParentFragmentManager().setFragmentResult(KEY_SELECT_RESULT, result);
                 })
-                .setNegativeButton("Cancel", null)
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
                 .create();
 
         dialog.setOnShowListener(d -> {

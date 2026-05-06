@@ -12,7 +12,9 @@ import com.google.android.material.bottomnavigation.BottomNavigationView;
 import androidx.navigation.NavController;
 import androidx.navigation.fragment.NavHostFragment;
 import androidx.navigation.ui.NavigationUI;
+import ca.openphotos.android.i18n.AndroidViewLocalizer;
 import ca.openphotos.android.prefs.AppearancePreferences;
+import ca.openphotos.android.prefs.LanguagePreferences;
 import ca.openphotos.android.core.AppUpdateService;
 import ca.openphotos.android.util.ForegroundUploadScreenController;
 import ca.openphotos.android.util.PermissionsHelper;
@@ -30,6 +32,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        LanguagePreferences.apply(this);
         AppCompatDelegate.setDefaultNightMode(new AppearancePreferences(this).nightMode());
         super.onCreate(savedInstanceState);
 
@@ -38,6 +41,7 @@ public class MainActivity extends AppCompatActivity {
                 result -> { /* Local photos tab remains the fallback UI if access is denied. */ });
 
         setContentView(R.layout.activity_main);
+        AndroidViewLocalizer.install(this);
         ForegroundUploadScreenController.applyTo(this);
 
         NavHostFragment navHost = (NavHostFragment) getSupportFragmentManager().findFragmentById(R.id.nav_host_fragment);
@@ -66,6 +70,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onStart() {
         super.onStart();
+        AndroidViewLocalizer.localize(getWindow().getDecorView());
         ForegroundUploadScreenController.addListener(keepScreenOnUpdater);
         ForegroundUploadScreenController.applyTo(this);
         // Trigger auto-start whenever app becomes foregrounded.

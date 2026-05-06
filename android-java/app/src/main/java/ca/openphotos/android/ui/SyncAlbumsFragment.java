@@ -20,6 +20,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import ca.openphotos.android.R;
 import ca.openphotos.android.e2ee.E2EEManager;
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.prefs.SyncFoldersPreferences;
 import ca.openphotos.android.prefs.SyncPreferences;
 import ca.openphotos.android.ui.local.LocalMediaItem;
@@ -253,7 +254,7 @@ public class SyncAlbumsFragment extends Fragment {
             if (!isAdded()) return;
             requireActivity().runOnUiThread(() -> {
                 if (ok) onSuccess.run();
-                else Toast.makeText(requireContext(), "Unlock failed", Toast.LENGTH_SHORT).show();
+                else Toast.makeText(requireContext(), AndroidI18n.t("Unlock failed"), Toast.LENGTH_SHORT).show();
             });
         }).start()).show(getParentFragmentManager(), "sync_albums_pin");
     }
@@ -333,10 +334,10 @@ public class SyncAlbumsFragment extends Fragment {
 
             h.more.setOnClickListener(v -> {
                 androidx.appcompat.widget.PopupMenu pm = new androidx.appcompat.widget.PopupMenu(requireContext(), h.more);
-                pm.getMenu().add(0, 1, 1, "Enable subtree sync");
-                pm.getMenu().add(0, 2, 2, "Disable subtree sync");
-                pm.getMenu().add(0, 3, 3, "Lock subtree");
-                pm.getMenu().add(0, 4, 4, "Unlock subtree");
+                pm.getMenu().add(0, 1, 1, AndroidI18n.t("Enable subtree sync"));
+                pm.getMenu().add(0, 2, 2, AndroidI18n.t("Disable subtree sync"));
+                pm.getMenu().add(0, 3, 3, AndroidI18n.t("Lock subtree"));
+                pm.getMenu().add(0, 4, 4, AndroidI18n.t("Unlock subtree"));
                 pm.setOnMenuItemClickListener(item -> {
                     int id = item.getItemId();
                     if (id == 1) {

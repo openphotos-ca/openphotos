@@ -34,6 +34,7 @@ import androidx.recyclerview.widget.RecyclerView;
 import ca.openphotos.android.R;
 import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.data.db.entities.PhotoEntity;
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.media.AlbumPathUtil;
 import ca.openphotos.android.ui.local.LocalAlbumCopyHelper;
 import ca.openphotos.android.ui.local.LocalMediaItem;
@@ -69,7 +70,7 @@ public class LocalPhotosFragment extends Fragment {
 
     private MaterialButton btnSort;
     private MaterialButton btnCloud;
-    private MaterialButton btnSelect;
+    private MaterialButton btnMore;
     private MaterialButton btnAlbums;
     private MaterialButton btnFavorites;
     private MaterialButton btnFilter;
@@ -104,6 +105,7 @@ public class LocalPhotosFragment extends Fragment {
     private ActivityResultLauncher<String[]> permissionLauncher;
     private ActivityResultLauncher<IntentSenderRequest> deleteLauncher;
     private int pendingDeleteCount = 0;
+    private static final int MENU_TOP_SELECT = 1;
 
     @Nullable
     @Override
@@ -119,7 +121,7 @@ public class LocalPhotosFragment extends Fragment {
 
         btnSort = root.findViewById(R.id.btn_local_sort);
         btnCloud = root.findViewById(R.id.btn_local_cloud);
-        btnSelect = root.findViewById(R.id.btn_local_select);
+        btnMore = root.findViewById(R.id.btn_local_more);
         btnAlbums = root.findViewById(R.id.btn_local_albums);
         btnFavorites = root.findViewById(R.id.btn_local_favorites);
         btnFilter = root.findViewById(R.id.btn_local_filter);
@@ -206,11 +208,11 @@ public class LocalPhotosFragment extends Fragment {
 
         deleteLauncher = registerForActivityResult(new ActivityResultContracts.StartIntentSenderForResult(), result -> {
             if (result.getResultCode() == Activity.RESULT_OK) {
-                Toast.makeText(requireContext(), "Deleted " + pendingDeleteCount + " item(s)", Toast.LENGTH_SHORT).show();
+                Toast.makeText(requireContext(), String.format(java.util.Locale.getDefault(), AndroidI18n.t("Deleted %d item(s)"), pendingDeleteCount), Toast.LENGTH_SHORT).show();
                 vm.exitSelectionMode();
                 vm.reload();
             } else {
-                Toast.makeText(requireContext(), "Delete canceled", Toast.LENGTH_SHORT).show();
+                Toast.makeText(requireContext(), AndroidI18n.t("Delete canceled"), Toast.LENGTH_SHORT).show();
             }
             pendingDeleteCount = 0;
         });
@@ -289,9 +291,9 @@ public class LocalPhotosFragment extends Fragment {
 
         vm.counts().observe(getViewLifecycleOwner(), counts -> {
             if (counts == null) return;
-            chipAll.setText("All " + counts.all);
-            chipPhotos.setText("Photos " + counts.photos);
-            chipVideos.setText("Videos " + counts.videos);
+            chipAll.setText(AndroidI18n.t("All") + " " + counts.all);
+            chipPhotos.setText(AndroidI18n.t("Photos") + " " + counts.photos);
+            chipVideos.setText(AndroidI18n.t("Videos") + " " + counts.videos);
         });
 
         vm.availableFolders().observe(getViewLifecycleOwner(), folders -> {
@@ -304,7 +306,6 @@ public class LocalPhotosFragment extends Fragment {
         vm.selectionMode().observe(getViewLifecycleOwner(), enabled -> {
             boolean on = Boolean.TRUE.equals(enabled);
             selectionBar.setVisibility(on ? View.VISIBLE : View.GONE);
-            btnSelect.setText(on ? "Cancel" : "Select");
             refreshSelectionVisuals();
             updateGridBottomPadding();
         });
@@ -312,7 +313,7 @@ public class LocalPhotosFragment extends Fragment {
         vm.selectedCount().observe(getViewLifecycleOwner(), count -> {
             int n = count == null ? 0 : count;
             btnActions.setEnabled(n > 0 || vm.isSelectionModeValue());
-            btnActions.setText(n > 0 ? ("Actions (" + n + ")") : "Actions");
+            btnActions.setText(n > 0 ? (AndroidI18n.t("Actions") + " (" + n + ")") : AndroidI18n.t("Actions"));
             refreshSelectionVisuals();
         });
 
@@ -352,7 +353,7 @@ public class LocalPhotosFragment extends Fragment {
             if (msg == null || msg.isEmpty()) return;
             if (msg.equals(lastMessage)) return;
             lastMessage = msg;
-            Toast.makeText(requireContext(), msg, Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t(msg), Toast.LENGTH_SHORT).show();
             rebuildActiveFilterChips();
         });
 
@@ -381,18 +382,18 @@ public class LocalPhotosFragment extends Fragment {
         btnCloud.setOnClickListener(v -> {
             if (Boolean.TRUE.equals(vm.cloudRunning().getValue())) {
                 new AlertDialog.Builder(requireContext())
-                        .setTitle("Stop Cloud Check?")
-                        .setMessage("Cloud check is still running. Stop now?")
-                        .setPositiveButton("Stop", (d, w) -> vm.cancelCloudCheck())
-                        .setNegativeButton("Continue", null)
+                        .setTitle(AndroidI18n.t("Stop Cloud Check?"))
+                        .setMessage(AndroidI18n.t("Cloud check is still running. Stop now?"))
+                        .setPositiveButton(AndroidI18n.t("Stop"), (d, w) -> vm.cancelCloudCheck())
+                        .setNegativeButton(AndroidI18n.t("Continue"), null)
                         .show();
                 return;
             }
             PopupMenu pm = new PopupMenu(requireContext(), v);
-            pm.getMenu().add(Menu.NONE, 1, 1, "Check all photos");
-            pm.getMenu().add(Menu.NONE, 2, 2, "Check current selection");
-            pm.getMenu().add(Menu.NONE, 3, 3, "List Deleted");
-            pm.getMenu().add(Menu.NONE, 4, 4, "Cancel");
+            pm.getMenu().add(Menu.NONE, 1, 1, AndroidI18n.t("Check all photos"));
+            pm.getMenu().add(Menu.NONE, 2, 2, AndroidI18n.t("Check current selection"));
+            pm.getMenu().add(Menu.NONE, 3, 3, AndroidI18n.t("List Deleted"));
+            pm.getMenu().add(Menu.NONE, 4, 4, AndroidI18n.t("Cancel"));
             pm.setOnMenuItemClickListener(item -> {
                 if (item.getItemId() == 1) vm.startCloudCheckAll();
                 if (item.getItemId() == 2) vm.startCloudCheckCurrentSelection();
@@ -403,10 +404,7 @@ public class LocalPhotosFragment extends Fragment {
             pm.show();
         });
 
-        btnSelect.setOnClickListener(v -> {
-            if (vm.isSelectionModeValue()) vm.exitSelectionMode();
-            else vm.enterSelectionMode();
-        });
+        btnMore.setOnClickListener(this::showTopMoreMenu);
 
         btnAlbums.setOnClickListener(v -> showFolderPickerDialog());
 
@@ -445,8 +443,21 @@ public class LocalPhotosFragment extends Fragment {
         else mediaTabs.check(R.id.local_tab_all);
 
         selectionBar.setVisibility(vm.isSelectionModeValue() ? View.VISIBLE : View.GONE);
-        btnSelect.setText(vm.isSelectionModeValue() ? "Cancel" : "Select");
         updateGridBottomPadding();
+    }
+
+    private void showTopMoreMenu(@NonNull View anchor) {
+        PopupMenu pm = new PopupMenu(requireContext(), anchor);
+        pm.getMenu().add(Menu.NONE, MENU_TOP_SELECT, 1, AndroidI18n.t(vm.isSelectionModeValue() ? "Cancel" : "Select"));
+        pm.setOnMenuItemClickListener(item -> {
+            if (item.getItemId() == MENU_TOP_SELECT) {
+                if (vm.isSelectionModeValue()) vm.exitSelectionMode();
+                else vm.enterSelectionMode();
+                return true;
+            }
+            return false;
+        });
+        pm.show();
     }
 
     private void applyLayoutMode() {
@@ -531,10 +542,10 @@ public class LocalPhotosFragment extends Fragment {
 
     private void showSortMenu(@NonNull View anchor) {
         PopupMenu pm = new PopupMenu(requireContext(), anchor);
-        pm.getMenu().add(Menu.NONE, 1, 1, LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.NEWEST));
-        pm.getMenu().add(Menu.NONE, 2, 2, LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.OLDEST));
-        pm.getMenu().add(Menu.NONE, 3, 3, LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.LARGEST));
-        pm.getMenu().add(Menu.NONE, 4, 4, LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.RANDOM));
+        pm.getMenu().add(Menu.NONE, 1, 1, AndroidI18n.t(LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.NEWEST)));
+        pm.getMenu().add(Menu.NONE, 2, 2, AndroidI18n.t(LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.OLDEST)));
+        pm.getMenu().add(Menu.NONE, 3, 3, AndroidI18n.t(LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.LARGEST)));
+        pm.getMenu().add(Menu.NONE, 4, 4, AndroidI18n.t(LocalPhotosViewModel.sortDisplay(LocalPhotosViewModel.SortOption.RANDOM)));
         pm.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case 1: vm.setSortOption(LocalPhotosViewModel.SortOption.NEWEST); break;
@@ -552,11 +563,11 @@ public class LocalPhotosFragment extends Fragment {
     private void showFilterMenu(@NonNull View anchor) {
         PopupMenu pm = new PopupMenu(requireContext(), anchor);
         Menu m = pm.getMenu();
-        MenuItem iDate = m.add(Menu.NONE, 1, 1, "Time Range");
-        MenuItem iScreenshots = m.add(Menu.NONE, 2, 2, "Screenshots");
-        MenuItem iLive = m.add(Menu.NONE, 3, 3, "Live Photos");
-        MenuItem iMissing = m.add(Menu.NONE, 4, 4, "Missing in Cloud");
-        MenuItem iDeleted = m.add(Menu.NONE, 5, 5, "Deleted in Cloud");
+        MenuItem iDate = m.add(Menu.NONE, 1, 1, AndroidI18n.t("Time Range"));
+        MenuItem iScreenshots = m.add(Menu.NONE, 2, 2, AndroidI18n.t("Screenshots"));
+        MenuItem iLive = m.add(Menu.NONE, 3, 3, AndroidI18n.t("Live Photos"));
+        MenuItem iMissing = m.add(Menu.NONE, 4, 4, AndroidI18n.t("Missing in Cloud"));
+        MenuItem iDeleted = m.add(Menu.NONE, 5, 5, AndroidI18n.t("Deleted in Cloud"));
 
         iDate.setCheckable(false);
         iScreenshots.setCheckable(true).setChecked(vm.isFilterScreenshots());
@@ -597,15 +608,15 @@ public class LocalPhotosFragment extends Fragment {
         View root = LayoutInflater.from(requireContext()).inflate(android.R.layout.simple_list_item_2, null, false);
         TextView t1 = root.findViewById(android.R.id.text1);
         TextView t2 = root.findViewById(android.R.id.text2);
-        t1.setText("Set date range");
-        t2.setText("Choose start and end date");
+        t1.setText(AndroidI18n.t("Set date range"));
+        t2.setText(AndroidI18n.t("Choose start and end date"));
 
         AlertDialog dlg = new AlertDialog.Builder(requireContext())
-                .setTitle("Time Range")
+                .setTitle(AndroidI18n.t("Time Range"))
                 .setView(root)
-                .setPositiveButton("Apply", (d, w) -> vm.setDateRange(from[0], to[0]))
-                .setNegativeButton("Cancel", null)
-                .setNeutralButton("Clear", (d, w) -> vm.setDateRange(null, null))
+                .setPositiveButton(AndroidI18n.t("Apply"), (d, w) -> vm.setDateRange(from[0], to[0]))
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
+                .setNeutralButton(AndroidI18n.t("Clear"), (d, w) -> vm.setDateRange(null, null))
                 .create();
         dlg.setOnShowListener(d -> {
             root.setOnClickListener(v -> {
@@ -639,13 +650,14 @@ public class LocalPhotosFragment extends Fragment {
             }
             cb.onDate(c.getTimeInMillis() / 1000L);
         }, cal.get(Calendar.YEAR), cal.get(Calendar.MONTH), cal.get(Calendar.DAY_OF_MONTH));
+        dp.setTitle(AndroidI18n.t(isStart ? "Select Start Date" : "Select End Date"));
         dp.show();
     }
 
     private void showFolderPickerDialog() {
         List<String> folders = vm.availableFolders().getValue();
         if (folders == null || folders.isEmpty()) {
-            Toast.makeText(requireContext(), "No folders found", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No folders found"), Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -657,14 +669,14 @@ public class LocalPhotosFragment extends Fragment {
         for (int i = 0; i < arr.length; i++) checked[i] = selected.contains(arr[i]);
 
         new AlertDialog.Builder(requireContext())
-                .setTitle("Choose Albums")
+                .setTitle(AndroidI18n.t("Choose Albums"))
                 .setMultiChoiceItems(arr, checked, (dialog, which, isChecked) -> {
                     if (which < 0 || which >= arr.length) return;
                     if (isChecked) selected.add(arr[which]); else selected.remove(arr[which]);
                 })
-                .setPositiveButton("Apply", (d, w) -> vm.setSelectedFolders(selected))
-                .setNeutralButton("Clear", (d, w) -> vm.setSelectedFolders(new LinkedHashSet<>()))
-                .setNegativeButton("Cancel", null)
+                .setPositiveButton(AndroidI18n.t("Apply"), (d, w) -> vm.setSelectedFolders(selected))
+                .setNeutralButton(AndroidI18n.t("Clear"), (d, w) -> vm.setSelectedFolders(new LinkedHashSet<>()))
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
                 .show();
     }
 
@@ -699,7 +711,7 @@ public class LocalPhotosFragment extends Fragment {
         syncQuickFilterButtons();
         for (String label : labels) {
             Chip c = new Chip(requireContext());
-            c.setText(label);
+            c.setText(AndroidI18n.t(label));
             c.setCheckable(false);
             activeFilterChips.addView(c);
         }
@@ -712,11 +724,11 @@ public class LocalPhotosFragment extends Fragment {
 
     private void showSelectionActionsMenu() {
         PopupMenu pm = new PopupMenu(requireContext(), btnActions);
-        pm.getMenu().add(Menu.NONE, 1, 1, "Sync");
-        pm.getMenu().add(Menu.NONE, 2, 2, "Add to Album");
-        pm.getMenu().add(Menu.NONE, 3, 3, "Select All");
-        pm.getMenu().add(Menu.NONE, 4, 4, "Deselect All");
-        pm.getMenu().add(Menu.NONE, 5, 5, "Delete");
+        pm.getMenu().add(Menu.NONE, 1, 1, AndroidI18n.t("Sync"));
+        pm.getMenu().add(Menu.NONE, 2, 2, AndroidI18n.t("Add to Album"));
+        pm.getMenu().add(Menu.NONE, 3, 3, AndroidI18n.t("Select All"));
+        pm.getMenu().add(Menu.NONE, 4, 4, AndroidI18n.t("Deselect All"));
+        pm.getMenu().add(Menu.NONE, 5, 5, AndroidI18n.t("Delete"));
         pm.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case 1:
@@ -744,11 +756,11 @@ public class LocalPhotosFragment extends Fragment {
     private void showAddToAlbumPicker() {
         Set<String> selected = vm.currentSelectedIds();
         if (selected.isEmpty()) {
-            Toast.makeText(requireContext(), "No selection", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selection"), Toast.LENGTH_SHORT).show();
             return;
         }
         if (availableFolders.isEmpty()) {
-            Toast.makeText(requireContext(), "No local albums available", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No local albums available"), Toast.LENGTH_SHORT).show();
             return;
         }
         LocalAlbumPickerDialogFragment dialog =
@@ -759,7 +771,7 @@ public class LocalPhotosFragment extends Fragment {
     private void addSelectedItemsToAlbum(@NonNull String targetPath) {
         Set<String> selected = vm.currentSelectedIds();
         if (selected.isEmpty()) {
-            Toast.makeText(requireContext(), "No selection", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selection"), Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -768,11 +780,11 @@ public class LocalPhotosFragment extends Fragment {
             if (selected.contains(item.localId)) picked.add(item);
         }
         if (picked.isEmpty()) {
-            Toast.makeText(requireContext(), "No selected items", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selected items"), Toast.LENGTH_SHORT).show();
             return;
         }
 
-        Toast.makeText(requireContext(), "Adding " + picked.size() + " item(s) to " + targetPath, Toast.LENGTH_SHORT).show();
+        Toast.makeText(requireContext(), String.format(java.util.Locale.getDefault(), AndroidI18n.t("Adding %d item(s) to %s"), picked.size(), targetPath), Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             LocalAlbumCopyHelper.Result result = LocalAlbumCopyHelper.copyItemsToFolder(
                     requireContext().getApplicationContext(),
@@ -780,10 +792,9 @@ public class LocalPhotosFragment extends Fragment {
                     targetPath
             );
             requireActivity().runOnUiThread(() -> {
-                String message = "Added to " + targetPath + ": "
-                        + result.copied + " copied, "
-                        + result.skipped + " skipped, "
-                        + result.failed + " failed";
+                String message = String.format(java.util.Locale.getDefault(),
+                        AndroidI18n.t("Added to %s: %d copied, %d skipped, %d failed"),
+                        targetPath, result.copied, result.skipped, result.failed);
                 Toast.makeText(requireContext(), message, Toast.LENGTH_LONG).show();
                 vm.exitSelectionMode();
                 vm.reload();
@@ -799,7 +810,7 @@ public class LocalPhotosFragment extends Fragment {
 
         Set<String> selected = vm.currentSelectedIds();
         if (selected.isEmpty()) {
-            Toast.makeText(requireContext(), "No selection", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selection"), Toast.LENGTH_SHORT).show();
             return;
         }
 
@@ -808,11 +819,11 @@ public class LocalPhotosFragment extends Fragment {
             if (selected.contains(it.localId)) picked.add(it);
         }
         if (picked.isEmpty()) {
-            Toast.makeText(requireContext(), "No selected items", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selected items"), Toast.LENGTH_SHORT).show();
             return;
         }
 
-        Toast.makeText(requireContext(), "Syncing " + picked.size() + " item(s)...", Toast.LENGTH_SHORT).show();
+        Toast.makeText(requireContext(), String.format(java.util.Locale.getDefault(), AndroidI18n.t("Syncing %d item(s)…"), picked.size()), Toast.LENGTH_SHORT).show();
         new Thread(() -> {
             int ok = 0;
             int fail = 0;
@@ -844,7 +855,7 @@ public class LocalPhotosFragment extends Fragment {
             int finalOk = ok;
             int finalFail = fail;
             requireActivity().runOnUiThread(() -> {
-                Toast.makeText(requireContext(), "Sync done: " + finalOk + " success, " + finalFail + " failed", Toast.LENGTH_LONG).show();
+                Toast.makeText(requireContext(), String.format(java.util.Locale.getDefault(), AndroidI18n.t("Sync done: %d success, %d failed"), finalOk, finalFail), Toast.LENGTH_LONG).show();
                 vm.exitSelectionMode();
                 vm.reload();
             });
@@ -854,7 +865,7 @@ public class LocalPhotosFragment extends Fragment {
     private void confirmDeleteSelected() {
         Set<String> selected = vm.currentSelectedIds();
         if (selected.isEmpty()) {
-            Toast.makeText(requireContext(), "No selection", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selection"), Toast.LENGTH_SHORT).show();
             return;
         }
         List<Uri> targets = new ArrayList<>();
@@ -862,15 +873,15 @@ public class LocalPhotosFragment extends Fragment {
             if (selected.contains(item.localId)) targets.add(Uri.parse(item.uri));
         }
         if (targets.isEmpty()) {
-            Toast.makeText(requireContext(), "No selected items", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("No selected items"), Toast.LENGTH_SHORT).show();
             return;
         }
 
         new AlertDialog.Builder(requireContext())
-                .setTitle("Delete Photos")
-                .setMessage("Delete " + targets.size() + " selected item(s)?")
-                .setPositiveButton("Delete", (d, w) -> deleteUris(targets))
-                .setNegativeButton("Cancel", null)
+                .setTitle(AndroidI18n.t("Delete Photos"))
+                .setMessage(String.format(java.util.Locale.getDefault(), AndroidI18n.t("Delete %d selected item(s)?"), targets.size()))
+                .setPositiveButton(AndroidI18n.t("Delete"), (d, w) -> deleteUris(targets))
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
                 .show();
     }
 
@@ -898,7 +909,7 @@ public class LocalPhotosFragment extends Fragment {
             }
             int finalOk = ok;
             requireActivity().runOnUiThread(() -> {
-                Toast.makeText(requireContext(), "Deleted " + finalOk + " item(s)", Toast.LENGTH_SHORT).show();
+                Toast.makeText(requireContext(), String.format(java.util.Locale.getDefault(), AndroidI18n.t("Deleted %d item(s)"), finalOk), Toast.LENGTH_SHORT).show();
                 vm.exitSelectionMode();
                 vm.reload();
             });
@@ -928,7 +939,7 @@ public class LocalPhotosFragment extends Fragment {
         empty.setVisibility(isEmpty ? View.VISIBLE : View.GONE);
         if (isEmpty) {
             String err = vm.error().getValue();
-            empty.setText((err == null || err.isEmpty()) ? "No photos" : err);
+            empty.setText((err == null || err.isEmpty()) ? AndroidI18n.t("No photos") : AndroidI18n.t(err));
         }
     }
 
@@ -974,7 +985,7 @@ public class LocalPhotosFragment extends Fragment {
 
     @NonNull
     private static String shortFolderLabel(@NonNull String fullPath) {
-        if (fullPath.isEmpty()) return "Folder";
+        if (fullPath.isEmpty()) return AndroidI18n.t("Folder");
         String p = fullPath.endsWith("/") ? fullPath.substring(0, fullPath.length() - 1) : fullPath;
         int idx = p.lastIndexOf('/');
         return idx >= 0 ? p.substring(idx + 1) : p;

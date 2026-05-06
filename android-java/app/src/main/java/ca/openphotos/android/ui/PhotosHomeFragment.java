@@ -2,7 +2,6 @@ package ca.openphotos.android.ui;
 
 import android.content.Context;
 import android.content.Intent;
-import android.content.SharedPreferences;
 import android.os.Bundle;
 import android.view.LayoutInflater;
 import android.view.MenuItem;
@@ -20,6 +19,7 @@ import androidx.recyclerview.widget.RecyclerView;
 
 import ca.openphotos.android.R;
 import ca.openphotos.android.core.AuthManager;
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.server.ServerPhotosService;
 import com.google.android.material.button.MaterialButton;
 import com.google.android.material.button.MaterialButtonToggleGroup;
@@ -37,15 +37,15 @@ import java.util.Set;
 
 /**
  * Photos tab home screen, modeled after the iOS Photos tab.
- * - Row 2 actions: Search, Sort, Grid/Timeline toggle, Select, More
+ * - Row 2 actions: Search, Sort, Grid/Timeline toggle, More
  * - Row 3 filters: Filter (stub), Album tree (stub), Favorite, Locked, Album chips
  * - Row 4 segments: All | Photos | Videos | Trash with counts
  * - Grid with pull-to-refresh and endless scroll
  */
 public class PhotosHomeFragment extends Fragment {
     private static final String PREFS = "photos.ui";
-    private static final String KEY_GRID_SPAN = "grid.span";
     private static final String KEY_VIEW_MODE = "view.mode"; // grid|timeline
+    private static final int CLOUD_COLUMN_COUNT = 4;
 
     private MediaGridAdapter adapter; // grid adapter
     private TimelineAdapter timelineAdapter; // timeline adapter
@@ -99,7 +99,7 @@ public class PhotosHomeFragment extends Fragment {
     private boolean searchMode = false;
     private android.widget.EditText searchField;
     private View btnSearchSubmit;
-    private MaterialButton btnSearch, btnSort, btnSelect, btnMore;
+    private MaterialButton btnSearch, btnSort, btnMore;
     private com.google.android.material.button.MaterialButtonToggleGroup toggleView;
     private View spacerActions;
     private MaterialButton btnSegmentsReload;
@@ -110,6 +110,7 @@ public class PhotosHomeFragment extends Fragment {
     private static final int ALBUM_PICK_FILTER = 1;
     private static final int ALBUM_PICK_BULK_ADD = 2;
     private int pendingAlbumPickMode = ALBUM_PICK_FILTER;
+    private static final int MENU_MORE_SELECT = 1000;
     private static final int MENU_MORE_SLIDESHOW = 1001;
     private static final int MENU_MORE_SHARING = 1002;
     private static final int MENU_MORE_USERS_GROUPS = 1003;
@@ -139,7 +140,6 @@ public class PhotosHomeFragment extends Fragment {
         // Row 2: actions
         btnSearch = root.findViewById(R.id.btn_search);
         btnSort = root.findViewById(R.id.btn_sort);
-        btnSelect = root.findViewById(R.id.btn_select);
         btnMore = root.findViewById(R.id.btn_more);
         toggleView = root.findViewById(R.id.toggle_view_mode);
         searchField = root.findViewById(R.id.search_field);
@@ -175,8 +175,8 @@ public class PhotosHomeFragment extends Fragment {
         });
         btnSort.setOnClickListener(v -> {
             android.widget.PopupMenu pm = new android.widget.PopupMenu(requireContext(), v);
-            pm.getMenu().add(0,1,0, "Newest first");
-            pm.getMenu().add(0,2,1, "Oldest first");
+            pm.getMenu().add(0,1,0, AndroidI18n.t("Newest First"));
+            pm.getMenu().add(0,2,1, AndroidI18n.t("Oldest First"));
             pm.setOnMenuItemClickListener(item -> { sortAscending = (item.getItemId()==2); refresh(true); return true; });
             pm.show();
         });
@@ -188,12 +188,9 @@ public class PhotosHomeFragment extends Fragment {
             configureRecyclerForMode();
             refresh(true);
         });
-        btnSelect.setOnClickListener(v -> setSelectionMode(!selectionMode, true));
         btnSelectAll.setOnClickListener(v -> selectAllCurrent());
         btnDeselectAll.setOnClickListener(v -> clearSelection());
         btnSelectionActions.setOnClickListener(this::showSelectionActionsMenu);
-        // Ensure initial text state
-        updateSelectButtonText();
         updateSearchButtons();
         updateSelectionBarUi();
 
@@ -265,12 +262,12 @@ public class PhotosHomeFragment extends Fragment {
                         // Post results back to UI thread
                         requireActivity().runOnUiThread(() -> {
                             if (ok) {
-                                android.widget.Toast.makeText(requireContext(), "Unlocked", android.widget.Toast.LENGTH_SHORT).show();
+                                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Unlocked"), android.widget.Toast.LENGTH_SHORT).show();
                                 // Force a full refresh so adapter can decrypt visible thumbnails
                                 try { android.util.Log.i("OpenPhotos","[UI] Unlock ok, refreshing to decrypt thumbs"); } catch (Exception ignored) {}
                                 refresh(true);
                             } else {
-                                android.widget.Toast.makeText(requireContext(), "Unlock failed", android.widget.Toast.LENGTH_LONG).show();
+                                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Unlock failed"), android.widget.Toast.LENGTH_LONG).show();
                             }
                         });
                     }).start();
@@ -344,7 +341,7 @@ public class PhotosHomeFragment extends Fragment {
         // Years navigation wiring
         btnYears.setOnClickListener(v -> {
             if (years.isEmpty()) {
-                android.widget.Toast.makeText(requireContext(), "Loading years…", android.widget.Toast.LENGTH_SHORT).show();
+                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Loading years…"), android.widget.Toast.LENGTH_SHORT).show();
                 requestYearBucketsAsync();
                 return;
             }
@@ -405,7 +402,6 @@ public class PhotosHomeFragment extends Fragment {
             // Hide other actions, show field + controls, change icon to back
             btnSort.setVisibility(View.GONE);
             toggleView.setVisibility(View.GONE);
-            btnSelect.setVisibility(View.GONE);
             btnMore.setVisibility(View.GONE);
             if (spacerActions != null) spacerActions.setVisibility(View.GONE);
             searchField.setVisibility(View.VISIBLE);
@@ -419,7 +415,6 @@ public class PhotosHomeFragment extends Fragment {
             hideKeyboard(searchField);
             btnSort.setVisibility(View.VISIBLE);
             toggleView.setVisibility(View.VISIBLE);
-            btnSelect.setVisibility(View.VISIBLE);
             btnMore.setVisibility(View.VISIBLE);
             if (spacerActions != null) spacerActions.setVisibility(View.VISIBLE);
             searchField.setVisibility(View.GONE);
@@ -449,7 +444,7 @@ public class PhotosHomeFragment extends Fragment {
 
     private void submitSearch() {
         if (!searchMode) return; String q = searchField.getText()!=null? searchField.getText().toString():"";
-        if (q.length() < 2) { android.widget.Toast.makeText(requireContext(), "Enter at least 2 characters", android.widget.Toast.LENGTH_SHORT).show(); return; }
+        if (q.length() < 2) { android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Enter at least 2 characters"), android.widget.Toast.LENGTH_SHORT).show(); return; }
         // Reset paging and lists; show results in grid
         timelineMode = false; page = 1; hasMore = true; loading = false; all.clear(); adapter.submitList(new ArrayList<>(all));
         performSearch(q, page, false);
@@ -544,7 +539,6 @@ public class PhotosHomeFragment extends Fragment {
         if (clearSelection) selectedIds.clear();
         if (adapter != null) adapter.setSelectionMode(selectionMode, selectedIds);
         if (timelineAdapter != null) timelineAdapter.setSelectionMode(selectionMode, selectedIds);
-        updateSelectButtonText();
         updateSelectionBarUi();
         if (selectionMode) applyHeaderVisibility(true, true);
     }
@@ -655,15 +649,15 @@ public class PhotosHomeFragment extends Fragment {
 
     private void confirmEmptyTrash() {
         if (trashCount <= 0) {
-            android.widget.Toast.makeText(requireContext(), "Trash is already empty", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Trash is already empty"), android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
-        String msg = "This will permanently delete " + trashCount + " item" + (trashCount == 1 ? "" : "s") + " from Trash.";
+        String msg = String.format(java.util.Locale.getDefault(), AndroidI18n.t("This will permanently delete %d item(s) from Trash."), trashCount);
         new android.app.AlertDialog.Builder(requireContext())
-                .setTitle("Empty Trash?")
+                .setTitle(AndroidI18n.t("Empty Trash?"))
                 .setMessage(msg)
-                .setNegativeButton("Cancel", null)
-                .setPositiveButton("Empty", (d, w) -> runEmptyTrash())
+                .setNegativeButton(AndroidI18n.t("Cancel"), null)
+                .setPositiveButton(AndroidI18n.t("Empty"), (d, w) -> runEmptyTrash())
                 .show();
     }
 
@@ -674,7 +668,7 @@ public class PhotosHomeFragment extends Fragment {
                 JSONObject resp = svc.purgeAllTrash();
                 int purged = resp.optInt("purged", 0);
                 requireActivity().runOnUiThread(() -> {
-                    android.widget.Toast.makeText(requireContext(), "Trash cleared (" + purged + ")", android.widget.Toast.LENGTH_SHORT).show();
+                    android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Trash cleared") + " (" + purged + ")", android.widget.Toast.LENGTH_SHORT).show();
                     View v = getView();
                     if (v != null) {
                         requestCountsAsync((Chip) v.findViewById(R.id.chip_all), (Chip) v.findViewById(R.id.chip_photos), (Chip) v.findViewById(R.id.chip_videos));
@@ -683,7 +677,7 @@ public class PhotosHomeFragment extends Fragment {
                 });
             } catch (Exception e) {
                 requireActivity().runOnUiThread(() ->
-                        android.widget.Toast.makeText(requireContext(), "Failed to empty trash", android.widget.Toast.LENGTH_LONG).show()
+                        android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Failed to empty trash"), android.widget.Toast.LENGTH_LONG).show()
                 );
             }
         }).start();
@@ -700,10 +694,10 @@ public class PhotosHomeFragment extends Fragment {
                 int videosCount = counts.optInt("videos", 0);
                 int trash = counts.optInt("trash", 0);
                 requireActivity().runOnUiThread(() -> {
-                    chipAll.setText("All " + allCount);
-                    chipPhotos.setText("Photos " + photosCount);
-                    chipVideos.setText("Videos " + videosCount);
-                    if (chipTrash != null) chipTrash.setText("Trash " + trash);
+                    chipAll.setText(AndroidI18n.t("All") + " " + allCount);
+                    chipPhotos.setText(AndroidI18n.t("Photos") + " " + photosCount);
+                    chipVideos.setText(AndroidI18n.t("Videos") + " " + videosCount);
+                    if (chipTrash != null) chipTrash.setText(AndroidI18n.t("Trash") + " " + trash);
                     trashCount = trash;
                     updateTrashUi();
                 });
@@ -779,7 +773,7 @@ public class PhotosHomeFragment extends Fragment {
                             }
                         } catch (Exception ignored) {}
                     }
-                    empty.setText(msg!=null&&msg.contains("HTTP")? ("Server error: "+msg) : "Load failed — Pull to retry");
+                    empty.setText(msg!=null&&msg.contains("HTTP")? (AndroidI18n.t("Server error") + ": "+msg) : AndroidI18n.t("Load failed — Pull to retry"));
                     empty.setVisibility(View.VISIBLE);
                 });
             } finally { loading = false; }
@@ -797,9 +791,6 @@ public class PhotosHomeFragment extends Fragment {
         }
     }
 
-    private int readGridSpan(Context ctx) { SharedPreferences sp = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE); return sp.getInt(KEY_GRID_SPAN, 3); }
-    private void saveGridSpan(Context ctx, int span) { ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putInt(KEY_GRID_SPAN, span).apply(); }
-
     private View getImageForPosition(RecyclerView rv, int position) {
         RecyclerView.ViewHolder vh = rv.findViewHolderForAdapterPosition(position);
         if (vh == null) return null; return vh.itemView.findViewById(R.id.image);
@@ -814,20 +805,22 @@ public class PhotosHomeFragment extends Fragment {
 
     private void showMoreMenu(View anchor) {
         android.widget.PopupMenu pm = new android.widget.PopupMenu(requireContext(), anchor);
-        pm.getMenu().add(0, MENU_MORE_SLIDESHOW, 0, "Slideshow");
+        pm.getMenu().add(0, MENU_MORE_SELECT, 0, AndroidI18n.t(selectionMode ? "Cancel" : "Select"));
+        pm.getMenu().add(0, MENU_MORE_SLIDESHOW, 1, AndroidI18n.t("Slideshow"));
         if (isEnterpriseEdition) {
-            pm.getMenu().add(0, MENU_MORE_SHARING, 1, "Sharing");
-            pm.getMenu().add(0, MENU_MORE_USERS_GROUPS, 2, "Users & Groups");
+            pm.getMenu().add(0, MENU_MORE_SHARING, 2, AndroidI18n.t("Sharing"));
+            pm.getMenu().add(0, MENU_MORE_USERS_GROUPS, 3, AndroidI18n.t("Users & Groups"));
         }
-        pm.getMenu().add(0, MENU_MORE_MANAGE_FACES, 3, "Manage Faces");
-        pm.getMenu().add(0, MENU_MORE_SIMILAR, 4, "Similar Media");
-        pm.getMenu().add(0, MENU_MORE_SIGN_OUT, 5, "Sign out");
+        pm.getMenu().add(0, MENU_MORE_MANAGE_FACES, 4, AndroidI18n.t("Manage Faces"));
+        pm.getMenu().add(0, MENU_MORE_SIMILAR, 5, AndroidI18n.t("Similar Media"));
+        pm.getMenu().add(0, MENU_MORE_SIGN_OUT, 6, AndroidI18n.t("Sign out"));
         pm.setOnMenuItemClickListener(this::handleMoreMenuClick);
         pm.show();
     }
 
     private boolean handleMoreMenuClick(MenuItem item) {
         int id = item.getItemId();
+        if (id == MENU_MORE_SELECT) { setSelectionMode(!selectionMode, true); return true; }
         if (id == MENU_MORE_SLIDESHOW) { launchSlideshow(); return true; }
         if (id == MENU_MORE_SHARING) {
             try {
@@ -835,7 +828,7 @@ public class PhotosHomeFragment extends Fragment {
                 dlg.setStyle(DialogFragment.STYLE_NORMAL, R.style.AppTheme_FullscreenDialog);
                 dlg.show(getParentFragmentManager(), "sharing_hub");
             } catch (Exception e) {
-                android.widget.Toast.makeText(requireContext(), "Failed to open Sharing", android.widget.Toast.LENGTH_SHORT).show();
+                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Failed to open Sharing"), android.widget.Toast.LENGTH_SHORT).show();
             }
             return true;
         }
@@ -845,7 +838,7 @@ public class PhotosHomeFragment extends Fragment {
                 dlg.setStyle(DialogFragment.STYLE_NORMAL, R.style.AppTheme_FullscreenDialog);
                 dlg.show(getParentFragmentManager(), "users_groups_hub");
             } catch (Exception e) {
-                android.widget.Toast.makeText(requireContext(), "Failed to open Users & Groups", android.widget.Toast.LENGTH_SHORT).show();
+                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Failed to open Users & Groups"), android.widget.Toast.LENGTH_SHORT).show();
             }
             return true;
         }
@@ -862,14 +855,14 @@ public class PhotosHomeFragment extends Fragment {
         try {
             AuthManager.get(requireContext()).logoutPreservingLoginEmail();
             setSelectionMode(false, true);
-            android.widget.Toast.makeText(requireContext(), "Signed out", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Signed out"), android.widget.Toast.LENGTH_SHORT).show();
             androidx.navigation.fragment.NavHostFragment.findNavController(this).navigate(R.id.serverLoginFragment);
         } catch (Exception ignored) {}
     }
 
     private void launchSlideshow() {
         if (all.isEmpty() && allPhotosJson.isEmpty()) {
-            android.widget.Toast.makeText(requireContext(), "No photos to display", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("No photos to display"), android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
         ArrayList<String> assetIds = new ArrayList<>();
@@ -885,7 +878,7 @@ public class PhotosHomeFragment extends Fragment {
             }
         }
         if (assetIds.isEmpty()) {
-            android.widget.Toast.makeText(requireContext(), "No photos to display", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("No photos to display"), android.widget.Toast.LENGTH_SHORT).show();
             return;
         }
         Intent slideshowIntent = new Intent(requireContext(), SlideshowActivity.class);
@@ -900,7 +893,7 @@ public class PhotosHomeFragment extends Fragment {
             dlg.setStyle(DialogFragment.STYLE_NORMAL, R.style.AppTheme_FullscreenDialog);
             dlg.show(getParentFragmentManager(), "manage_faces_hub");
         } catch (Exception e) {
-            android.widget.Toast.makeText(requireContext(), "Failed to open Manage Faces", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Failed to open Manage Faces"), android.widget.Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -910,7 +903,7 @@ public class PhotosHomeFragment extends Fragment {
             dlg.setStyle(DialogFragment.STYLE_NORMAL, R.style.AppTheme_FullscreenDialog);
             dlg.show(getParentFragmentManager(), "similar_media_hub");
         } catch (Exception e) {
-            android.widget.Toast.makeText(requireContext(), "Failed to open Similar Media", android.widget.Toast.LENGTH_SHORT).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Failed to open Similar Media"), android.widget.Toast.LENGTH_SHORT).show();
         }
     }
 
@@ -918,15 +911,15 @@ public class PhotosHomeFragment extends Fragment {
         if (selectedIds.isEmpty()) return;
         android.widget.PopupMenu pm = new android.widget.PopupMenu(requireContext(), anchor);
         if ("trash".equals(mediaFilter)) {
-            pm.getMenu().add(0, MENU_ACTION_RESTORE, 0, "Restore");
-            pm.getMenu().add(0, MENU_ACTION_PURGE, 1, "Delete Permanently...");
+            pm.getMenu().add(0, MENU_ACTION_RESTORE, 0, AndroidI18n.t("Restore"));
+            pm.getMenu().add(0, MENU_ACTION_PURGE, 1, AndroidI18n.t("Delete Permanently..."));
         } else {
-            pm.getMenu().add(0, MENU_ACTION_ADD_TO_ALBUM, 0, "Add to Album");
-            pm.getMenu().add(0, MENU_ACTION_SHARE, 1, "Share");
-            pm.getMenu().add(0, MENU_ACTION_LOCK, 2, "Lock");
-            pm.getMenu().add(0, MENU_ACTION_FAVORITE, 3, "Add to Favorites");
-            pm.getMenu().add(0, MENU_ACTION_DELETE, 4, "Delete");
-            pm.getMenu().add(0, MENU_ACTION_CLEAR_RATING, 5, "Clear Rating");
+            pm.getMenu().add(0, MENU_ACTION_ADD_TO_ALBUM, 0, AndroidI18n.t("Add to Album"));
+            pm.getMenu().add(0, MENU_ACTION_SHARE, 1, AndroidI18n.t("Share"));
+            pm.getMenu().add(0, MENU_ACTION_LOCK, 2, AndroidI18n.t("Lock"));
+            pm.getMenu().add(0, MENU_ACTION_FAVORITE, 3, AndroidI18n.t("Add to Favorites"));
+            pm.getMenu().add(0, MENU_ACTION_DELETE, 4, AndroidI18n.t("Delete"));
+            pm.getMenu().add(0, MENU_ACTION_CLEAR_RATING, 5, AndroidI18n.t("Clear Rating"));
         }
         pm.setOnMenuItemClickListener(this::handleSelectionActionClick);
         pm.show();
@@ -1096,7 +1089,7 @@ public class PhotosHomeFragment extends Fragment {
 
     private void runBulkShare() {
         if (!isEnterpriseEdition) {
-            android.widget.Toast.makeText(requireContext(), "Sharing requires Enterprise server", android.widget.Toast.LENGTH_LONG).show();
+            android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Sharing requires Enterprise server"), android.widget.Toast.LENGTH_LONG).show();
             return;
         }
         List<String> assetIds = selectedAssetIds();
@@ -1110,7 +1103,7 @@ public class PhotosHomeFragment extends Fragment {
             return;
         }
 
-        android.widget.Toast.makeText(requireContext(), "Preparing selection for sharing…", android.widget.Toast.LENGTH_SHORT).show();
+        android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Preparing selection for sharing…"), android.widget.Toast.LENGTH_SHORT).show();
         String firstAssetForShare = firstSelectedAssetId;
         new Thread(() -> {
             Integer tempAlbumId = null;
@@ -1174,10 +1167,6 @@ public class PhotosHomeFragment extends Fragment {
         }).start();
     }
 
-    private void updateSelectButtonText() {
-        View v = getView(); if (v == null) return; MaterialButton b = v.findViewById(R.id.btn_select); if (b != null) b.setText(selectionMode?"Cancel":"Select");
-    }
-
     /** Populate horizontally scrollable album chips. */
     private void populateAlbumChips(ChipGroup group) {
         group.removeAllViews();
@@ -1224,8 +1213,7 @@ public class PhotosHomeFragment extends Fragment {
         if (grid != null) grid.setAdapter(null);
         if (grid == null) return;
         if (!timelineMode) {
-            int span = readGridSpan(requireContext());
-            layoutManager = new GridLayoutManager(requireContext(), span);
+            layoutManager = new GridLayoutManager(requireContext(), CLOUD_COLUMN_COUNT);
             grid.setLayoutManager(layoutManager);
             if (adapter == null) adapter = new MediaGridAdapter();
             adapter.setShowLabels(false);
@@ -1279,9 +1267,7 @@ public class PhotosHomeFragment extends Fragment {
             if (yearRail != null) yearRail.setVisibility(View.GONE);
         } else {
             // Timeline
-            int span = computeSpanForWidth(grid.getWidth());
-            if (span <= 0) span = 4;
-            tlLayoutManager = new GridLayoutManager(requireContext(), span);
+            tlLayoutManager = new GridLayoutManager(requireContext(), CLOUD_COLUMN_COUNT);
             tlLayoutManager.setSpanSizeLookup(new GridLayoutManager.SpanSizeLookup() {
                 @Override public int getSpanSize(int position) {
                     if (position < 0 || position >= timelineCells.size()) return 1;
@@ -1328,13 +1314,6 @@ public class PhotosHomeFragment extends Fragment {
             });
             grid.setAdapter(timelineAdapter);
 
-            // Adaptive span count on layout changes
-            grid.getViewTreeObserver().addOnGlobalLayoutListener(() -> {
-                if (tlLayoutManager == null) return;
-                int newSpan = computeSpanForWidth(grid.getWidth()); if (newSpan <= 0) newSpan = 4;
-                if (tlLayoutManager.getSpanCount() != newSpan) tlLayoutManager.setSpanCount(newSpan);
-            });
-
             // Years UI
             if (isTablet()) {
                 renderYearRail();
@@ -1349,13 +1328,6 @@ public class PhotosHomeFragment extends Fragment {
         // Ensure list top inset reflects current header state after mode switch
         setRecyclerTopPadding(headersShown ? headerHeight : 0);
         updateSelectionBarUi();
-    }
-
-    private int computeSpanForWidth(int widthPx) {
-        if (widthPx <= 0) return 4;
-        float min = getResources().getDisplayMetrics().density * 70f; // 70dp min tile size
-        int span = Math.max(1, (int) Math.floor(widthPx / (min + (getResources().getDisplayMetrics().density*2)))) ; // include 2dp gap approx
-        return Math.min(Math.max(span, 2), 8);
     }
 
     private java.util.List<TimelineAdapter.Cell> buildTimelineCells(java.util.List<org.json.JSONObject> photos, boolean newestFirst) {
@@ -1539,12 +1511,12 @@ public class PhotosHomeFragment extends Fragment {
 
         // Type
         if (filters.screenshots) {
-            Chip t = new Chip(requireContext()); t.setText("Screenshots"); t.setCloseIconVisible(true);
+            Chip t = new Chip(requireContext()); t.setText(AndroidI18n.t("Screenshots")); t.setCloseIconVisible(true);
             t.setOnCloseIconClickListener(v -> { filters.screenshots = false; updateActiveFilterRow(); requestCountsAsync((Chip) root.findViewById(R.id.chip_all), (Chip) root.findViewById(R.id.chip_photos), (Chip) root.findViewById(R.id.chip_videos)); refresh(true); });
             chips.addView(t); chipsCount++;
         }
         if (filters.livePhotos) {
-            Chip t = new Chip(requireContext()); t.setText("Live Photos"); t.setCloseIconVisible(true);
+            Chip t = new Chip(requireContext()); t.setText(AndroidI18n.t("Live Photos")); t.setCloseIconVisible(true);
             t.setOnCloseIconClickListener(v -> { filters.livePhotos = false; updateActiveFilterRow(); requestCountsAsync((Chip) root.findViewById(R.id.chip_all), (Chip) root.findViewById(R.id.chip_photos), (Chip) root.findViewById(R.id.chip_videos)); refresh(true); });
             chips.addView(t); chipsCount++;
         }

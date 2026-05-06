@@ -16,6 +16,7 @@ import androidx.navigation.fragment.NavHostFragment;
 
 import ca.openphotos.android.R;
 import ca.openphotos.android.core.AuthManager;
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.prefs.SyncPreferences;
 import ca.openphotos.android.sync.SyncService;
 import ca.openphotos.android.util.BackgroundRestrictionChecker;
@@ -27,7 +28,9 @@ import com.google.android.material.button.MaterialButtonToggleGroup;
 import com.google.android.material.switchmaterial.SwitchMaterial;
 import com.google.android.material.textfield.TextInputEditText;
 
+import java.text.DateFormat;
 import java.util.Date;
+import java.util.Locale;
 
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
@@ -161,19 +164,19 @@ public class SyncFragment extends Fragment {
 
         root.findViewById(R.id.btn_sync_test).setOnClickListener(v -> {
             AuthManager.get(requireContext()).refreshNetworkRouting();
-            Toast.makeText(requireContext(), "Refreshing network route", Toast.LENGTH_SHORT).show();
+            Toast.makeText(requireContext(), AndroidI18n.t("Refreshing network route"), Toast.LENGTH_SHORT).show();
             refreshAuthState();
         });
 
         btnRestrictionBatterySettings.setOnClickListener(v -> {
             if (!BatteryOptimizationHelper.openBatteryOptimizationSettings(this)) {
-                Toast.makeText(requireContext(), "Unable to open battery settings", Toast.LENGTH_SHORT).show();
+                Toast.makeText(requireContext(), AndroidI18n.t("Unable to open battery settings"), Toast.LENGTH_SHORT).show();
             }
         });
 
         btnRestrictionAppInfo.setOnClickListener(v -> {
             if (!BatteryOptimizationHelper.openAppDetails(this)) {
-                Toast.makeText(requireContext(), "Unable to open app info", Toast.LENGTH_SHORT).show();
+                Toast.makeText(requireContext(), AndroidI18n.t("Unable to open app info"), Toast.LENGTH_SHORT).show();
             }
         });
 
@@ -184,7 +187,7 @@ public class SyncFragment extends Fragment {
             if (auth.isAuthenticated()) {
                 auth.logoutPreservingLoginEmail();
                 refreshAuthState();
-                Toast.makeText(requireContext(), "Logged out", Toast.LENGTH_SHORT).show();
+                Toast.makeText(requireContext(), AndroidI18n.t("Logged out"), Toast.LENGTH_SHORT).show();
                 try {
                     NavHostFragment.findNavController(this).navigate(R.id.serverLoginFragment);
                 } catch (Exception ignored) {
@@ -211,7 +214,7 @@ public class SyncFragment extends Fragment {
                 new Thread(() -> {
                     boolean stopped = SyncService.get(requireContext()).stopCurrentSync();
                     requireActivity().runOnUiThread(() -> {
-                        Toast.makeText(requireContext(), stopped ? "Stopping sync" : "Nothing to stop", Toast.LENGTH_SHORT).show();
+                        Toast.makeText(requireContext(), AndroidI18n.t(stopped ? "Stopping sync" : "Nothing to stop"), Toast.LENGTH_SHORT).show();
                         refreshStatsSoon();
                         refreshStats();
                     });
@@ -229,15 +232,15 @@ public class SyncFragment extends Fragment {
 
         btnResync.setOnClickListener(v ->
                 new androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                        .setTitle("ReSync Entire Library?")
-                        .setMessage("This marks all local items as pending and starts syncing immediately.")
-                        .setNegativeButton("Cancel", null)
-                        .setPositiveButton("ReSync", (d, w) -> {
+                        .setTitle(AndroidI18n.t("ReSync Entire Library?"))
+                        .setMessage(AndroidI18n.t("This marks all local items as pending and starts syncing immediately."))
+                        .setNegativeButton(AndroidI18n.t("Cancel"), null)
+                        .setPositiveButton(AndroidI18n.t("ReSync"), (d, w) -> {
                             new Thread(() -> {
                                 int n = SyncService.get(requireContext()).resetAllForResync();
                                 SyncService.get(requireContext()).syncNow(false, true);
                                 requireActivity().runOnUiThread(() -> {
-                                    Toast.makeText(requireContext(), "Marked " + n + " item(s) as pending", Toast.LENGTH_SHORT).show();
+                                    Toast.makeText(requireContext(), AndroidI18n.t("Marked") + " " + n + " " + AndroidI18n.t("item(s) as pending"), Toast.LENGTH_SHORT).show();
                                     refreshStatsSoon();
                                     refreshStats();
                                 });
@@ -247,15 +250,15 @@ public class SyncFragment extends Fragment {
 
         btnRetry.setOnClickListener(v ->
                 new androidx.appcompat.app.AlertDialog.Builder(requireContext())
-                        .setTitle("Retry Stuck/Failed?")
-                        .setMessage("Requeues failed and background-queued items, then starts sync.")
-                        .setNegativeButton("Cancel", null)
-                        .setPositiveButton("Retry", (d, w) -> {
+                        .setTitle(AndroidI18n.t("Retry Stuck/Failed?"))
+                        .setMessage(AndroidI18n.t("Requeues failed and background-queued items, then starts sync."))
+                        .setNegativeButton(AndroidI18n.t("Cancel"), null)
+                        .setPositiveButton(AndroidI18n.t("Retry"), (d, w) -> {
                             new Thread(() -> {
                                 int n = SyncService.get(requireContext()).retryStuckAndFailed();
                                 SyncService.get(requireContext()).syncNow(false, true);
                                 requireActivity().runOnUiThread(() -> {
-                                    Toast.makeText(requireContext(), "Requeued " + n + " item(s)", Toast.LENGTH_SHORT).show();
+                                    Toast.makeText(requireContext(), AndroidI18n.t("Requeued") + " " + n + " " + AndroidI18n.t("item(s)"), Toast.LENGTH_SHORT).show();
                                     refreshStatsSoon();
                                     refreshStats();
                                 });
@@ -298,7 +301,7 @@ public class SyncFragment extends Fragment {
         etServerUrl.setEnabled(false);
         if (tvServerRoute != null) {
             AuthManager auth = AuthManager.get(requireContext());
-            tvServerRoute.setText(auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
+            setLocalizedText(tvServerRoute, auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
                     ? "Using Local Network"
                     : (auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.PUBLIC ? "Using External Network" : "Not Configured"));
         }
@@ -335,14 +338,14 @@ public class SyncFragment extends Fragment {
 
     private void refreshBackgroundRestrictionState() {
         BackgroundRestrictionChecker.Result result = BackgroundRestrictionChecker.evaluate(requireContext());
-        tvRestrictionStatus.setText(result.title);
-        tvRestrictionSummary.setText(result.summary);
-        tvRestrictionDetails.setText(result.details);
+        setDynamicText(tvRestrictionStatus, localizeBackgroundRestrictionText(result.title));
+        setDynamicText(tvRestrictionSummary, localizeBackgroundRestrictionText(result.summary));
+        setDynamicText(tvRestrictionDetails, localizeDetailBlock(result.details));
 
         boolean hasVendorHint = result.vendorHint != null && !result.vendorHint.trim().isEmpty();
         tvRestrictionVendorHint.setVisibility(hasVendorHint ? View.VISIBLE : View.GONE);
         if (hasVendorHint) {
-            tvRestrictionVendorHint.setText(result.vendorHint);
+            setDynamicText(tvRestrictionVendorHint, localizeBackgroundRestrictionText(result.vendorHint));
         }
 
         int statusColor;
@@ -365,16 +368,105 @@ public class SyncFragment extends Fragment {
         cardBackgroundRestrictions.setStrokeColor(strokeColor);
     }
 
+    @NonNull
+    private String localizeDetailBlock(@Nullable String details) {
+        if (details == null || details.isEmpty()) return "";
+        String[] lines = details.split("\\n", -1);
+        StringBuilder out = new StringBuilder();
+        for (int i = 0; i < lines.length; i++) {
+            if (i > 0) out.append('\n');
+            String line = lines[i];
+            String prefix = "";
+            String source = line;
+            if (line.startsWith("• ")) {
+                prefix = "• ";
+                source = line.substring(2);
+            }
+            out.append(prefix).append(localizeBackgroundRestrictionText(source));
+        }
+        return out.toString();
+    }
+
+    @NonNull
+    private String localizeBackgroundRestrictionText(@Nullable String source) {
+        if (source == null || source.isEmpty()) return "";
+        String translated = AndroidI18n.t(source);
+        String locale = AndroidI18n.currentMessageLocale();
+        if (!translated.equals(source) || "en".equals(locale)) {
+            return translated;
+        }
+
+        String batterySuffix = ", open Battery settings and set this app to Unrestricted for reliable background sync.";
+        if (source.startsWith("On ") && source.endsWith(batterySuffix)) {
+            String vendor = source.substring(3, source.length() - batterySuffix.length());
+            if ("fr".equals(locale)) return "Sur " + vendor + ", ouvrez les paramètres de batterie et définissez cette app sur Sans restriction pour une synchronisation fiable en arrière-plan.";
+            if ("es".equals(locale)) return "En " + vendor + ", abre los ajustes de batería y configura esta app como Sin restricciones para una sincronización en segundo plano fiable.";
+            return "在 " + vendor + " 上，打开电池设置，并将此应用设为不受限制，以确保后台同步可靠。";
+        }
+
+        String launchSuffix = ", also check Auto-launch and battery manager settings if background sync still stops.";
+        if (source.startsWith("On ") && source.endsWith(launchSuffix)) {
+            String vendor = source.substring(3, source.length() - launchSuffix.length());
+            if ("fr".equals(locale)) return "Sur " + vendor + ", vérifiez aussi les réglages de lancement automatique et de gestion de la batterie si la synchronisation en arrière-plan s’arrête encore.";
+            if ("es".equals(locale)) return "En " + vendor + ", revisa también los ajustes de inicio automático y gestor de batería si la sincronización en segundo plano sigue deteniéndose.";
+            return "在 " + vendor + " 上，如果后台同步仍会停止，请同时检查自启动和电池管理设置。";
+        }
+
+        String activitySuffix = ", confirm background activity and battery protection settings allow this app to stay active.";
+        if (source.startsWith("On ") && source.endsWith(activitySuffix)) {
+            String vendor = source.substring(3, source.length() - activitySuffix.length());
+            if ("fr".equals(locale)) return "Sur " + vendor + ", vérifiez que les réglages d’activité en arrière-plan et de protection de la batterie autorisent cette app à rester active.";
+            if ("es".equals(locale)) return "En " + vendor + ", confirma que los ajustes de actividad en segundo plano y protección de batería permiten que esta app siga activa.";
+            return "在 " + vendor + " 上，请确认后台活动和电池保护设置允许此应用保持运行。";
+        }
+
+        String managementSuffix = ", verify launch management and battery settings allow background activity.";
+        if (source.startsWith("On ") && source.endsWith(managementSuffix)) {
+            String vendor = source.substring(3, source.length() - managementSuffix.length());
+            if ("fr".equals(locale)) return "Sur " + vendor + ", vérifiez que la gestion du lancement et les réglages de batterie autorisent l’activité en arrière-plan.";
+            if ("es".equals(locale)) return "En " + vendor + ", verifica que la gestión de inicio y los ajustes de batería permitan la actividad en segundo plano.";
+            return "在 " + vendor + " 上，请确认启动管理和电池设置允许后台活动。";
+        }
+
+        String devicesSuffix = " devices may apply extra background limits outside standard Android APIs.";
+        if (source.endsWith(devicesSuffix)) {
+            String vendor = source.substring(0, source.length() - devicesSuffix.length());
+            if ("fr".equals(locale)) return "Les appareils " + vendor + " peuvent appliquer des limites supplémentaires en arrière-plan en dehors des API Android standard.";
+            if ("es".equals(locale)) return "Los dispositivos " + vendor + " pueden aplicar límites adicionales en segundo plano fuera de las API estándar de Android.";
+            return vendor + " 设备可能会在标准 Android API 之外施加额外的后台限制。";
+        }
+
+        String oftenSuffix = " devices often apply extra background limits beyond standard Android settings.";
+        if (source.endsWith(oftenSuffix)) {
+            String vendor = source.substring(0, source.length() - oftenSuffix.length());
+            if ("fr".equals(locale)) return "Les appareils " + vendor + " appliquent souvent des limites supplémentaires en arrière-plan au-delà des réglages Android standard.";
+            if ("es".equals(locale)) return "Los dispositivos " + vendor + " suelen aplicar límites adicionales en segundo plano más allá de los ajustes estándar de Android.";
+            return vendor + " 设备经常会在标准 Android 设置之外施加额外的后台限制。";
+        }
+
+        return source;
+    }
+
+    private void setLocalizedText(@NonNull TextView view, @NonNull String source) {
+        view.setTag(R.id.tag_i18n_text_source, source);
+        view.setText(AndroidI18n.t(source));
+    }
+
+    private void setDynamicText(@NonNull TextView view, @NonNull String text) {
+        view.setTag(R.id.tag_i18n_text_source, text);
+        view.setText(text);
+    }
+
     private void refreshAuthState() {
         AuthManager auth = AuthManager.get(requireContext());
         boolean authed = auth.isAuthenticated();
-        tvAccountStatus.setText(authed ? "Logged in" : "Logged out");
+        setLocalizedText(tvAccountStatus, authed ? "Logged in" : "Logged out");
         tvAccountStatus.setTextColor(ContextCompat.getColor(requireContext(),
                 authed ? R.color.app_success : R.color.app_text_secondary));
-        btnLoginLogout.setText(authed ? "Log Out" : "Log In");
+        setLocalizedText(btnLoginLogout, authed ? "Log Out" : "Log In");
         etServerUrl.setText(auth.getServerUrl());
         if (tvServerRoute != null) {
-            tvServerRoute.setText(auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
+            setLocalizedText(tvServerRoute, auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.LOCAL
                     ? "Using Local Network"
                     : (auth.getActiveEndpoint() == AuthManager.ActiveEndpoint.PUBLIC ? "Using External Network" : "Not Configured"));
         }
@@ -392,21 +484,42 @@ public class SyncFragment extends Fragment {
             boolean busy = SyncService.get(requireContext()).isSyncBusy();
             boolean visualBusy = busy || System.currentTimeMillis() < forceBusyUntilMs;
             requireActivity().runOnUiThread(() -> {
-                tvPending.setText("Pending: " + s.pending);
-                tvUploading.setText("Uploading: " + s.uploading + (busy ? " (running)" : ""));
-                tvBg.setText("Queued (background): " + s.bgQueued);
-                tvFailed.setText("Failed: " + s.failed);
+                setDynamicText(tvPending, AndroidI18n.t("Pending:") + " " + s.pending);
+                setDynamicText(tvUploading, AndroidI18n.t("Uploading:") + " " + s.uploading + (busy ? " (" + AndroidI18n.t("running") + ")" : ""));
+                setDynamicText(tvBg, AndroidI18n.t("Queued (background):") + " " + s.bgQueued);
+                setDynamicText(tvFailed, AndroidI18n.t("Failed:") + " " + s.failed);
                 tvFailed.setTextColor(ContextCompat.getColor(requireContext(),
                         s.failed > 0 ? R.color.app_error : R.color.app_text_primary));
-                tvSynced.setText("Synced: " + s.synced);
+                setDynamicText(tvSynced, AndroidI18n.t("Synced:") + " " + s.synced);
                 if (s.lastSyncAt > 0) {
-                    tvLast.setText("Last sync: " + new Date(s.lastSyncAt * 1000L));
+                    setDynamicText(tvLast, AndroidI18n.t("Last sync:") + " " + formatLastSyncDate(s.lastSyncAt));
                 } else {
-                    tvLast.setText("Last sync: -");
+                    setDynamicText(tvLast, AndroidI18n.t("Last sync:") + " -");
                 }
                 updateActionButtonsState(visualBusy);
             });
         }).start();
+    }
+
+    @NonNull
+    private String formatLastSyncDate(long epochSeconds) {
+        Locale locale;
+        switch (AndroidI18n.currentMessageLocale()) {
+            case "zh-Hans":
+                locale = Locale.SIMPLIFIED_CHINESE;
+                break;
+            case "fr":
+                locale = Locale.FRANCE;
+                break;
+            case "es":
+                locale = new Locale("es", "ES");
+                break;
+            default:
+                locale = Locale.US;
+                break;
+        }
+        DateFormat formatter = DateFormat.getDateTimeInstance(DateFormat.MEDIUM, DateFormat.MEDIUM, locale);
+        return formatter.format(new Date(epochSeconds * 1000L));
     }
 
     private void updateActionButtonsState(boolean syncInProgress) {
@@ -417,7 +530,7 @@ public class SyncFragment extends Fragment {
         syncActionBusy = syncInProgress;
         btnSyncNow.setEnabled(!isDemoReadOnly());
         btnSyncNow.setAlpha(isDemoReadOnly() ? 0.55f : 1.0f);
-        btnSyncNow.setText(syncInProgress ? "Stop Syncing" : "Sync Now");
+        setLocalizedText(btnSyncNow, syncInProgress ? "Stop Syncing" : "Sync Now");
         if (syncInProgress) {
             btnSyncNow.setBackgroundTintList(ColorStateList.valueOf(
                     ContextCompat.getColor(requireContext(), R.color.app_error)));
@@ -440,20 +553,20 @@ public class SyncFragment extends Fragment {
     }
 
     private String syncStartMessage(SyncService.SyncStartResult result) {
-        if (result == null) return "Unable to start sync";
+        if (result == null) return AndroidI18n.t("Unable to start sync");
         switch (result) {
             case STARTED:
-                return "Sync started";
+                return AndroidI18n.t("Sync started");
             case ALREADY_RUNNING:
-                return "Sync is already running";
+                return AndroidI18n.t("Sync is already running");
             case NOT_AUTHENTICATED:
-                return "Please log in first";
+                return AndroidI18n.t("Please log in first");
             case MISSING_MEDIA_PERMISSION:
-                return "Grant photo/media permission first";
+                return AndroidI18n.t("Grant photo/media permission first");
             case MISSING_SERVER_URL:
-                return "Set server URL first";
+                return AndroidI18n.t("Set server URL first");
             default:
-                return "Unable to start sync";
+                return AndroidI18n.t("Unable to start sync");
         }
     }
 
