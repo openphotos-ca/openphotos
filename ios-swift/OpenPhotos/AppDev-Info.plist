@@ -49,6 +49,14 @@
 	<string>OpenPhotos can save processed photos and edited images to your photo library.</string>
 	<key>NSFaceIDUsageDescription</key>
 	<string>Enable Face ID to unlock your PIN and encrypted items quickly and securely.</string>
+	<key>BGTaskSchedulerPermittedIdentifiers</key>
+	<array>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER).sync.continued.*</string>
+	</array>
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>processing</string>
+	</array>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

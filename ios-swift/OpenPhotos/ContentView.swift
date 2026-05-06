@@ -19,7 +19,7 @@ struct ContentView: View {
                         .environmentObject(unlockCtl)
                         .tabItem {
                             Image(systemName: "cloud")
-                            Text("Cloud")
+                            Text(L10n.tr("Cloud"))
                         }
                         .tag(0)
 
@@ -28,21 +28,21 @@ struct ContentView: View {
                         .environmentObject(galleryViewModel)
                         .tabItem {
                             Image(systemName: "photo.on.rectangle.angled")
-                            Text("Local")
+                            Text(L10n.tr("Local"))
                         }
                         .tag(1)
                     
                     SyncView()
                         .tabItem {
                             Image(systemName: "arrow.up.circle")
-                            Text("Sync")
+                            Text(L10n.tr("Sync"))
                         }
                         .tag(2)
 
                     SettingsView()
                         .tabItem {
                             Image(systemName: "gear")
-                            Text("Settings")
+                            Text(L10n.tr("Settings"))
                         }
                         .tag(3)
                 }
@@ -80,11 +80,11 @@ struct SyncView: View {
                             .foregroundColor(.secondary)
                     }
                 }
-                Section("Server") {
+                Section(header: Text(L10n.tr("Server"))) {
                     NavigationLink(destination: NetworkSettingsView().environmentObject(auth)) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Advanced Network")
-                            Text(auth.currentEffectiveBaseURL().isEmpty ? "Configure a public or local server URL." : auth.currentEffectiveBaseURL())
+                            Text(L10n.tr("Advanced Network"))
+                            Text(auth.currentEffectiveBaseURL().isEmpty ? L10n.tr("Configure a public or local server URL.") : auth.currentEffectiveBaseURL())
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
                                 .lineLimit(2)
@@ -93,29 +93,29 @@ struct SyncView: View {
                     }
                     .disabled(isDemoReadOnly)
 
-                    Text(auth.networkStatusSummary())
+                    Text(L10n.tr(auth.networkStatusSummary()))
                         .font(.footnote)
                         .foregroundColor(.secondary)
 
                     HStack {
                         if auth.isAuthenticated {
-                            Text("Logged In")
+                            Text(L10n.tr("Logged In"))
                                 .foregroundColor(.green)
                         } else {
-                            Text("Logged Out")
+                            Text(L10n.tr("Logged Out"))
                                 .foregroundColor(.secondary)
                         }
                         Spacer()
                         if auth.isAuthenticated {
-                            Button("Log Out", role: .destructive) { auth.logout() }
+                            Button(L10n.tr("Log Out"), role: .destructive) { auth.logout() }
                         } else {
-                            Button("Log In") { showingLogin = true }
+                            Button(L10n.tr("Log In")) { showingLogin = true }
                         }
                     }
                     .buttonStyle(.borderless)
                 }
                 
-                Section("Sync") {
+                Section(header: Text(L10n.tr("Sync"))) {
                     HStack(spacing: 10) {
                         syncScopeControl
                             .frame(maxWidth: .infinity)
@@ -127,44 +127,44 @@ struct SyncView: View {
                                 Image(systemName: "slider.horizontal.3")
                             }
                             .buttonStyle(.bordered)
-                            .accessibilityLabel("Manage Selected Albums")
+                            .accessibilityLabel(L10n.tr("Manage Selected Albums"))
                             .disabled(isDemoReadOnly)
                         }
                     }
 
-                    Toggle("Auto start sync on app open", isOn: Binding(
+                    Toggle(L10n.tr("Auto start sync on app open"), isOn: Binding(
                         get: { auth.autoStartSyncOnOpen },
                         set: { auth.setAutoStartSyncOnOpen($0) }
                     ))
                     .disabled(isDemoReadOnly)
                     if auth.autoStartSyncOnOpen {
-                        Toggle("Auto-start only on Wi‑Fi", isOn: Binding(
+                        Toggle(L10n.tr("Auto-start only on Wi‑Fi"), isOn: Binding(
                             get: { auth.autoStartWifiOnly },
                             set: { auth.setAutoStartWifiOnly($0) }
                         ))
                         .disabled(isDemoReadOnly)
                     }
-                    Toggle("Keep screen on during foreground uploads", isOn: Binding(
+                    Toggle(L10n.tr("Keep screen on during foreground uploads"), isOn: Binding(
                         get: { HybridUploadManager.shared.keepScreenOn },
                         set: { HybridUploadManager.shared.keepScreenOn = $0 }
                     ))
                     .disabled(isDemoReadOnly)
-                    Toggle("Use cellular data to sync photos", isOn: Binding(
+                    Toggle(L10n.tr("Use cellular data to sync photos"), isOn: Binding(
                         get: { auth.syncUseCellularPhotos },
                         set: { auth.setSyncUseCellularPhotos($0) }
                     ))
                     .disabled(isDemoReadOnly)
-                    Toggle("Use cellular data to sync videos", isOn: Binding(
+                    Toggle(L10n.tr("Use cellular data to sync videos"), isOn: Binding(
                         get: { auth.syncUseCellularVideos },
                         set: { auth.setSyncUseCellularVideos($0) }
                     ))
                     .disabled(isDemoReadOnly)
-                    Toggle("Preserve album structure", isOn: Binding(
+                    Toggle(L10n.tr("Preserve album structure"), isOn: Binding(
                         get: { auth.syncPreserveAlbum },
                         set: { auth.setSyncPreserveAlbum($0) }
                     ))
                     .disabled(isDemoReadOnly)
-                    Toggle("Sync photos only", isOn: Binding(
+                    Toggle(L10n.tr("Sync photos only"), isOn: Binding(
                         get: { auth.syncPhotosOnly },
                         set: { auth.setSyncPhotosOnly($0) }
                     ))
@@ -172,11 +172,11 @@ struct SyncView: View {
                     // Auto-retry background configuration removed per spec
                 }
 
-                Section("Sync Status") {
+                Section(header: Text(L10n.tr("Sync Status"))) {
                     SyncStatusView()
                 }
 
-                Section("Actions") {
+                Section(header: Text(L10n.tr("Actions"))) {
                     centeredActionButton(
                         isSyncing ? "Stop Syncing" : "Sync Now",
                         disabled: isDemoReadOnly,
@@ -184,10 +184,11 @@ struct SyncView: View {
                     ) {
                         if isSyncing {
                             SyncService.shared.stopCurrentSync()
+                            isSyncing = false
                         } else {
                             SyncService.shared.syncNow(forceRetryFailed: true, userInitiated: true)
+                            isSyncing = true
                         }
-                        isSyncing = HybridUploadManager.shared.isSyncBusy()
                     }
 
                     centeredActionButton("ReSync", disabled: isDemoReadOnly) {
@@ -199,21 +200,21 @@ struct SyncView: View {
                     }
                 }
             }
-            .navigationTitle("Sync")
+            .navigationTitle(L10n.tr("Sync"))
             .sheet(isPresented: $showingLogin) { LoginView().environmentObject(auth) }
             .navigationDestination(isPresented: $showingManageSelectedAlbums) {
                 SyncAlbumsView()
             }
             .onAppear {
-                isSyncing = HybridUploadManager.shared.isSyncBusy()
+                isSyncing = SyncService.shared.isSyncBusyOrPendingResume()
             }
             .onReceive(syncBusyTimer) { _ in
-                isSyncing = HybridUploadManager.shared.isSyncBusy()
+                isSyncing = SyncService.shared.isSyncBusyOrPendingResume()
             }
             // Cache cleared alert moved to Settings
-            .alert("ReSync Entire Library?", isPresented: $showResetConfirm) {
-                Button("Cancel", role: .cancel) {}
-                Button("ReSync", role: .destructive) {
+            .alert(L10n.tr("ReSync Entire Library?"), isPresented: $showResetConfirm) {
+                Button(L10n.tr("Cancel"), role: .cancel) {}
+                Button(L10n.tr("ReSync"), role: .destructive) {
                     if HybridUploadManager.shared.isSyncBusy() {
                         HybridUploadManager.shared.stopForResync()
                     }
@@ -221,14 +222,15 @@ struct SyncView: View {
                     let itemsWord = n == 1 ? "item" : "items"
                     ToastManager.shared.show("Marked \(n) \(itemsWord) as pending")
                     SyncService.shared.syncNow(forceRetryFailed: false, userInitiated: true)
+                    isSyncing = true
                 }
             } message: {
-                Text("This marks all photos as pending and starts syncing immediately. Large libraries may take a while.")
+                Text(L10n.tr("This marks all photos as pending and starts syncing immediately. Large libraries may take a while."))
             }
 
-            .alert("Retry Stuck/Failed?", isPresented: $showRetryBgConfirm) {
-                Button("Cancel", role: .cancel) {}
-                Button("Retry", role: .destructive) {
+            .alert(L10n.tr("Retry Stuck/Failed?"), isPresented: $showRetryBgConfirm) {
+                Button(L10n.tr("Cancel"), role: .cancel) {}
+                Button(L10n.tr("Retry"), role: .destructive) {
                     if HybridUploadManager.shared.isSyncBusy() {
                         HybridUploadManager.shared.stopForResync()
                     }
@@ -236,9 +238,10 @@ struct SyncView: View {
                     let itemsWord = n == 1 ? "item" : "items"
                     ToastManager.shared.show("Requeued \(n) failed/background \(itemsWord)")
                     SyncService.shared.syncNow(forceRetryFailed: false, userInitiated: true)
+                    isSyncing = true
                 }
             } message: {
-                Text("Requeues failed and background-queued items as pending, then retries sync. Server deduplication prevents duplicates.")
+                Text(L10n.tr("Requeues failed and background-queued items as pending, then retries sync. Server deduplication prevents duplicates."))
             }
             .onReceive(NotificationCenter.default.publisher(for: .authUnauthorized)) { _ in
                 showingLogin = true
@@ -256,7 +259,7 @@ struct SyncView: View {
             HStack {
                 Spacer(minLength: 0)
                 Button(action: action) {
-                    Text(title)
+                    Text(L10n.tr(title))
                         .frame(maxWidth: .infinity, alignment: .center)
                         .multilineTextAlignment(.center)
                 }
@@ -281,7 +284,7 @@ struct SyncView: View {
         .disabled(isDemoReadOnly)
         .opacity(isDemoReadOnly ? 0.6 : 1.0)
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("Sync scope")
+        .accessibilityLabel(L10n.tr("Sync scope"))
     }
 
     private func syncScopeButton(_ title: String, scope: AuthManager.SyncScope) -> some View {
@@ -289,7 +292,7 @@ struct SyncView: View {
         return Button {
             auth.setSyncScope(scope)
         } label: {
-            Text(title)
+            Text(L10n.tr(title))
                 .font(.subheadline.weight(.semibold))
                 .lineLimit(1)
                 .minimumScaleFactor(0.85)
@@ -311,6 +314,7 @@ extension SyncView {
 // New lightweight Settings view with dynamic logo and version info
 struct SettingsView: View {
     @EnvironmentObject var auth: AuthManager
+    @EnvironmentObject var localeController: LocaleController
     @Environment(\.openURL) private var openURL
     @ObservedObject private var uploader = HybridUploadManager.shared
     private var versionString: String {
@@ -332,6 +336,9 @@ struct SettingsView: View {
     @State private var isLoadingServerUpdate = false
     @State private var showServerUpdateSection = false
     @State private var serverUpdateError: String? = nil
+    @State private var libraryStats: ServerMediaCounts? = nil
+    @State private var isLoadingLibraryStats = false
+    @State private var libraryStatsFailed = false
     private var isDemoReadOnly: Bool { auth.isDemoUser }
     private var accountName: String {
         if let name = auth.userName?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
@@ -354,31 +361,31 @@ struct SettingsView: View {
     }
     private var accountServerVersion: String {
         if isLoadingServerVersion {
-            return "Loading…"
+            return L10n.tr("Loading…")
         }
         if let version = serverVersion, !version.isEmpty {
             return version
         }
-        return "Unavailable"
+        return L10n.tr("Unavailable")
     }
     private var serverUpdateStatusLabel: String {
         if isLoadingServerUpdate && serverUpdateStatus == nil {
-            return "Loading…"
+            return L10n.tr("Loading…")
         }
         switch serverUpdateStatus?.status {
         case "disabled":
-            return "Update checks disabled"
+            return L10n.tr("Update checks disabled")
         case "check_failed":
-            return "Check failed"
+            return L10n.tr("Check failed")
         case "unsupported_install_mode":
-            return "Unsupported install mode"
+            return L10n.tr("Unsupported install mode")
         case "ok":
-            return serverUpdateStatus?.available == true ? "Update available" : "Up to date"
+            return serverUpdateStatus?.available == true ? L10n.tr("Update available") : L10n.tr("Up to date")
         default:
             if serverUpdateError != nil {
-                return "Unavailable"
+                return L10n.tr("Unavailable")
             }
-            return "Never checked"
+            return L10n.tr("Never checked")
         }
     }
     private var serverUpdateCurrentVersion: String {
@@ -394,9 +401,9 @@ struct SettingsView: View {
             return version
         }
         if isLoadingServerUpdate && serverUpdateStatus == nil {
-            return "Loading…"
+            return L10n.tr("Loading…")
         }
-        return "Unavailable"
+        return L10n.tr("Unavailable")
     }
     private var serverUpdateErrorMessage: String? {
         if let value = serverUpdateStatus?.lastError?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty {
@@ -407,29 +414,97 @@ struct SettingsView: View {
         }
         return nil
     }
+    private func libraryCountText(_ value: Int?) -> String {
+        if isLoadingLibraryStats {
+            return L10n.tr("Loading…")
+        }
+        guard !libraryStatsFailed, let value else {
+            return L10n.tr("Unavailable")
+        }
+        return NumberFormatter.localizedString(from: NSNumber(value: value), number: .decimal)
+    }
+    private var librarySizeText: String {
+        if isLoadingLibraryStats {
+            return L10n.tr("Loading…")
+        }
+        guard !libraryStatsFailed, let bytes = libraryStats?.total_size_bytes else {
+            return L10n.tr("Unavailable")
+        }
+        return formatLibrarySize(bytes)
+    }
+    private func formatLibrarySize(_ bytes: Int64) -> String {
+        let units = ["B", "KB", "MB", "GB", "TB", "PB"]
+        var size = Double(max(0, bytes))
+        var unitIndex = 0
+        while size >= 1000, unitIndex < units.count - 1 {
+            size /= 1000
+            unitIndex += 1
+        }
+        let formatter = NumberFormatter()
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = unitIndex == 0 ? 0 : 2
+        formatter.minimumFractionDigits = 0
+        let formatted = formatter.string(from: NSNumber(value: size)) ?? "\(size)"
+        return "\(formatted) \(units[unitIndex])"
+    }
 
     var body: some View {
         NavigationStack {
             List {
                 if isDemoReadOnly {
                     Section {
-                        Text("Demo account is read-only. Settings and security changes are disabled.")
+                        Text(L10n.tr("Demo account is read-only. Settings and security changes are disabled."))
                             .font(.subheadline)
                             .foregroundColor(.secondary)
                     }
                 }
+                Section(L10n.tr("Language")) {
+                    Picker(L10n.tr("Language"), selection: Binding(
+                        get: { localeController.mode },
+                        set: { localeController.setMode($0) }
+                    )) {
+                        Text(L10n.settings_language_system).tag(LocaleController.modeSystem)
+                        Text(L10n.settings_language_english).tag(LocaleController.modeEnglish)
+                        Text(L10n.settings_language_simplified_chinese).tag(LocaleController.modeSimplifiedChinese)
+                        Text(L10n.settings_language_french).tag(LocaleController.modeFrench)
+                        Text(L10n.settings_language_spanish).tag(LocaleController.modeSpanish)
+                    }
+                    Text(L10n.tr("Choose the display language for this device."))
+                        .font(.footnote)
+                        .foregroundColor(.secondary)
+                }
+                Section(L10n.tr("Cloud Library")) {
+                    HStack {
+                        Text(L10n.tr("Photos"))
+                        Spacer()
+                        Text(libraryCountText(libraryStats?.photos))
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text(L10n.tr("Videos"))
+                        Spacer()
+                        Text(libraryCountText(libraryStats?.videos))
+                            .foregroundColor(.secondary)
+                    }
+                    HStack {
+                        Text(L10n.tr("Total Size"))
+                        Spacer()
+                        Text(librarySizeText)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 // Cache settings
-                Section("Cache") {
-                    HStack { Text("Thumbnails usage"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: usageThumbs, countStyle: .file)).foregroundColor(.secondary) }
-                    HStack { Text("Images usage"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: usageImages, countStyle: .file)).foregroundColor(.secondary) }
-                    HStack { Text("Videos usage"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: usageVideos, countStyle: .file)).foregroundColor(.secondary) }
-                    Stepper(value: $capsThumbsMB, in: 50...4096, step: 50) { Text("Thumbnails cap: \(capsThumbsMB) MB").foregroundColor(.secondary) }
+                Section(L10n.tr("Cache")) {
+                    HStack { Text(L10n.tr("Thumbnails usage")); Spacer(); Text(ByteCountFormatter.string(fromByteCount: usageThumbs, countStyle: .file)).foregroundColor(.secondary) }
+                    HStack { Text(L10n.tr("Images usage")); Spacer(); Text(ByteCountFormatter.string(fromByteCount: usageImages, countStyle: .file)).foregroundColor(.secondary) }
+                    HStack { Text(L10n.tr("Videos usage")); Spacer(); Text(ByteCountFormatter.string(fromByteCount: usageVideos, countStyle: .file)).foregroundColor(.secondary) }
+                    Stepper(value: $capsThumbsMB, in: 50...4096, step: 50) { Text(L10n.tr("Thumbnails cap: %d MB", capsThumbsMB)).foregroundColor(.secondary) }
                         .disabled(isDemoReadOnly)
-                    Stepper(value: $capsImagesMB, in: 200...8192, step: 100) { Text("Images cap: \(capsImagesMB) MB").foregroundColor(.secondary) }
+                    Stepper(value: $capsImagesMB, in: 200...8192, step: 100) { Text(L10n.tr("Images cap: %d MB", capsImagesMB)).foregroundColor(.secondary) }
                         .disabled(isDemoReadOnly)
-                    Stepper(value: $capsVideosMB, in: 500...20480, step: 500) { Text("Videos cap: \(capsVideosMB) MB").foregroundColor(.secondary) }
+                    Stepper(value: $capsVideosMB, in: 500...20480, step: 500) { Text(L10n.tr("Videos cap: %d MB", capsVideosMB)).foregroundColor(.secondary) }
                         .disabled(isDemoReadOnly)
-                    Button("Apply Cache Caps") {
+                    Button(L10n.tr("Apply Cache Caps")) {
                         let caps = DiskImageCache.Caps(
                             thumbsBytes: Int64(capsThumbsMB) * 1024 * 1024,
                             imagesBytes: Int64(capsImagesMB) * 1024 * 1024,
@@ -439,26 +514,26 @@ struct SettingsView: View {
                         refreshCacheUsage()
                     }
                     .disabled(isDemoReadOnly)
-                    Button("Clear Cache", role: .destructive) {
+                    Button(L10n.tr("Clear Cache"), role: .destructive) {
                         DiskImageCache.shared.clearAll()
                         let _ = uploader.clearCache() // also clear upload temp artifacts
                         showCacheCleared = true
                         refreshCacheUsage()
                     }
                     .disabled(isDemoReadOnly)
-                    Button("Refresh Usage") { refreshCacheUsage() }
+                    Button(L10n.tr("Refresh Usage")) { refreshCacheUsage() }
                 }
-                Section("Security") {
+                Section(L10n.tr("Security")) {
                     NavigationLink(destination: SecuritySettingsView().environmentObject(auth)) {
-                        Text("End-to-End Encryption")
+                        Text(L10n.tr("End-to-End Encryption"))
                     }
                     .disabled(isDemoReadOnly)
                 }
-                Section("Network") {
+                Section(L10n.tr("Network")) {
                     NavigationLink(destination: NetworkSettingsView().environmentObject(auth)) {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text("Advanced Network")
-                            Text(auth.currentEffectiveBaseURL().isEmpty ? "Configure a public or local server URL." : auth.currentEffectiveBaseURL())
+                            Text(L10n.tr("Advanced Network"))
+                            Text(auth.currentEffectiveBaseURL().isEmpty ? L10n.tr("Configure a public or local server URL.") : auth.currentEffectiveBaseURL())
                                 .foregroundColor(.secondary)
                                 .font(.footnote)
                                 .lineLimit(2)
@@ -467,23 +542,23 @@ struct SettingsView: View {
                     }
                     .disabled(isDemoReadOnly)
                 }
-                Section("Account") {
+                Section(L10n.tr("Account")) {
                     HStack {
-                        Text("Name")
+                        Text(L10n.tr("Name"))
                         Spacer()
                         Text(accountName)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.trailing)
                     }
                     HStack {
-                        Text("Email")
+                        Text(L10n.tr("Email"))
                         Spacer()
                         Text(accountEmail)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.trailing)
                     }
                     HStack(alignment: .top) {
-                        Text("Server URL")
+                        Text(L10n.tr("Server URL"))
                         Spacer()
                         Text(accountServerURL)
                             .foregroundColor(.secondary)
@@ -492,35 +567,35 @@ struct SettingsView: View {
                             .truncationMode(.middle)
                     }
                     HStack {
-                        Text("Server Version")
+                        Text(L10n.tr("Server Version"))
                         Spacer()
                         Text(accountServerVersion)
                             .foregroundColor(.secondary)
                             .multilineTextAlignment(.trailing)
                     }
                     NavigationLink(destination: ChangePasswordView().environmentObject(auth)) {
-                        Text("Change Password")
+                        Text(L10n.tr("Change Password"))
                     }
                     .disabled(isDemoReadOnly)
                 }
                 if showServerUpdateSection {
-                    Section("Server Update") {
+                    Section(L10n.tr("Server Update")) {
                         HStack {
-                            Text("Status")
+                            Text(L10n.tr("Status"))
                             Spacer()
                             Text(serverUpdateStatusLabel)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.trailing)
                         }
                         HStack {
-                            Text("Current Version")
+                            Text(L10n.tr("Current Version"))
                             Spacer()
                             Text(serverUpdateCurrentVersion)
                                 .foregroundColor(.secondary)
                                 .multilineTextAlignment(.trailing)
                         }
                         HStack {
-                            Text("Latest Version")
+                            Text(L10n.tr("Latest Version"))
                             Spacer()
                             Text(serverUpdateLatestVersion)
                                 .foregroundColor(.secondary)
@@ -531,27 +606,27 @@ struct SettingsView: View {
                                 .font(.footnote)
                                 .foregroundColor(.secondary)
                         }
-                        Text("Install this update from the web admin UI or directly on the server host.")
+                        Text(L10n.tr("Install updates from the web admin UI or directly on the server host."))
                             .font(.footnote)
                             .foregroundColor(.secondary)
                     }
                 }
 
-                Section("About") {
+                Section(L10n.tr("About")) {
                     HStack {
-                        Text("Version")
+                        Text(L10n.tr("Version"))
                         Spacer()
                         Text(versionString)
                             .foregroundColor(.secondary)
                     }
                     if let url = AppLinks.website {
-                        Link("Website", destination: url)
+                        Link(L10n.tr("Website"), destination: url)
                     }
                     if let url = AppLinks.privacyPolicy {
-                        Link("Privacy Policy", destination: url)
+                        Link(L10n.tr("Privacy Policy"), destination: url)
                     }
                     if let url = AppLinks.terms {
-                        Link("Terms of Service", destination: url)
+                        Link(L10n.tr("Terms of Service"), destination: url)
                     }
                     if let url = AppLinks.github {
                         Link("GitHub", destination: url)
@@ -561,30 +636,36 @@ struct SettingsView: View {
                             Button {
                                 openURL(url)
                             } label: {
-                                Text("Support Email")
+                                Text(L10n.tr("Support Email"))
                             }
                             .buttonStyle(.plain)
                             Spacer()
                             Button {
                                 Clipboard.copy(AppLinks.supportEmailAddress)
-                                ToastManager.shared.show("Support email copied")
+                                ToastManager.shared.show(L10n.tr("Support email copied"))
                             } label: {
                                 Image(systemName: "doc.on.doc")
                             }
                             .buttonStyle(.plain)
-                            .accessibilityLabel("Copy support email")
+                            .accessibilityLabel(L10n.tr("Copy support email"))
                         }
                     }
                 }
             }
-            .navigationTitle("Settings")
-            .alert("Cache Cleared", isPresented: $showCacheCleared) { Button("OK", role: .cancel) { showCacheCleared = false } } message: { Text("Image cache and temp artifacts cleared") }
+            .navigationTitle(L10n.tr("Settings"))
+            .alert(L10n.tr("Cache Cleared"), isPresented: $showCacheCleared) {
+                Button(L10n.tr("OK"), role: .cancel) { showCacheCleared = false }
+            } message: {
+                Text(L10n.tr("Image cache and temp artifacts cleared"))
+            }
             .onAppear {
                 refreshCacheUsage()
+                Task { await refreshLibraryStats() }
                 Task { await refreshServerVersion(force: true) }
                 Task { await refreshServerUpdateStatus() }
             }
             .onChange(of: auth.serverURL) {
+                Task { await refreshLibraryStats() }
                 Task { await refreshServerVersion(force: true) }
                 Task { await refreshServerUpdateStatus() }
             }
@@ -600,6 +681,44 @@ extension SettingsView {
         usageThumbs = thumbs
         usageImages = images
         usageVideos = videos
+    }
+
+    private func refreshLibraryStats() async {
+        let requestedServerURL = await MainActor.run {
+            auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard !requestedServerURL.isEmpty else {
+            await MainActor.run {
+                libraryStats = nil
+                libraryStatsFailed = true
+                isLoadingLibraryStats = false
+            }
+            return
+        }
+
+        await MainActor.run {
+            isLoadingLibraryStats = true
+            libraryStatsFailed = false
+        }
+
+        do {
+            var query = ServerPhotoListQuery()
+            query.include_locked = true
+            let stats = try await ServerPhotosService.shared.getMediaCounts(query: query)
+            await MainActor.run {
+                guard auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines) == requestedServerURL else { return }
+                libraryStats = stats
+                libraryStatsFailed = false
+                isLoadingLibraryStats = false
+            }
+        } catch {
+            await MainActor.run {
+                guard auth.serverURL.trimmingCharacters(in: .whitespacesAndNewlines) == requestedServerURL else { return }
+                libraryStats = nil
+                libraryStatsFailed = true
+                isLoadingLibraryStats = false
+            }
+        }
     }
 
     private func refreshServerVersion(force: Bool) async {

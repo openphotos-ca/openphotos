@@ -11,6 +11,8 @@ struct CloudBackupCheckResult {
     let deleted: Int
     let missing: Int
     let skipped: Int
+    let duplicateGroups: Int
+    let duplicateExcess: Int
     let deletedLocalIdentifiers: Set<String>
 }
 
@@ -75,6 +77,7 @@ final class CloudBackupCheckService {
 
     private let exportManager = PHAssetResourceManager.default()
     private let exportSemaphore = AsyncSemaphore(value: 1)
+    private let existsRequestBatchSize = 100
 
     private struct DeletedListWork {
         let asset: PHAsset
@@ -84,7 +87,21 @@ final class CloudBackupCheckService {
         let cachedCandidates: [String]?
     }
 
+    private struct MissingRecheckWork {
+        let localIdentifier: String
+        let filename: String
+        let components: [[String]]
+        let metadataItem: CloudExistsMetadataItem
+    }
+
     private init() {
+    }
+
+    private func describeCandidates(_ components: [[String]]) -> String {
+        let unique = Array(Set(components.flatMap { $0 })).sorted()
+        let head = unique.prefix(4)
+        let suffix = unique.count > head.count ? ",..." : ""
+        return head.joined(separator: ",") + suffix
     }
 
     func runCloudCheck(
@@ -104,9 +121,15 @@ final class CloudBackupCheckService {
         var missing = 0
         var skipped = 0
         var deletedLocalIdentifiers: Set<String> = []
+        var pendingRecheck: [MissingRecheckWork] = []
+        var candidateCacheHits = 0
+        var candidateCacheMisses = 0
+        var candidateExports = 0
+        var duplicateMatchOwners: [String: [String: String]] = [:]
+        let startedAt = Date()
 
-        // Process in small chunks to bound memory and request sizes.
-        let chunkSize = 20
+        // Keep requests bulked enough to avoid hundreds of HTTP round trips.
+        let chunkSize = existsRequestBatchSize
         var i = 0
         while i < assets.count {
             try Task.checkCancellation()
@@ -116,9 +139,12 @@ final class CloudBackupCheckService {
             // Collect per-asset component candidates and one flat list for server query.
             struct AssetWork {
                 let localIdentifier: String
+                let filename: String
                 // Each component corresponds to one resource we expect to be backed up.
                 let components: [[String]]
+                let metadataItem: CloudExistsMetadataItem?
                 let isSkippableFailure: Bool
+                let skipReason: String?
             }
 
             var work: [AssetWork] = []
@@ -135,12 +161,22 @@ final class CloudBackupCheckService {
                 try Task.checkCancellation()
                 let localId = asset.localIdentifier
                 guard let res = primaryResourceToCheck(for: asset) else {
-                    work.append(AssetWork(localIdentifier: localId, components: [], isSkippableFailure: true))
+                    work.append(
+                        AssetWork(
+                            localIdentifier: localId,
+                            filename: localId,
+                            components: [],
+                            metadataItem: nil,
+                            isSkippableFailure: true,
+                            skipReason: "no-primary-resource"
+                        )
+                    )
                     continue
                 }
 
                 var components: [[String]] = []
                 var failed: Bool = false
+                var skipReason: String?
                 let fingerprint = backupIdFingerprint(asset: asset, resource: res)
 
                 if let cached = SyncRepository.shared.getCachedBackupIdCandidates(
@@ -148,12 +184,23 @@ final class CloudBackupCheckService {
                     localIdentifier: localId,
                     fingerprint: fingerprint
                 ) {
+                    candidateCacheHits += 1
                     components.append(cached)
                     for id in cached { queryIds.insert(id) }
-                    work.append(AssetWork(localIdentifier: localId, components: components, isSkippableFailure: false))
+                    work.append(
+                        AssetWork(
+                            localIdentifier: localId,
+                            filename: res.originalFilename,
+                            components: components,
+                            metadataItem: makeMetadataItem(asset: asset, resource: res, components: components),
+                            isSkippableFailure: false,
+                            skipReason: nil
+                        )
+                    )
                     continue
                 }
 
+                candidateCacheMisses += 1
                 do {
                     let exported = try await exportAndComputeAssetIdCandidatesKeepingFile(
                         resource: res,
@@ -163,7 +210,9 @@ final class CloudBackupCheckService {
                     tempFiles.append(exported.normalizedURL)
                     if exported.candidates.isEmpty {
                         failed = true
+                        skipReason = "no-backup-candidates"
                     } else {
+                        candidateExports += 1
                         components.append(exported.candidates)
                         for id in exported.candidates { queryIds.insert(id) }
                         SyncRepository.shared.setCachedBackupIdCandidates(
@@ -177,13 +226,17 @@ final class CloudBackupCheckService {
                     throw cancelError
                 } catch {
                     failed = true
+                    skipReason = "export-failed"
                 }
 
                 work.append(
                     AssetWork(
                         localIdentifier: localId,
+                        filename: res.originalFilename,
                         components: components,
-                        isSkippableFailure: failed
+                        metadataItem: makeMetadataItem(asset: asset, resource: res, components: components),
+                        isSkippableFailure: failed,
+                        skipReason: skipReason
                     )
                 )
             }
@@ -193,7 +246,11 @@ final class CloudBackupCheckService {
                 matches = .empty
             } else {
                 try Task.checkCancellation()
-                matches = try await existsWithRetry(backupIds: Array(queryIds))
+                let metadataItems = work.compactMap(\.metadataItem)
+                matches = try await existsWithRetry(
+                    backupIds: metadataItems.isEmpty ? Array(queryIds) : [],
+                    metadataItems: metadataItems
+                )
             }
 
             for w in work {
@@ -203,7 +260,15 @@ final class CloudBackupCheckService {
 
                 if w.isSkippableFailure || w.components.isEmpty {
                     skipped += 1
+                    print(
+                        "[CLOUDCHECK] skipped local_id=\(w.localIdentifier) filename=\(w.filename) " +
+                        "reason=\(w.skipReason ?? "unknown")"
+                    )
                     continue
+                }
+
+                if let matchId = w.metadataItem?.matchId {
+                    duplicateMatchOwners[matchId, default: [:]][w.localIdentifier] = w.filename
                 }
 
                 checked += 1
@@ -221,9 +286,27 @@ final class CloudBackupCheckService {
                 } else if isDeletedInCloud {
                     deleted += 1
                     deletedLocalIdentifiers.insert(w.localIdentifier)
+                    print(
+                        "[CLOUDCHECK] deleted local_id=\(w.localIdentifier) filename=\(w.filename) " +
+                        "backup_candidates=\(describeCandidates(w.components))"
+                    )
                     status = .deletedInCloud
                 } else {
                     missing += 1
+                    if let metadataItem = w.metadataItem {
+                        pendingRecheck.append(
+                            MissingRecheckWork(
+                                localIdentifier: w.localIdentifier,
+                                filename: w.filename,
+                                components: w.components,
+                                metadataItem: metadataItem
+                            )
+                        )
+                    }
+                    print(
+                        "[CLOUDCHECK] missing local_id=\(w.localIdentifier) filename=\(w.filename) " +
+                        "backup_candidates=\(describeCandidates(w.components))"
+                    )
                     status = .missing
                 }
 
@@ -237,6 +320,17 @@ final class CloudBackupCheckService {
             }
         }
 
+        if !pendingRecheck.isEmpty {
+            let rechecked = try await recheckMissingCloudItems(
+                pendingRecheck,
+                checkedAt: checkedAt
+            )
+            backedUp += rechecked.recoveredBackedUp
+            deleted += rechecked.recoveredDeleted
+            deletedLocalIdentifiers.formUnion(rechecked.deletedLocalIdentifiers)
+            missing -= (rechecked.recoveredBackedUp + rechecked.recoveredDeleted)
+        }
+
         try Task.checkCancellation()
         DispatchQueue.main.async {
             NotificationCenter.default.post(
@@ -244,14 +338,134 @@ final class CloudBackupCheckService {
                 object: nil
             )
         }
+        let duplicateGroups = duplicateMatchOwners
+            .map { (matchId: $0.key, owners: $0.value) }
+            .filter { $0.owners.count > 1 }
+            .sorted { lhs, rhs in
+                if lhs.owners.count != rhs.owners.count {
+                    return lhs.owners.count > rhs.owners.count
+                }
+                return lhs.matchId < rhs.matchId
+            }
+        let duplicateGroupCount = duplicateGroups.count
+        let duplicateExcess = duplicateGroups.reduce(0) { $0 + max(0, $1.owners.count - 1) }
+        if !duplicateGroups.isEmpty {
+            let sample = duplicateGroups.prefix(12).map { group in
+                let files = group.owners.values.sorted().prefix(4).joined(separator: "|")
+                return "\(String(group.matchId.prefix(12))):count=\(group.owners.count):\(files)"
+            }.joined(separator: "; ")
+            print(
+                "[CLOUDCHECK] local duplicate backup ids groups=\(duplicateGroupCount) " +
+                "duplicate_excess=\(duplicateExcess) sample=\(sample)"
+            )
+        }
+        print(
+            "[CLOUDCHECK] run stats selected=\(total) checked=\(checked) backed=\(backedUp) " +
+            "deleted=\(deleted) missing=\(missing) skipped=\(skipped) batch_size=\(existsRequestBatchSize) " +
+            "duplicate_groups=\(duplicateGroupCount) duplicate_excess=\(duplicateExcess) " +
+            "candidate_cache_hits=\(candidateCacheHits) candidate_cache_misses=\(candidateCacheMisses) " +
+            "candidate_exports=\(candidateExports) elapsed_ms=\(Int((Date().timeIntervalSince(startedAt) * 1000).rounded()))"
+        )
         return CloudBackupCheckResult(
             checked: checked,
             backedUp: backedUp,
             deleted: deleted,
             missing: missing,
             skipped: skipped,
+            duplicateGroups: duplicateGroupCount,
+            duplicateExcess: duplicateExcess,
             deletedLocalIdentifiers: deletedLocalIdentifiers
         )
+    }
+
+    private func recheckMissingCloudItems(
+        _ items: [MissingRecheckWork],
+        checkedAt: Int64
+    ) async throws -> (
+        recoveredBackedUp: Int,
+        recoveredDeleted: Int,
+        deletedLocalIdentifiers: Set<String>
+    ) {
+        guard !items.isEmpty else { return (0, 0, []) }
+
+        let passDelaysNs: [UInt64] = [3_000_000_000, 6_000_000_000]
+        let batchSize = existsRequestBatchSize
+        var remaining = items
+        var recoveredBackedUp = 0
+        var recoveredDeleted = 0
+        var deletedLocalIdentifiers: Set<String> = []
+
+        for (passIndex, delayNs) in passDelaysNs.enumerated() {
+            guard !remaining.isEmpty else { break }
+            try Task.checkCancellation()
+            try await Task.sleep(nanoseconds: delayNs)
+            try Task.checkCancellation()
+
+            let beforeCount = remaining.count
+            var stillMissing: [MissingRecheckWork] = []
+            stillMissing.reserveCapacity(remaining.count)
+
+            var start = 0
+            while start < remaining.count {
+                try Task.checkCancellation()
+                let batch = Array(remaining[start..<min(start + batchSize, remaining.count)])
+                start += batch.count
+
+                let queryIds = Array(Set(batch.flatMap { $0.components.flatMap { $0 } }))
+                let metadataItems = batch.map(\.metadataItem)
+                let matches = queryIds.isEmpty ? CloudExistsMatches.empty : try await existsWithRetry(
+                    backupIds: metadataItems.isEmpty ? queryIds : [],
+                    metadataItems: metadataItems
+                )
+
+                for item in batch {
+                    let isBackedUp = item.components.allSatisfy { comp in
+                        comp.contains(where: matches.presentBackupIds.contains)
+                    }
+                    let isDeletedInCloud = !isBackedUp && item.components.allSatisfy { comp in
+                        comp.contains(where: matches.deletedBackupIds.contains)
+                    }
+
+                    if isBackedUp {
+                        recoveredBackedUp += 1
+                        SyncRepository.shared.setCloudStatusForLocalIdentifier(
+                            item.localIdentifier,
+                            status: .backedUp,
+                            checkedAt: checkedAt,
+                            emitNotification: false
+                        )
+                        print(
+                            "[CLOUDCHECK] recheck recovered local_id=\(item.localIdentifier) filename=\(item.filename) " +
+                            "status=backed_up backup_candidates=\(describeCandidates(item.components))"
+                        )
+                    } else if isDeletedInCloud {
+                        recoveredDeleted += 1
+                        deletedLocalIdentifiers.insert(item.localIdentifier)
+                        SyncRepository.shared.setCloudStatusForLocalIdentifier(
+                            item.localIdentifier,
+                            status: .deletedInCloud,
+                            checkedAt: checkedAt,
+                            emitNotification: false
+                        )
+                        print(
+                            "[CLOUDCHECK] recheck recovered local_id=\(item.localIdentifier) filename=\(item.filename) " +
+                            "status=deleted_in_cloud backup_candidates=\(describeCandidates(item.components))"
+                        )
+                    } else {
+                        stillMissing.append(item)
+                    }
+                }
+            }
+
+            print(
+                "[CLOUDCHECK] recheck pass=\(passIndex + 1) before=\(beforeCount) after=\(stillMissing.count) " +
+                "recovered_backed=\(recoveredBackedUp) recovered_deleted=\(recoveredDeleted)"
+            )
+
+            remaining = stillMissing
+        }
+
+        return (recoveredBackedUp, recoveredDeleted, deletedLocalIdentifiers)
     }
 
     func runDeletedOnlyList(
@@ -527,11 +741,15 @@ final class CloudBackupCheckService {
         )
     }
 
-    private func existsWithRetry(backupIds: [String]) async throws -> CloudExistsMatches {
+    private func existsWithRetry(
+        backupIds: [String],
+        metadataItems: [CloudExistsMetadataItem] = []
+    ) async throws -> CloudExistsMatches {
         try Task.checkCancellation()
         do {
             return try await ServerPhotosService.shared.existsMatches(
                 backupIds: backupIds,
+                metadataItems: metadataItems,
                 includeDeletedMatches: true
             )
         } catch {
@@ -541,6 +759,7 @@ final class CloudBackupCheckService {
                 try Task.checkCancellation()
                 return try await ServerPhotosService.shared.existsMatches(
                     backupIds: backupIds,
+                    metadataItems: metadataItems,
                     includeDeletedMatches: true
                 )
             }
@@ -639,7 +858,7 @@ final class CloudBackupCheckService {
         let durationMs = Int64((asset.mediaType == .video ? asset.duration : 0) * 1000.0)
         let uti = resource.uniformTypeIdentifier
         return [
-            "v1",
+            "v2-content-fallback",
             "mt=\(asset.mediaType.rawValue)",
             "st=\(asset.mediaSubtypes.rawValue)",
             "rt=\(resource.type.rawValue)",
@@ -651,6 +870,30 @@ final class CloudBackupCheckService {
             "c=\(creation)",
             "m=\(modified)"
         ].joined(separator: "|")
+    }
+
+    private func makeMetadataItem(
+        asset: PHAsset,
+        resource: PHAssetResource,
+        components: [[String]]
+    ) -> CloudExistsMetadataItem? {
+        let backupIds = Array(Set(components.flatMap { $0 })).sorted()
+        guard let matchId = backupIds.first else { return nil }
+        return CloudExistsMetadataItem(
+            matchId: matchId,
+            backupIds: backupIds,
+            contentId: contentIdForAsset(asset),
+            filename: resource.originalFilename,
+            createdAt: asset.creationDate.map { Int64($0.timeIntervalSince1970) },
+            width: asset.pixelWidth > 0 ? asset.pixelWidth : nil,
+            height: asset.pixelHeight > 0 ? asset.pixelHeight : nil,
+            isVideo: asset.mediaType == .video
+        )
+    }
+
+    private func contentIdForAsset(_ asset: PHAsset) -> String {
+        let digest = Insecure.MD5.hash(data: Data(asset.localIdentifier.utf8))
+        return Base58.encode(Data(digest))
     }
 
     // MARK: - Export + asset_id computation
@@ -695,6 +938,11 @@ final class CloudBackupCheckService {
         var candidates: [String] = []
         if let raw = BackupId.computeBackupId(fileURL: normalizedURL, userId: userId) {
             candidates.append(raw)
+        }
+        if !isVideo,
+           let visual = BackupId.computeVisualBackupId(fileURL: normalizedURL, userId: userId),
+           !candidates.contains(visual) {
+            candidates.append(visual)
         }
 
         // Also compute the "locked upload" candidate: HEIC/HEIF -> JPEG (since locked uploads encrypt a JPEG for images).
@@ -990,6 +1238,67 @@ enum BackupId {
             let mac = Data(hmac2.finalize())
             return Base58.encode(mac.prefix(16))
         }
+    }
+
+    static func computeVisualBackupId(fileURL: URL, userId: String) -> String? {
+        guard let cgImage = decodedUprightCGImage(url: fileURL) else { return nil }
+        let width = cgImage.width
+        let height = cgImage.height
+        guard width > 0, height > 0 else { return nil }
+
+        let bytesPerRow = width * 4
+        let totalBytes = bytesPerRow * height
+        var pixelData = Data(count: totalBytes)
+        let colorSpace = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo.byteOrder32Big.union(
+            CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        )
+        let rendered = pixelData.withUnsafeMutableBytes { rawBuffer -> Bool in
+            guard let base = rawBuffer.baseAddress else { return false }
+            guard let ctx = CGContext(
+                data: base,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: bytesPerRow,
+                space: colorSpace,
+                bitmapInfo: bitmapInfo.rawValue
+            ) else {
+                return false
+            }
+            let rect = CGRect(x: 0, y: 0, width: width, height: height)
+            ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+            ctx.fill(rect)
+            ctx.draw(cgImage, in: rect)
+            return true
+        }
+        guard rendered else { return nil }
+
+        let key = SymmetricKey(data: Data(userId.utf8))
+        var hmac = HMAC<SHA256>(key: key)
+        hmac.update(data: Data("visual-image-v1".utf8))
+        var widthBE = UInt32(width).bigEndian
+        var heightBE = UInt32(height).bigEndian
+        withUnsafeBytes(of: &widthBE) { hmac.update(data: Data($0)) }
+        withUnsafeBytes(of: &heightBE) { hmac.update(data: Data($0)) }
+        hmac.update(data: pixelData)
+        let mac = Data(hmac.finalize())
+        return Base58.encode(mac.prefix(16))
+    }
+
+    private static func decodedUprightCGImage(url: URL) -> CGImage? {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as NSDictionary?
+        let w = (props?[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue ?? 0
+        let h = (props?[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue ?? 0
+        let maxSide = max(1, max(w, h))
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxSide,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(src, 0, options as CFDictionary)
+            ?? CGImageSourceCreateImageAtIndex(src, 0, nil)
     }
 }
 

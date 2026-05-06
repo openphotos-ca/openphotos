@@ -17,10 +17,10 @@ struct SharingView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 // Tab picker
-                Picker("Sharing Type", selection: $viewModel.selectedTab) {
-                    Text("My Shares").tag(ShareTab.myShares)
-                    Text("Shared with me").tag(ShareTab.sharedWithMe)
-                    Text("Public Links").tag(ShareTab.publicLinks)
+                Picker(L10n.tr("Sharing Type"), selection: $viewModel.selectedTab) {
+                    Text(L10n.tr("My Shares")).tag(ShareTab.myShares)
+                    Text(L10n.tr("Shared with me")).tag(ShareTab.sharedWithMe)
+                    Text(L10n.tr("Public Links")).tag(ShareTab.publicLinks)
                 }
                 .pickerStyle(.segmented)
                 .padding()
@@ -38,7 +38,7 @@ struct SharingView: View {
                 }
                 .tabViewStyle(.page(indexDisplayMode: .never))
             }
-            .navigationTitle("Sharing")
+            .navigationTitle(L10n.tr("Sharing"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {

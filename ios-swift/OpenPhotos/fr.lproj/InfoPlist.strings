@@ -1,0 +1,4 @@
+"NSFaceIDUsageDescription" = "Activez Face ID pour déverrouiller rapidement et en toute sécurité votre PIN et vos éléments chiffrés.";
+"NSLocalNetworkUsageDescription" = "OpenPhotos se connecte à votre serveur local pour synchroniser votre bibliothèque.";
+"NSPhotoLibraryAddUsageDescription" = "OpenPhotos peut enregistrer les photos traitées et les images éditées dans votre bibliothèque de photos.";
+"NSPhotoLibraryUsageDescription" = "OpenPhotos a besoin d'un accès à votre bibliothèque de photos pour organiser et nettoyer vos photos.";

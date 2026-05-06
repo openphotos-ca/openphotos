@@ -100,10 +100,10 @@ struct ActiveFilterRow: View {
 
                             // Type filter chips
                             if viewModel.typeScreenshot {
-                                ChipSimple(label: "Screenshots") { viewModel.typeScreenshot = false }
+                                ChipSimple(label: L10n.tr("Screenshots")) { viewModel.typeScreenshot = false }
                             }
                             if viewModel.typeLive {
-                                ChipSimple(label: "Live Photos") { viewModel.typeLive = false }
+                                ChipSimple(label: L10n.tr("Live Photos")) { viewModel.typeLive = false }
                             }
 
                             // Date range

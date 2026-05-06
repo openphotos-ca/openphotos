@@ -78,13 +78,13 @@ struct ServerFiltersSheet: View {
                 locationSection
             }
             .listStyle(.insetGrouped)
-            .navigationTitle("Filters")
+            .navigationTitle(L10n.tr("Filters"))
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Clear all") { clearAll() }
+                    Button(L10n.tr("Clear all")) { clearAll() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { isPresented = false }
+                    Button(L10n.tr("Done")) { isPresented = false }
                 }
             }
             .task { await fetchMetadata() }
@@ -94,9 +94,9 @@ struct ServerFiltersSheet: View {
     // MARK: - Sections
 
     private var facesSection: some View {
-        Section(header: HStack { Text("Faces"); Spacer(); manageFacesButton }) {
+        Section(header: HStack { Text(L10n.tr("Faces")); Spacer(); manageFacesButton }) {
             if loading && metadata == nil {
-                HStack { ProgressView(); Text("Loading faces…").foregroundColor(.secondary) }
+                HStack { ProgressView(); Text(L10n.tr("Loading faces…")).foregroundColor(.secondary) }
             } else if let faces = metadata?.faces, !faces.isEmpty {
                 // Grid layout tuned for dense packing: 1px spacing and fixed height showing 3 rows.
                 let faceSize: CGFloat = 80
@@ -131,38 +131,36 @@ struct ServerFiltersSheet: View {
                 }
                 .frame(height: visibleHeight)
             } else {
-                Text("No faces found").foregroundColor(.secondary)
+                Text(L10n.tr("No faces found")).foregroundColor(.secondary)
             }
         }
     }
 
     private var manageFacesButton: some View {
-        Button("Manage") { /* placeholder per spec */ }
+        Button(L10n.tr("Manage")) { /* placeholder per spec */ }
             .buttonStyle(.bordered)
             .font(.footnote)
     }
 
     private var timeRangeSection: some View {
-        Section(header: HStack { Text("Time Range"); Spacer(); clearDatesHeaderButton }) {
+        Section(header: HStack { Text(L10n.tr("Time Range")); Spacer(); clearDatesHeaderButton }) {
             // Display Start and End pickers on their own rows with inline labels.
             DatePicker(
-                "Start",
+                L10n.tr("Start"),
                 selection: Binding(get: { viewModel.dateStart ?? Date() }, set: { viewModel.dateStart = $0 }),
                 displayedComponents: [.date]
             )
-            .environment(\.locale, Locale(identifier: "en_US_POSIX"))
 
             DatePicker(
-                "End",
+                L10n.tr("End"),
                 selection: Binding(get: { viewModel.dateEnd ?? Date() }, set: { viewModel.dateEnd = $0 }),
                 displayedComponents: [.date]
             )
-            .environment(\.locale, Locale(identifier: "en_US_POSIX"))
         }
     }
 
     private var clearDatesHeaderButton: some View {
-        Button("Clear dates") {
+        Button(L10n.tr("Clear dates")) {
             viewModel.dateStart = nil
             viewModel.dateEnd = nil
         }
@@ -171,16 +169,16 @@ struct ServerFiltersSheet: View {
     }
 
     private var typeSection: some View {
-        Section(header: Text("Type")) {
+        Section(header: Text(L10n.tr("Type"))) {
             HStack(spacing: 8) {
-                Toggle(isOn: $viewModel.typeScreenshot) { Text("Screenshots") }
-                Toggle(isOn: $viewModel.typeLive) { Text("Live Photos") }
+                Toggle(isOn: $viewModel.typeScreenshot) { Text(L10n.tr("Screenshots")) }
+                Toggle(isOn: $viewModel.typeLive) { Text(L10n.tr("Live Photos")) }
             }
         }
     }
 
     private var ratingSection: some View {
-        Section(header: Text("Rating")) {
+        Section(header: Text(L10n.tr("Rating"))) {
             HStack(spacing: 6) {
                 ForEach(1...5, id: \.self) { n in
                     Button(action: { viewModel.ratingMin = n }) {
@@ -192,7 +190,7 @@ struct ServerFiltersSheet: View {
                     .buttonStyle(.plain) // Ensure tappable inside List rows
                     .padding(.vertical, 6)
                 }
-                Button("Clear") { viewModel.ratingMin = nil }
+                Button(L10n.tr("Clear")) { viewModel.ratingMin = nil }
                     .foregroundColor(.secondary)
                     .buttonStyle(.plain)
             }
@@ -200,19 +198,16 @@ struct ServerFiltersSheet: View {
     }
 
     private var locationSection: some View {
-        Section(header: Text("Location")) {
-            Picker("Country", selection: Binding(get: { viewModel.country ?? "" }, set: { viewModel.country = $0.isEmpty ? nil : $0 })) {
-                Text("Any").tag("")
+        Section(header: Text(L10n.tr("Location"))) {
+            Picker(L10n.tr("Country"), selection: Binding(get: { viewModel.country ?? "" }, set: { viewModel.country = $0.isEmpty ? nil : $0 })) {
+                Text(L10n.tr("Any")).tag("")
                 ForEach(metadata?.countries ?? [], id: \.self) { c in Text(c).tag(c) }
             }
-            TextField("Province/State", text: Binding(get: { viewModel.region ?? "" }, set: { viewModel.region = $0.isEmpty ? nil : $0 }))
-            Picker("City", selection: Binding(get: { viewModel.city ?? "" }, set: { viewModel.city = $0.isEmpty ? nil : $0 })) {
-                Text("Any").tag("")
+            TextField(L10n.tr("Province/State"), text: Binding(get: { viewModel.region ?? "" }, set: { viewModel.region = $0.isEmpty ? nil : $0 }))
+            Picker(L10n.tr("City"), selection: Binding(get: { viewModel.city ?? "" }, set: { viewModel.city = $0.isEmpty ? nil : $0 })) {
+                Text(L10n.tr("Any")).tag("")
                 ForEach(metadata?.cities ?? [], id: \.self) { c in Text(c).tag(c) }
             }
-            Text("Note: Location filters are placeholders in v1.")
-                .font(.footnote)
-                .foregroundColor(.secondary)
         }
     }
 

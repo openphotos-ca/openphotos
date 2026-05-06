@@ -25,20 +25,20 @@ struct ResetPasswordSheet: View {
             Form {
                 // Current Password (only for self-service)
                 if isSelfReset {
-                    Section("Current Password") {
-                        SecureField("Current Password", text: $currentPassword)
+                    Section(L10n.tr("Current Password")) {
+                        SecureField(L10n.tr("Current Password"), text: $currentPassword)
                             .textContentType(.password)
                             .disabled(isSubmitting)
                     }
                 }
 
                 // New Password
-                Section("New Password") {
-                    SecureField("New Password (min 6 characters)", text: $newPassword)
+                Section(L10n.tr("New Password")) {
+                    SecureField(L10n.tr("New Password (min 6 characters)"), text: $newPassword)
                         .textContentType(.newPassword)
                         .disabled(isSubmitting)
 
-                    SecureField("Confirm New Password", text: $confirmPassword)
+                    SecureField(L10n.tr("Confirm New Password"), text: $confirmPassword)
                         .textContentType(.newPassword)
                         .disabled(isSubmitting)
                 }
@@ -46,11 +46,11 @@ struct ResetPasswordSheet: View {
                 // Info Text
                 Section {
                     if isSelfReset {
-                        Text("Enter your current password and choose a new password.")
+                        Text(L10n.tr("Enter your current password and choose a new password."))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     } else {
-                        Text("Setting a new password for \(user.name). The user will be required to change this password on next login.")
+                        Text(L10n.tr("Setting a new password for %@. The user will be required to change this password on next login.", user.name))
                             .font(.caption)
                             .foregroundColor(.secondary)
                     }
@@ -65,17 +65,17 @@ struct ResetPasswordSheet: View {
                     }
                 }
             }
-            .navigationTitle("Reset Password")
+            .navigationTitle(L10n.tr("Reset Password"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(L10n.tr("Cancel")) {
                         dismiss()
                     }
                     .disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Reset") {
+                    Button(L10n.tr("Reset")) {
                         Task { await resetPassword() }
                     }
                     .disabled(!isFormValid || isSubmitting)
@@ -133,13 +133,13 @@ struct ResetPasswordSheet: View {
 
         // Validation
         guard newPassword == confirmPassword else {
-            errorMessage = "Passwords do not match"
+            errorMessage = L10n.tr("Passwords do not match")
             isSubmitting = false
             return
         }
 
         guard newPassword.count >= 6 else {
-            errorMessage = "Password must be at least 6 characters"
+            errorMessage = L10n.tr("Password must be at least 6 characters")
             isSubmitting = false
             return
         }

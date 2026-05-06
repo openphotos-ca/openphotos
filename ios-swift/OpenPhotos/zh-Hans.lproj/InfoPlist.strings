@@ -1,0 +1,4 @@
+"NSFaceIDUsageDescription" = "启用 Face ID 以快速、安全地解锁你的 PIN 和加密项目。";
+"NSLocalNetworkUsageDescription" = "OpenPhotos 会连接到你的本地服务器以同步图库。";
+"NSPhotoLibraryAddUsageDescription" = "OpenPhotos 可以将处理后的照片和编辑后的图片保存到你的照片图库。";
+"NSPhotoLibraryUsageDescription" = "OpenPhotos 需要访问你的照片图库，以整理和清理你的照片。";

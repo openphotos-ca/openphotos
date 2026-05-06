@@ -51,9 +51,9 @@ struct NewShareSheet: View {
         return NavigationStack {
             VStack(spacing: 0) {
                 // Tab picker outside of Form for better rendering
-                Picker("Share Type", selection: $viewModel.selectedTab) {
+                Picker(L10n.tr("Sharing Type"), selection: $viewModel.selectedTab) {
                     ForEach(NewShareViewModel.ShareTab.allCases, id: \.self) { tab in
-                        Text(tab.rawValue).tag(tab)
+                        Text(L10n.tr(tab.rawValue)).tag(tab)
                     }
                 }
                 .pickerStyle(.segmented)
@@ -90,17 +90,17 @@ struct NewShareSheet: View {
                     print("🔍 Form appeared")
                 }
             }
-            .navigationTitle("Share")
+            .navigationTitle(L10n.tr("Share"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(L10n.tr("Cancel")) {
                         dismiss()
                     }
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Share") {
+                    Button(L10n.tr("Share")) {
                         Task {
                             await viewModel.createShare()
                         }
@@ -149,15 +149,15 @@ struct NewShareSheet: View {
 
         // Name section
         Section {
-            TextField("Share name", text: $viewModel.shareName)
+            TextField(L10n.tr("Share name"), text: $viewModel.shareName)
                 .onAppear {
                     print("🔍 Name TextField appeared")
                 }
         } header: {
-            Text("Name")
+            Text(L10n.tr("Name"))
         } footer: {
             if let albumName = albumName {
-                Text("Sharing album \"\(albumName)\"")
+                Text(L10n.tr("Sharing album %@", albumName))
                     .font(.caption)
             }
         }
@@ -173,7 +173,7 @@ struct NewShareSheet: View {
                 }
             )
         } header: {
-            Text("Invite people or groups")
+            Text(L10n.tr("Invite people or groups"))
         }
 
         // Selected recipients chips
@@ -190,50 +190,50 @@ struct NewShareSheet: View {
 
         // Options section
         Section {
-            Toggle("Include Faces", isOn: $viewModel.includeFaces)
+            Toggle(L10n.tr("Include faces"), isOn: $viewModel.includeFaces)
 
-            Toggle("Include sub-albums", isOn: $viewModel.includeSubtree)
+            Toggle(L10n.tr("Include sub-albums"), isOn: $viewModel.includeSubtree)
 
             // Show "Keep Live Updates" only for live albums
             if isLiveAlbum && viewModel.includeSubtree {
-                Toggle("Keep Live Updates", isOn: $viewModel.keepLiveUpdates)
+                Toggle(L10n.tr("Keep Live Updates"), isOn: $viewModel.keepLiveUpdates)
                     .disabled(!viewModel.includeSubtree)
             }
         } header: {
-            Text("Options")
+            Text(L10n.tr("Options"))
         }
 
         // Permissions section
         Section {
             // Role picker
-            Picker("Role", selection: $viewModel.role) {
-                Text("Viewer").tag(SharePermissions.viewer)
-                Text("Commenter").tag(SharePermissions.commenter)
-                Text("Contributor").tag(SharePermissions.contributor)
+            Picker(L10n.tr("Role"), selection: $viewModel.role) {
+                Text(L10n.tr("Viewer")).tag(SharePermissions.viewer)
+                Text(L10n.tr("Commenter")).tag(SharePermissions.commenter)
+                Text(L10n.tr("Contributor")).tag(SharePermissions.contributor)
             }
 
             // Only show comment/like toggles for non-Viewer roles
             if viewModel.role != .viewer {
-                Toggle("Allow comments", isOn: $viewModel.allowComments)
-                Toggle("Allow likes", isOn: $viewModel.allowLikes)
+                Toggle(L10n.tr("Allow comments"), isOn: $viewModel.allowComments)
+                Toggle(L10n.tr("Allow likes"), isOn: $viewModel.allowLikes)
             }
         } header: {
-            Text("Permissions")
+            Text(L10n.tr("Permissions"))
         }
 
         // Expires section
         Section {
             DatePicker(
-                "Expiration Date",
+                L10n.tr("Expiration Date"),
                 selection: $viewModel.expiryDate,
                 in: Date()...,
                 displayedComponents: [.date]
             )
             .datePickerStyle(.compact)
         } header: {
-            Text("Expires")
+            Text(L10n.tr("Expires"))
         } footer: {
-            Text("Share will expire on the selected date")
+            Text(L10n.tr("Share will expire on the selected date"))
                 .font(.caption)
         }
     }
@@ -245,81 +245,81 @@ struct NewShareSheet: View {
     private var publicLinkTabContent: some View {
         // Name section
         Section {
-            TextField("Public link name", text: $viewModel.shareName)
+            TextField(L10n.tr("Public link name"), text: $viewModel.shareName)
         } header: {
-            Text("Name")
+            Text(L10n.tr("Name"))
         } footer: {
             if let albumName = albumName {
-                Text("Sharing album \"\(albumName)\"")
+                Text(L10n.tr("Sharing album %@", albumName))
                     .font(.caption)
             }
         }
 
         // Options section
         Section {
-            Toggle("Include album content", isOn: $viewModel.pubIncludeAlbum)
+            Toggle(L10n.tr("Include album content"), isOn: $viewModel.pubIncludeAlbum)
 
-            Toggle("Contents moderation enabled", isOn: $viewModel.pubModeration)
+            Toggle(L10n.tr("Contents moderation enabled"), isOn: $viewModel.pubModeration)
         } header: {
-            Text("Options")
+            Text(L10n.tr("Options"))
         } footer: {
-            Text("Moderation allows you to review and approve uploads before they appear")
+            Text(L10n.tr("Moderation allows you to review and approve uploads before they appear"))
                 .font(.caption)
         }
 
         // Permissions section
         Section {
             // Role picker
-            Picker("Role", selection: $viewModel.pubRole) {
-                Text("Viewer").tag(SharePermissions.viewer)
-                Text("Commenter").tag(SharePermissions.commenter)
-                Text("Contributor").tag(SharePermissions.contributor)
+            Picker(L10n.tr("Role"), selection: $viewModel.pubRole) {
+                Text(L10n.tr("Viewer")).tag(SharePermissions.viewer)
+                Text(L10n.tr("Commenter")).tag(SharePermissions.commenter)
+                Text(L10n.tr("Contributor")).tag(SharePermissions.contributor)
             }
 
             // Only show comment/like toggles for non-Viewer roles
             if viewModel.pubRole != .viewer {
-                Toggle("Allow comments", isOn: $viewModel.pubAllowComments)
-                Toggle("Allow likes", isOn: $viewModel.pubAllowLikes)
+                Toggle(L10n.tr("Allow comments"), isOn: $viewModel.pubAllowComments)
+                Toggle(L10n.tr("Allow likes"), isOn: $viewModel.pubAllowLikes)
             }
         } header: {
-            Text("Permissions")
+            Text(L10n.tr("Permissions"))
         }
 
         // Expires section
         Section {
             DatePicker(
-                "Expiration Date",
+                L10n.tr("Expiration Date"),
                 selection: $viewModel.pubExpiryDate,
                 in: Date()...,
                 displayedComponents: [.date]
             )
             .datePickerStyle(.compact)
         } header: {
-            Text("Expires")
+            Text(L10n.tr("Expires"))
         } footer: {
-            Text("Public link will expire on the selected date")
+            Text(L10n.tr("Public link will expire on the selected date"))
                 .font(.caption)
         }
 
         // Security section
         Section {
-            Toggle("Require PIN", isOn: $viewModel.pubRequirePin)
+            Toggle(L10n.tr("Require PIN"), isOn: $viewModel.pubRequirePin)
 
             if viewModel.pubRequirePin {
-                SecureField("8-character PIN", text: $viewModel.pubPin)
+                SecureField(L10n.tr("8-character PIN"), text: $viewModel.pubPin)
                     .keyboardType(.numberPad)
 
                 if !viewModel.pubPin.isEmpty && viewModel.pubPin.count != 8 {
-                    Text("PIN must be exactly 8 characters")
+                    Text(L10n.tr("PIN must be exactly 8 characters"))
                         .font(.caption)
                         .foregroundColor(.red)
                 }
             }
         } header: {
-            Text("Security")
+            Text(L10n.tr("Security"))
         } footer: {
             if viewModel.pubRequirePin {
-                Text("Users will need to enter this PIN to access the public link")
+                Text(L10n.tr("Users will need to enter this PIN to access the public link"))
                     .font(.caption)
             }
         }
@@ -337,11 +337,11 @@ struct NewShareSheet: View {
                     )
 
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Auto-selected")
+                    Text(L10n.tr("Auto-selected"))
                         .font(.subheadline)
                         .foregroundColor(.primary)
 
-                    Text("First album photo will be used")
+                    Text(L10n.tr("First album photo will be used"))
                         .font(.caption)
                         .foregroundColor(.secondary)
                 }
@@ -349,9 +349,9 @@ struct NewShareSheet: View {
                 Spacer()
             }
         } header: {
-            Text("Cover Image")
+            Text(L10n.tr("Cover Image"))
         } footer: {
-            Text("The first photo from the album will be used as the cover image")
+            Text(L10n.tr("The first photo from the album will be used as the cover image"))
                 .font(.caption)
         }
 

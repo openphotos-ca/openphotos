@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -10,13 +10,10 @@ import { Eye, EyeOff, Mail, Lock, LogIn, Building2, ChevronRight } from 'lucide-
 import { useAuthStore } from '@/lib/stores/auth';
 import { authApi } from '@/lib/api/auth';
 import { logger } from '@/lib/logger';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
-const emailSchema = z.object({
-  email: z.string().email('Please enter a valid email address'),
-});
-const passwordSchema = z.object({ password: z.string().min(1, 'Password is required') });
-type EmailFormData = z.infer<typeof emailSchema>;
-type PasswordFormData = z.infer<typeof passwordSchema>;
+type EmailFormData = { email: string };
+type PasswordFormData = { password: string };
 
 interface LoginFormProps {
   onSwitchToRegister: () => void;
@@ -28,10 +25,17 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
   const [oauthError, setOauthError] = useState<string | null>(null);
   const router = useRouter();
   const { login } = useAuthStore();
+  const { t } = useI18n();
   const [step, setStep] = useState<'email' | 'org_password'>('email');
   const [email, setEmail] = useState('');
   const [orgs, setOrgs] = useState<{ organization_id: number; organization_name: string }[] | null>(null);
   const [orgId, setOrgId] = useState<number | null>(null);
+  const emailSchema = useMemo(() => z.object({
+    email: z.string().email(t('auth.errors.invalid_email')),
+  }), [t]);
+  const passwordSchema = useMemo(() => z.object({
+    password: z.string().min(1, t('auth.errors.password_required')),
+  }), [t]);
 
   const {
     register,
@@ -57,7 +61,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
 
   const doLoginFinish = async (pwd: string) => {
     if (!orgId) {
-      passwordForm.setError('password', { type: 'manual', message: 'Please select an organization' });
+      passwordForm.setError('password', { type: 'manual', message: t('auth.errors.select_organization') });
       return;
     }
     setIsLoading(true);
@@ -76,7 +80,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
         router.push('/');
       }
     } catch (error: any) {
-      passwordForm.setError('password', { type: 'manual', message: error.message || 'Login failed' });
+      passwordForm.setError('password', { type: 'manual', message: error.message || t('auth.errors.login_failed') });
     } finally {
       setIsLoading(false);
     }
@@ -121,7 +125,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
       window.location.href = url;
     } catch (error: any) {
       logger.error('Google login error:', error);
-      setOauthError(error?.message || 'Google sign-in failed');
+      setOauthError(error?.message || t('auth.errors.google_sign_in_failed'));
     }
   };
 
@@ -132,7 +136,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
       window.location.href = url;
     } catch (error: any) {
       logger.error('GitHub login error:', error);
-      setOauthError(error?.message || 'GitHub sign-in failed');
+      setOauthError(error?.message || t('auth.errors.github_sign_in_failed'));
     }
   };
 
@@ -150,8 +154,8 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
           draggable={false}
         />
         <div className="text-left">
-          <h1 className="text-3xl font-bold text-foreground">Welcome back</h1>
-          <p className="mt-1 text-sm text-muted-foreground">Sign in to your photo library</p>
+          <h1 className="text-3xl font-bold text-foreground">{t('auth.login.title')}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{t('auth.login.subtitle')}</p>
         </div>
       </div>
 
@@ -171,7 +175,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
 
         <div>
           <label htmlFor="email" className="block text-sm font-medium text-foreground">
-            Email address
+            {t('auth.email.label')}
           </label>
           <div className="mt-1 relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -182,7 +186,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
               type="email"
               autoComplete="email"
               className="appearance-none block w-full pl-10 pr-3 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm"
-              placeholder="Enter your email"
+              placeholder={t('auth.email.placeholder')}
               {...register('email')}
             />
           </div>
@@ -198,12 +202,12 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
           {isLoading ? (
             <div className="flex items-center">
               <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-              Checking…
+              {t('auth.checking')}
             </div>
           ) : (
             <div className="flex items-center">
               <ChevronRight className="h-4 w-4 mr-2" />
-              Continue
+              {t('auth.continue')}
             </div>
           )}
         </button>
@@ -229,21 +233,21 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
               router.push('/');
             }
           } catch (err: any) {
-            passwordForm.setError('password', { type: 'manual', message: err?.message || 'Login failed' });
+            passwordForm.setError('password', { type: 'manual', message: err?.message || t('auth.errors.login_failed') });
           } finally { setIsLoading(false); }
           return;
         }
         await doLoginFinish(d.password);
       })} className="space-y-4">
         <div>
-          <div className="text-sm text-muted-foreground mb-1">Signing in as</div>
+          <div className="text-sm text-muted-foreground mb-1">{t('auth.signing_in_as')}</div>
           <div className="flex items-center gap-2 text-foreground">
             <Mail className="h-4 w-4" /> <span className="font-medium">{email}</span>
           </div>
         </div>
       {orgs && orgs.length > 1 && (
           <div>
-            <label className="block text-sm font-medium text-foreground">Organization</label>
+            <label className="block text-sm font-medium text-foreground">{t('auth.organization')}</label>
             <div className="mt-1 relative">
               <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
                 <Building2 className="h-5 w-5 text-gray-400" />
@@ -261,12 +265,12 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
           </div>
         )}
         <div>
-          <label htmlFor="password" className="block text-sm font-medium text-foreground">Password</label>
+          <label htmlFor="password" className="block text-sm font-medium text-foreground">{t('auth.password.label')}</label>
           <div className="mt-1 relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
               <Lock className="h-5 w-5 text-gray-400" />
             </div>
-            <input id="password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" className="appearance-none block w-full pl-10 pr-10 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm" placeholder="Enter your password" {...passwordForm.register('password')} />
+            <input id="password" type={showPassword ? 'text' : 'password'} autoComplete="current-password" className="appearance-none block w-full pl-10 pr-10 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm" placeholder={t('auth.password.placeholder')} {...passwordForm.register('password')} />
             <button type="button" className="absolute inset-y-0 right-0 pr-3 flex items-center" onClick={() => setShowPassword(!showPassword)}>
               {showPassword ? <EyeOff className="h-5 w-5 text-gray-400 hover:text-gray-500" /> : <Eye className="h-5 w-5 text-gray-400 hover:text-gray-500" />}
             </button>
@@ -274,9 +278,9 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
           {passwordForm.formState.errors.password && (<p className="mt-1 text-sm text-red-600">{passwordForm.formState.errors.password.message}</p>)}
         </div>
         <div className="flex gap-2">
-          <button type="button" onClick={() => setStep('email')} className="flex-1 py-2 px-4 border border-border rounded-md bg-card text-sm">Back</button>
+          <button type="button" onClick={() => setStep('email')} className="flex-1 py-2 px-4 border border-border rounded-md bg-card text-sm">{t('common.back')}</button>
           <button type="submit" disabled={isLoading} className="flex-1 py-2 px-4 border border-transparent text-sm font-medium rounded-md text-primary-foreground bg-primary hover:bg-primary/90 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-primary disabled:opacity-50 disabled:cursor-not-allowed">
-            {isLoading ? 'Signing in…' : 'Sign in'}
+            {isLoading ? t('auth.signing_in') : t('auth.sign_in')}
           </button>
         </div>
       </form>
@@ -289,7 +293,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
             <div className="w-full border-t border-gray-300" />
           </div>
           <div className="relative flex justify-center text-sm">
-            <span className="px-2 bg-background text-muted-foreground">Or continue with</span>
+            <span className="px-2 bg-background text-muted-foreground">{t('auth.or_continue_with')}</span>
           </div>
         </div>
 
@@ -343,7 +347,7 @@ export function LoginForm({ onSwitchToRegister }: LoginFormProps) {
           }}
           className="text-sm text-primary hover:text-primary/80"
         >
-          Don't have an account? Sign up
+          {t('auth.switch_to_register')}
         </button>
       </div>
     </div>

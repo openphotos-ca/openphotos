@@ -175,10 +175,10 @@ struct GalleryView: View {
                 .environmentObject(viewModel)
                 .environmentObject(auth)
         }
-        .confirmationDialog("Actions", isPresented: $showingActionMenu) {
+        .confirmationDialog(L10n.tr("Actions"), isPresented: $showingActionMenu) {
             // Sync selected photos to the server (formerly "Send")
             if !viewModel.selectedPhotos.isEmpty {
-                Button("Sync") {
+                Button(L10n.tr("Sync")) {
                     let assets = Array(viewModel.selectedPhotos)
                     if assets.isEmpty { return }
                     if !auth.isAuthenticated {
@@ -191,21 +191,21 @@ struct GalleryView: View {
                     viewModel.exitSelectionMode()
                     viewModel.refreshPhotos()
                 }
-                Button("Add to Album") {
+                Button(L10n.tr("Add to Album")) {
                     addToAlbumSelectedId = nil
                     showingAddToAlbumPicker = true
                 }
             }
-            Button("Select All") {
+            Button(L10n.tr("Select All")) {
                 viewModel.selectAllPhotos()
             }
-            Button("Deselect All") {
+            Button(L10n.tr("Deselect All")) {
                 viewModel.deselectAll()
             }
-            Button("Delete", role: .destructive) {
+            Button(L10n.tr("Delete"), role: .destructive) {
                 showingDeleteAlert = true
             }
-            Button("Cancel", role: .cancel) { }
+            Button(L10n.tr("Cancel"), role: .cancel) { }
         }
         .alert("Stop Cloud Check?", isPresented: $showingStopCloudCheckConfirm) {
             Button("Stop", role: .destructive) {
@@ -425,7 +425,7 @@ struct SelectionActionBar: View {
             // visually simple and aligned with the requested design.
             Button(action: onActions) {
                 HStack(spacing: 4) {
-                    Text("Actions")
+                    Text(L10n.tr("Actions"))
                         .font(.system(size: 16, weight: .medium))
                     Image(systemName: "chevron.down")
                         .font(.system(size: 12, weight: .medium))
@@ -468,15 +468,15 @@ struct SelectedPhotosView: View {
     var body: some View {
         NavigationView {
             SelectedAssetsGrid(assets: Array(viewModel.selectedPhotos), spacing: spacing)
-            .navigationTitle("Selected (\(viewModel.selectedPhotos.count))")
+            .navigationTitle(L10n.tr("Selected (%d)", viewModel.selectedPhotos.count))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Back") { dismiss() }
+                    Button(L10n.tr("Back")) { dismiss() }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Menu {
-                        Button("Send") {
+                        Button(L10n.tr("Sync")) {
                             let assets = Array(viewModel.selectedPhotos)
                             if assets.isEmpty { return }
                             if !auth.isAuthenticated {
@@ -486,16 +486,16 @@ struct SelectedPhotosView: View {
                                 showingUploadsView = true
                             }
                         }
-                        Button("Add to Album") {
+                        Button(L10n.tr("Add to Album")) {
                             addToAlbumSelectedId = nil
                             showingAddToAlbumPicker = true
                         }
-                        Button("Delete", role: .destructive) {
+                        Button(L10n.tr("Delete"), role: .destructive) {
                             showingDeleteAlert = true
                         }
                     } label: {
                         HStack(spacing: 4) {
-                            Text("Actions")
+                            Text(L10n.tr("Actions"))
                             Image(systemName: "chevron.down")
                                 .font(.system(size: 12, weight: .medium))
                         }
@@ -528,11 +528,11 @@ struct SelectedPhotosView: View {
         .sheet(isPresented: $showingShareSheet) {
             ShareSheet(items: shareSheetItems)
         }
-        .alert("Delete Photos", isPresented: $showingDeleteAlert) {
-            Button("Delete", role: .destructive) {
+        .alert(L10n.tr("Delete Photos"), isPresented: $showingDeleteAlert) {
+            Button(L10n.tr("Delete"), role: .destructive) {
                 viewModel.deleteSelectedPhotos()
             }
-            Button("Cancel", role: .cancel) { }
+            Button(L10n.tr("Cancel"), role: .cancel) { }
         } message: {
             Text("Are you sure you want to delete \(viewModel.selectedPhotos.count) photo(s)? This action cannot be undone.")
         }
@@ -666,7 +666,7 @@ struct GalleryAppBar: View {
             }
             
             if showLayoutToggle {
-                Picker("Layout", selection: Binding(get: { currentLayout }, set: { onLayoutChange($0) })) {
+                Picker(L10n.tr("Layout"), selection: Binding(get: { currentLayout }, set: { onLayoutChange($0) })) {
                     Text(LayoutOption.grid.displayName).tag(LayoutOption.grid)
                     Text(LayoutOption.timeline.displayName).tag(LayoutOption.timeline)
                 }
@@ -681,25 +681,36 @@ struct GalleryAppBar: View {
                     ProgressView()
                         .scaleEffect(0.85)
                 }
-                .accessibilityLabel("Cloud check running. Tap to stop")
+                .accessibilityLabel(L10n.tr("Cloud check running. Tap to stop"))
             } else {
                 Menu {
-                    Button("Check all photos", action: onCloudCheckAll)
-                    Button("Check Current Selection", action: onCloudCheckCurrentSelection)
-                    Button("List Deleted", action: onCloudCheckListDeleted)
-                    Button("Cancel", action: onCloudCheckCancel)
+                    Button(L10n.tr("Check all photos"), action: onCloudCheckAll)
+                    Button(L10n.tr("Check Current Selection"), action: onCloudCheckCurrentSelection)
+                    Button(L10n.tr("List Deleted"), action: onCloudCheckListDeleted)
+                    Button(L10n.tr("Cancel"), action: onCloudCheckCancel)
                 } label: {
                     Image(systemName: "cloud")
                         .font(.title3)
                         .foregroundColor(.primary)
                 }
-                .accessibilityLabel("Check Cloud Backup")
+                .accessibilityLabel(L10n.tr("Check Cloud Backup"))
             }
 
-            Button(action: onSelect) {
-                Text(isSelectionMode ? "Cancel" : "Select")
-                    .font(.headline)
-                    .foregroundColor(isSelectionMode ? .red : .blue)
+            Menu {
+                Button(action: onSelect) {
+                    Label(
+                        L10n.tr(isSelectionMode ? "Cancel" : "Select"),
+                        systemImage: isSelectionMode ? "xmark.circle" : "checkmark.circle"
+                    )
+                }
+                Divider()
+                Button(action: onSlideshow) {
+                    Label(L10n.tr("Slideshow"), systemImage: "play.rectangle")
+                }
+            } label: {
+                Image(systemName: "line.3.horizontal")
+                    .font(.title3)
+                    .foregroundColor(.primary)
             }
         }
         .padding(.horizontal, 12)
@@ -931,14 +942,20 @@ struct MediaTypeTab: View {
     let count: Int
     let isSelected: Bool
     let action: () -> Void
+
+    private var label: String {
+        "\(L10n.tr(title)) \(count.formatted(.number))"
+    }
     
     var body: some View {
         Button(action: action) {
-            Text("\(title) (\(count))")
-                .font(.subheadline)
+            Text(label)
+                .font(.caption2)
                 .fontWeight(isSelected ? .semibold : .regular)
                 .foregroundColor(isSelected ? .blue : .secondary)
-                .padding(.horizontal, 16)
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+                .padding(.horizontal, 10)
                 .padding(.vertical, 8)
                 .background(
                     RoundedRectangle(cornerRadius: 12)
@@ -1198,15 +1215,15 @@ struct ActiveFilterBar: View {
             let label: String
             switch filter {
             case .screenshots:
-                label = "Screenshots"
+                label = L10n.tr("Screenshots")
             case .livePhotos:
-                label = "Live Photos"
+                label = L10n.tr("Live Photos")
             case .timeRange:
                 label = viewModel.selectedTimeRange.displayName
             case .missingInCloud:
-                label = "Missing in Cloud"
+                label = L10n.tr("Missing in Cloud")
             case .deletedInCloud:
-                label = "Deleted in Cloud"
+                label = L10n.tr("Deleted in Cloud")
             }
             filters.append((
                 id: "filter",
@@ -1219,7 +1236,7 @@ struct ActiveFilterBar: View {
         if viewModel.showFavoritesOnly {
             filters.append((
                 id: "favorites",
-                label: "Favorites",
+                label: L10n.tr("Favorites"),
                 action: { viewModel.showFavoritesOnly = false }
             ))
         }
@@ -1228,7 +1245,7 @@ struct ActiveFilterBar: View {
         if viewModel.showLockedOnly {
             filters.append((
                 id: "locked",
-                label: "Locked",
+                label: L10n.tr("Locked"),
                 action: { viewModel.showLockedOnly = false }
             ))
         }

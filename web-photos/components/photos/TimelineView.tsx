@@ -8,6 +8,7 @@ import { Photo } from '@/lib/types/photo';
 import { AuthenticatedImage } from '@/components/ui/AuthenticatedImage';
 import { photosApi } from '@/lib/api/photos';
 import { logger } from '@/lib/logger';
+import { intlLocaleFor, useI18n, type Locale } from '@/lib/i18n/I18nProvider';
 
 interface TimelineViewProps {
   photos: Photo[];
@@ -24,9 +25,9 @@ interface TimelineViewProps {
   bucketKey?: string;
 }
 
-function formatDay(ts: number) {
+function formatDay(ts: number, locale: Locale) {
   const d = new Date((ts || 0) * 1000);
-  return d.toLocaleDateString(undefined, {
+  return d.toLocaleDateString(intlLocaleFor(locale), {
     weekday: 'short',
     month: 'short',
     day: 'numeric',
@@ -215,6 +216,7 @@ const TimelineDaySection = React.memo(function TimelineDaySection({
   onPhotoSelect,
   anchorsRef,
   quarterAnchorsRef,
+  locale,
 }: {
   group: DayGroup;
   insertYearAnchor: boolean;
@@ -225,6 +227,7 @@ const TimelineDaySection = React.memo(function TimelineDaySection({
   onPhotoSelect: (assetId: string, selected: boolean) => void;
   anchorsRef: React.MutableRefObject<Map<number, HTMLElement>>;
   quarterAnchorsRef: React.MutableRefObject<Map<string, HTMLElement>>;
+  locale: Locale;
 }) {
   return (
     <section className="mb-6">
@@ -249,7 +252,7 @@ const TimelineDaySection = React.memo(function TimelineDaySection({
           }}
         />
       )}
-      <h3 className="text-lg font-semibold text-foreground mb-3">{formatDay(group.date)}</h3>
+      <h3 className="text-lg font-semibold text-foreground mb-3">{formatDay(group.date, locale)}</h3>
       <div className="flex flex-wrap gap-3">
         {group.photos.map((p) => (
           <TimelinePhoto
@@ -279,6 +282,7 @@ export function TimelineView({
   bucketQuery,
   bucketKey,
 }: TimelineViewProps) {
+  const { locale, translateSource: tx } = useI18n();
   type YearBucket = { year: number; count: number; first_ts: number; last_ts?: number };
   type QuarterBucket = { quarter: number; count: number; first_ts: number; last_ts?: number };
   const [yearBuckets, setYearBuckets] = useState<YearBucket[] | null>(null);
@@ -778,6 +782,7 @@ export function TimelineView({
               onPhotoSelect={onPhotoSelect}
               anchorsRef={anchorsRef}
               quarterAnchorsRef={quarterAnchorsRef}
+              locale={locale}
             />
           );
         })}
@@ -1009,9 +1014,9 @@ export function TimelineView({
                   }
                 }}
                 className="text-[11px] px-2 py-1 rounded-full bg-muted text-foreground hover:bg-muted/80"
-                title="Back to top"
+                title={tx("Back to top")}
               >
-                {loadingJumpKey === 'top' ? '…' : '↑ Top'}
+                {loadingJumpKey === 'top' ? '…' : `↑ ${tx("Top")}`}
               </button>
             </div>
           </div>

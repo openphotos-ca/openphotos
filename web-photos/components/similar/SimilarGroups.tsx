@@ -7,8 +7,10 @@ import { TreePine, X } from 'lucide-react';
 import { photosApi } from '@/lib/api/photos';
 import AlbumPickerDialog from '@/components/albums/AlbumPickerDialog';
 import { logger } from '@/lib/logger';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 export function SimilarGroups({ onOpenPhoto }: { onOpenPhoto?: (assetId: string, group: string[], index: number) => void }) {
+  const { translateSource: tx, formatSource } = useI18n();
   const [cursor, setCursor] = useState<number>(0);
   const [groups, setGroups] = useState<SimilarGroup[]>([]);
   const [meta, setMeta] = useState<Record<string, AssetMeta>>({});
@@ -38,11 +40,11 @@ export function SimilarGroups({ onOpenPhoto }: { onOpenPhoto?: (assetId: string,
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">Similar Photo Groups</h2>
-        <div className="text-sm text-muted-foreground">{groups.length} groups loaded</div>
+        <h2 className="text-lg font-semibold">{tx("Similar Photo Groups")}</h2>
+        <div className="text-sm text-muted-foreground">{formatSource('%d groups loaded', groups.length)}</div>
       </div>
       {groups.length === 0 && !isLoading && (
-        <div className="text-muted-foreground">No similar photo groups found. Try indexing more photos.</div>
+        <div className="text-muted-foreground">{tx("No similar photo groups found. Try indexing more photos.")}</div>
       )}
       <div className="flex flex-col gap-6">
         {groups.map((g, idx) => (
@@ -55,7 +57,7 @@ export function SimilarGroups({ onOpenPhoto }: { onOpenPhoto?: (assetId: string,
           disabled={done || isLoading}
           onClick={loadMore}
         >
-          {done ? 'All loaded' : (isLoading ? 'Loading…' : 'Load more')}
+          {done ? tx("All loaded") : (isLoading ? tx("Loading…") : tx("Load more"))}
         </button>
       </div>
     </div>
@@ -63,6 +65,7 @@ export function SimilarGroups({ onOpenPhoto }: { onOpenPhoto?: (assetId: string,
 }
 
 function GroupGrid({ group, onOpenPhoto, metadata }: { group: SimilarGroup; onOpenPhoto?: (assetId: string, group: string[], index: number) => void; metadata: Record<string, AssetMeta> }) {
+  const { translateSource: tx } = useI18n();
   const queryClient = useQueryClient();
   // Render all members in a responsive grid; highlight the representative first
   const baseItems = useMemo(() => (
@@ -197,7 +200,7 @@ function GroupGrid({ group, onOpenPhoto, metadata }: { group: SimilarGroup; onOp
     <section className="border border-border rounded-md bg-card overflow-hidden">
       <div className="px-3 py-2 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-sm text-foreground font-medium">Similar group</span>
+          <span className="text-sm text-foreground font-medium">{tx("Similar group")}</span>
           <span className="text-xs px-2 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary">
             {items.length} / {group.count}
           </span>
@@ -210,8 +213,8 @@ function GroupGrid({ group, onOpenPhoto, metadata }: { group: SimilarGroup; onOp
               <button
                 className="ml-1 w-5 h-5 rounded-full bg-foreground text-background flex items-center justify-center hover:opacity-90"
                 onClick={() => { setSelectedAlbumId(null); setFilteredItems(null); }}
-                aria-label="Clear album filter"
-                title="Clear album filter"
+                aria-label={tx("Clear album filter")}
+                title={tx("Clear album filter")}
               >
                 <X className="w-3 h-3" />
               </button>
@@ -223,37 +226,37 @@ function GroupGrid({ group, onOpenPhoto, metadata }: { group: SimilarGroup; onOp
           <button
             className="flex items-center gap-1 text-sm px-2 py-1 rounded border border-border bg-background hover:bg-muted"
             onClick={toggleSelectAll}
-            aria-label="Select"
-            title="Select"
+            aria-label={tx("Select")}
+            title={tx("Select")}
           >
-            Select{selected.size ? ` (${selected.size})` : ''}
+            {tx("Select")}{selected.size ? ` (${selected.size})` : ''}
           </button>
           <button
             className="flex items-center gap-1 text-sm px-2 py-1 rounded border border-border bg-background hover:bg-muted"
             onClick={selectInferior}
-            aria-label="Select inferior"
-            title="Select all but largest"
+            aria-label={tx("Select inferior")}
+            title={tx("Select all but largest")}
           >
-            Select Inferior
+            {tx("Select Inferior")}
           </button>
           {selected.size > 0 && (
             <button
               className="text-xs text-muted-foreground hover:underline"
               onClick={() => setSelected(new Set())}
-              aria-label="Select none"
-              title="Select none"
+              aria-label={tx("Select none")}
+              title={tx("Select none")}
             >
-              None
+              {tx("None")}
             </button>
           )}
           <button
             className={`flex items-center gap-1 text-sm px-2 py-1 rounded border ${selected.size ? 'border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20' : 'border-border bg-muted text-muted-foreground cursor-not-allowed'}`}
             onClick={deleteSelected}
             disabled={selected.size === 0}
-            aria-label="Delete selected"
-            title={selected.size ? 'Delete selected' : 'Select photos to enable'}
+            aria-label={tx("Delete selected")}
+            title={selected.size ? tx("Delete selected") : tx("Select photos to enable")}
           >
-            Delete
+            {tx("Delete")}
           </button>
           {/* Sort dropdown */}
           <div className="relative">
@@ -264,15 +267,15 @@ function GroupGrid({ group, onOpenPhoto, metadata }: { group: SimilarGroup; onOp
                 if (menu) menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
               }}
               aria-haspopup="menu"
-              aria-label="Sort"
-              title="Sort"
+              aria-label={tx("Sort")}
+              title={tx("Sort")}
             >
-              Sort
+              {tx("Sort")}
             </button>
             <div className="absolute right-0 mt-1 w-56 bg-background border border-border rounded shadow-xl z-10" style={{ display: 'none' }}
-                 onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }} aria-label="Sort menu">
-              <button className="block w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={(e) => { setSortKind('date'); (e.currentTarget.parentElement as HTMLElement).style.display = 'none'; }}>Date (Newest First)</button>
-              <button className="block w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={(e) => { setSortKind('size'); (e.currentTarget.parentElement as HTMLElement).style.display = 'none'; }}>File Size (Largest First)</button>
+                 onMouseLeave={(e) => { (e.currentTarget as HTMLElement).style.display = 'none'; }} aria-label={tx("Sort menu")}>
+              <button className="block w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={(e) => { setSortKind('date'); (e.currentTarget.parentElement as HTMLElement).style.display = 'none'; }}>{tx("Date (Newest First)")}</button>
+              <button className="block w-full text-left px-3 py-2 text-sm hover:bg-muted" onClick={(e) => { setSortKind('size'); (e.currentTarget.parentElement as HTMLElement).style.display = 'none'; }}>{tx("File Size (Largest First)")}</button>
             </div>
           </div>
           <button

@@ -115,6 +115,7 @@ struct ServerMediaCounts: Decodable {
     let locked: Int
     let locked_photos: Int?
     let locked_videos: Int?
+    let total_size_bytes: Int64?
     let trash: Int?
 }
 

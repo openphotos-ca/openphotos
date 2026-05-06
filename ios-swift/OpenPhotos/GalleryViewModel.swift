@@ -27,9 +27,9 @@ enum MediaType: CaseIterable {
     
     var displayName: String {
         switch self {
-        case .all: return "All"
-        case .photos: return "Photos"
-        case .videos: return "Videos"
+        case .all: return L10n.tr("All")
+        case .photos: return L10n.tr("Photos")
+        case .videos: return L10n.tr("Videos")
         }
     }
 }
@@ -39,10 +39,10 @@ enum SortOption: CaseIterable {
     
     var displayName: String {
         switch self {
-        case .dateNewest: return "Newest First"
-        case .dateOldest: return "Oldest First"
-        case .sizeDescending: return "Largest First"
-        case .random: return "Random"
+        case .dateNewest: return L10n.tr("Newest First")
+        case .dateOldest: return L10n.tr("Oldest First")
+        case .sizeDescending: return L10n.tr("Largest First")
+        case .random: return L10n.tr("Random")
         }
     }
 }
@@ -57,8 +57,8 @@ enum LayoutOption: String, CaseIterable {
     
     var displayName: String {
         switch self {
-        case .grid: return "Grid"
-        case .timeline: return "Timeline"
+        case .grid: return L10n.tr("Grid")
+        case .timeline: return L10n.tr("Timeline")
         }
     }
 }
@@ -68,11 +68,11 @@ enum FilterType: CaseIterable {
     
     var displayName: String {
         switch self {
-        case .timeRange: return "Time Range"
-        case .screenshots: return "Screenshots"
-        case .livePhotos: return "Live Photos"
-        case .missingInCloud: return "Missing in Cloud"
-        case .deletedInCloud: return "Deleted in Cloud"
+        case .timeRange: return L10n.tr("Time Range")
+        case .screenshots: return L10n.tr("Screenshots")
+        case .livePhotos: return L10n.tr("Live Photos")
+        case .missingInCloud: return L10n.tr("Missing in Cloud")
+        case .deletedInCloud: return L10n.tr("Deleted in Cloud")
         }
     }
 }
@@ -87,12 +87,12 @@ enum TimeRangePreset {
     
     var displayName: String {
         switch self {
-        case .lastDay: return "Last Day"
-        case .lastWeek: return "Last Week"
-        case .lastMonth: return "Last Month"
-        case .lastYear: return "Last Year"
-        case .allTime: return "All Time"
-        case .custom: return "Custom"
+        case .lastDay: return L10n.tr("Last Day")
+        case .lastWeek: return L10n.tr("Last Week")
+        case .lastMonth: return L10n.tr("Last Month")
+        case .lastYear: return L10n.tr("Last Year")
+        case .allTime: return L10n.tr("All Time")
+        case .custom: return L10n.tr("Custom")
         }
     }
     
@@ -474,11 +474,11 @@ class GalleryViewModel: ObservableObject {
         guard !snapshot.isEmpty else {
             switch scope {
             case .allPhotos:
-                ToastManager.shared.show("No photos to check")
+                ToastManager.shared.show(L10n.tr("No photos to check"))
             case .currentSelection:
-                ToastManager.shared.show("No photos in current selection")
+                ToastManager.shared.show(L10n.tr("No photos in current selection"))
             case .listDeleted:
-                ToastManager.shared.show("No photos in sync scope")
+                ToastManager.shared.show(L10n.tr("No photos in sync scope"))
             }
             return
         }
@@ -489,7 +489,7 @@ class GalleryViewModel: ObservableObject {
 
         isCloudCheckRunning = true
         cloudCheckTask = nil
-        ToastManager.shared.show("Checking cloud backup…", duration: 2.0)
+        ToastManager.shared.show(L10n.tr("Checking cloud backup…"), duration: 2.0)
 
         let task = Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
@@ -511,7 +511,13 @@ class GalleryViewModel: ObservableObject {
                         self.applyDeletedCloudList(localIdentifiers: result.deletedLocalIdentifiers)
                         let strategy = result.usedServerFirst ? "server-first" : "local-first"
                         ToastManager.shared.showPinned(
-                            "List Deleted: \(result.deleted) deleted, \(result.scanned) scanned, \(result.skipped) skipped (\(strategy))"
+                            L10n.tr(
+                                "List Deleted: %d deleted, %d scanned, %d skipped (%@)",
+                                result.deleted,
+                                result.scanned,
+                                result.skipped,
+                                strategy
+                            )
                         )
                     }
                     return
@@ -522,14 +528,37 @@ class GalleryViewModel: ObservableObject {
                     onProgress: { _, _ in }
                 )
                 await MainActor.run {
+                    let selectedCount = result.checked + result.skipped
                     self.cloudCheckTask = nil
                     self.isCloudCheckRunning = false
                     self.refreshCloudBackedUp()
                     self.refreshCloudMissing()
                     self.refreshCloudDeleted()
-                    ToastManager.shared.showPinned(
-                        "Cloud check: \(result.backedUp) backed up, \(result.deleted) deleted, \(result.missing) missing, \(result.skipped) not checked"
-                    )
+                    print("[CLOUDCHECK] completed selected=\(selectedCount) backed=\(result.backedUp) deleted=\(result.deleted) missing=\(result.missing) skipped=\(result.skipped) duplicate_groups=\(result.duplicateGroups) duplicate_excess=\(result.duplicateExcess)")
+                    if result.duplicateGroups > 0 {
+                        ToastManager.shared.showPinned(
+                            L10n.tr(
+                                "Cloud check (%d selected): %d backed up, %d deleted, %d missing, %d not checked, %d duplicate groups",
+                                selectedCount,
+                                result.backedUp,
+                                result.deleted,
+                                result.missing,
+                                result.skipped,
+                                result.duplicateGroups
+                            )
+                        )
+                    } else {
+                        ToastManager.shared.showPinned(
+                            L10n.tr(
+                                "Cloud check (%d selected): %d backed up, %d deleted, %d missing, %d not checked",
+                                selectedCount,
+                                result.backedUp,
+                                result.deleted,
+                                result.missing,
+                                result.skipped
+                            )
+                        )
+                    }
                 }
             } catch is CancellationError {
                 await MainActor.run {
@@ -541,7 +570,7 @@ class GalleryViewModel: ObservableObject {
                     self.refreshCloudBackedUp()
                     self.refreshCloudMissing()
                     self.refreshCloudDeleted()
-                    ToastManager.shared.show("Cloud check stopped")
+                    ToastManager.shared.show(L10n.tr("Cloud check stopped"))
                 }
             } catch {
                 await MainActor.run {
@@ -550,7 +579,7 @@ class GalleryViewModel: ObservableObject {
                     if scope == .listDeleted {
                         self.clearDeletedCloudResultsPresentation()
                     }
-                    ToastManager.shared.showPinned("Cloud check failed: \(error.localizedDescription)")
+                    ToastManager.shared.showPinned(L10n.tr("Cloud check failed: %@", error.localizedDescription))
                 }
             }
         }
@@ -563,7 +592,7 @@ class GalleryViewModel: ObservableObject {
         guard !localIdentifiers.isEmpty else {
             exitSelectionMode()
             clearDeletedCloudResultsPresentation()
-            ToastManager.shared.show("No local items were deleted in the cloud")
+            ToastManager.shared.show(L10n.tr("No local items were deleted in the cloud"))
             return
         }
         listDeletedResultsModeActive = true
@@ -575,7 +604,7 @@ class GalleryViewModel: ObservableObject {
     @MainActor
     func stopCloudCheck() {
         guard isCloudCheckRunning, let task = cloudCheckTask else { return }
-        ToastManager.shared.show("Stopping cloud check…", duration: 1.5)
+        ToastManager.shared.show(L10n.tr("Stopping cloud check…"), duration: 1.5)
         task.cancel()
     }
 

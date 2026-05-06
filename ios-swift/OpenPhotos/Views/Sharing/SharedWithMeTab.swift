@@ -14,7 +14,7 @@ struct SharedWithMeTab: View {
     var body: some View {
         Group {
             if viewModel.isLoadingReceived && viewModel.receivedShares.isEmpty {
-                ProgressView("Loading shares...")
+                ProgressView(L10n.tr("Loading shares..."))
             } else if let error = viewModel.receivedError {
                 ErrorView(message: error) {
                     Task {

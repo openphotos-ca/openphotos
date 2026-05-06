@@ -13,6 +13,8 @@ pub struct PhotoListQuery {
     pub sort_by: Option<String>,
     pub sort_order: Option<String>,
     pub filter_city: Option<String>,
+    #[serde(alias = "filter_region")]
+    pub filter_province: Option<String>,
     pub filter_country: Option<String>,
     pub filter_date_from: Option<i64>,
     pub filter_date_to: Option<i64>,
@@ -100,6 +102,11 @@ impl PhotoService {
         if let Some(city) = &query.filter_city {
             where_clauses.push("p.city = ?");
             params_vec.push(Box::new(city.clone()));
+        }
+
+        if let Some(province) = &query.filter_province {
+            where_clauses.push("p.province = ?");
+            params_vec.push(Box::new(province.clone()));
         }
         
         if let Some(country) = &query.filter_country {

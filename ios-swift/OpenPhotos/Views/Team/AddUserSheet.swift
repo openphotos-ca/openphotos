@@ -23,37 +23,37 @@ struct AddUserSheet: View {
         NavigationView {
             Form {
                 // Basic Information
-                Section("User Information") {
-                    TextField("Email", text: $email)
+                Section(L10n.tr("User Information")) {
+                    TextField(L10n.tr("Email"), text: $email)
                         .textContentType(.emailAddress)
                         .keyboardType(.emailAddress)
                         .autocapitalization(.none)
                         .disabled(isSubmitting)
 
-                    TextField("Name", text: $name)
+                    TextField(L10n.tr("Name"), text: $name)
                         .textContentType(.name)
                         .disabled(isSubmitting)
                 }
 
                 // Password
-                Section("Password") {
-                    SecureField("Password (min 6 characters)", text: $password)
+                Section(L10n.tr("Password")) {
+                    SecureField(L10n.tr("Password (min 6 characters)"), text: $password)
                         .textContentType(.newPassword)
                         .disabled(isSubmitting)
 
-                    SecureField("Confirm Password", text: $confirmPassword)
+                    SecureField(L10n.tr("Confirm Password"), text: $confirmPassword)
                         .textContentType(.newPassword)
                         .disabled(isSubmitting)
 
-                    Toggle("Must change password on first login", isOn: $mustChangePassword)
+                    Toggle(L10n.tr("Must change password on first login"), isOn: $mustChangePassword)
                         .disabled(isSubmitting)
                 }
 
                 // Role Selection
-                Section("Role") {
-                    Picker("Role", selection: $selectedRole) {
-                        Text("Regular").tag("regular")
-                        Text("Admin").tag("admin")
+                Section(L10n.tr("Role")) {
+                    Picker(L10n.tr("Role"), selection: $selectedRole) {
+                        Text(L10n.tr("Regular")).tag("regular")
+                        Text(L10n.tr("Admin")).tag("admin")
                     }
                     .pickerStyle(.segmented)
                     .disabled(isSubmitting)
@@ -61,7 +61,7 @@ struct AddUserSheet: View {
 
                 // Optional Group Assignment
                 if !viewModel.groups.isEmpty {
-                    Section("Groups (Optional)") {
+                    Section(L10n.tr("Groups (Optional)")) {
                         ForEach(viewModel.groups) { group in
                             Toggle(group.name, isOn: Binding(
                                 get: { selectedGroups.contains(group.id) },
@@ -87,17 +87,17 @@ struct AddUserSheet: View {
                     }
                 }
             }
-            .navigationTitle("Add User")
+            .navigationTitle(L10n.tr("Add User"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                    Button(L10n.tr("Cancel")) {
                         dismiss()
                     }
                     .disabled(isSubmitting)
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Create") {
+                    Button(L10n.tr("Create")) {
                         Task { await createUser() }
                     }
                     .disabled(!isFormValid || isSubmitting)
@@ -151,19 +151,19 @@ struct AddUserSheet: View {
 
         // Final validation before submission
         guard password == confirmPassword else {
-            errorMessage = "Passwords do not match"
+            errorMessage = L10n.tr("Passwords do not match")
             isSubmitting = false
             return
         }
 
         guard password.count >= 6 else {
-            errorMessage = "Password must be at least 6 characters"
+            errorMessage = L10n.tr("Password must be at least 6 characters")
             isSubmitting = false
             return
         }
 
         guard email.contains("@") && email.contains(".") else {
-            errorMessage = "Please enter a valid email address"
+            errorMessage = L10n.tr("Please enter a valid email address")
             isSubmitting = false
             return
         }

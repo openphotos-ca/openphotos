@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use async_trait::async_trait;
 use tokio_postgres::Client;
 
@@ -9,6 +9,10 @@ use crate::photos::Photo as PhotoDTO;
 #[derive(Clone)]
 pub struct PgMetaStore {
     client: std::sync::Arc<Client>,
+}
+
+fn pg_sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
 }
 
 impl PgMetaStore {
@@ -270,15 +274,15 @@ impl MetaStore for PgMetaStore {
         }
         if let Some(city) = &q.filter_city {
             where_sql.push_str(" AND p.city = ");
-            where_sql.push('"');
-            where_sql.push_str(&city.replace('"', "\""));
-            where_sql.push('"');
+            where_sql.push_str(&pg_sql_literal(city));
+        }
+        if let Some(province) = &q.filter_province {
+            where_sql.push_str(" AND p.province = ");
+            where_sql.push_str(&pg_sql_literal(province));
         }
         if let Some(country) = &q.filter_country {
             where_sql.push_str(" AND p.country = ");
-            where_sql.push('"');
-            where_sql.push_str(&country.replace('"', "\""));
-            where_sql.push('"');
+            where_sql.push_str(&pg_sql_literal(country));
         }
         if let Some(date_from) = q.filter_date_from {
             where_sql.push_str(" AND p.created_at >= ");

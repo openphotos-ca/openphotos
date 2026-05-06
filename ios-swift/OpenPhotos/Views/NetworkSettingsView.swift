@@ -14,9 +14,9 @@ struct NetworkSettingsView: View {
 
     var body: some View {
         Form {
-            Section("Current Connection") {
+            Section(L10n.tr("Current Connection")) {
                 labeledValue("Active URL", value: auth.currentEffectiveBaseURL().isEmpty ? "-" : auth.currentEffectiveBaseURL())
-                labeledValue("Routing", value: auth.networkStatusSummary())
+                labeledValue("Routing", value: L10n.tr(auth.networkStatusSummary()))
                 labeledValue("Transport", value: transportLabel(auth.networkTransport))
                 if let lastLocalProbeAt = auth.lastLocalProbeAt {
                     labeledValue("Last Local Probe", value: lastLocalProbeAt.formatted(date: .abbreviated, time: .shortened))
@@ -27,7 +27,7 @@ struct NetworkSettingsView: View {
                         .foregroundColor((auth.lastLocalProbeSucceeded ?? false) ? .green : .secondary)
                 }
 
-                Button(isRefreshing ? "Refreshing…" : "Refresh") {
+                Button(isRefreshing ? L10n.tr("Refreshing…") : L10n.tr("Refresh")) {
                     isRefreshing = true
                     Task {
                         await auth.refreshNetworkRouting()
@@ -36,41 +36,41 @@ struct NetworkSettingsView: View {
                 }
                 .disabled(isRefreshing)
 
-                Button("Use Current Connection") {
+                Button(L10n.tr("Use Current Connection")) {
                     auth.useCurrentConnection()
                     syncFieldsFromAuth()
                 }
                 .disabled(auth.activeEndpoint == .none)
             }
 
-            Section("Routing") {
-                Toggle("Auto-switch URL", isOn: Binding(
+            Section(L10n.tr("Routing")) {
+                Toggle(L10n.tr("Auto-switch URL"), isOn: Binding(
                     get: { auth.autoSwitchEnabled },
                     set: { auth.setAutoSwitchEnabled($0) }
                 ))
 
                 if !auth.autoSwitchEnabled {
-                    Picker("Preferred URL", selection: Binding(
+                    Picker(L10n.tr("Preferred URL"), selection: Binding(
                         get: { auth.manualPreferredEndpoint },
                         set: { auth.setManualPreferredEndpoint($0) }
                     )) {
-                        Text("External Network").tag(AuthManager.ManualPreferredEndpoint.public)
-                        Text("Local Network").tag(AuthManager.ManualPreferredEndpoint.local)
+                        Text(L10n.tr("External Network")).tag(AuthManager.ManualPreferredEndpoint.public)
+                        Text(L10n.tr("Local Network")).tag(AuthManager.ManualPreferredEndpoint.local)
                     }
                 }
             }
 
-            Section("External Network") {
+            Section(L10n.tr("External Network")) {
                 networkURLField(
                     text: $publicURLText,
                     placeholder: "https://example.openphotos.ca"
                 )
 
-                Button("Save External URL") {
-                    saveSettings(successMessage: "External URL saved.")
+                Button(L10n.tr("Save External URL")) {
+                    saveSettings(successMessage: "External URL saved")
                 }
 
-                Button(isTestingPublic ? "Testing…" : "Test Public") {
+                Button(isTestingPublic ? L10n.tr("Testing…") : L10n.tr("Test Public")) {
                     test(endpoint: .public)
                 }
                 .disabled(isTestingPublic)
@@ -82,17 +82,17 @@ struct NetworkSettingsView: View {
                 }
             }
 
-            Section("Local Network") {
+            Section(L10n.tr("Local Network")) {
                 networkURLField(
                     text: $localURLText,
                     placeholder: "http://192.168.2.249:3003"
                 )
 
-                Button("Save Local URL") {
-                    saveSettings(successMessage: "Local URL saved.")
+                Button(L10n.tr("Save Local URL")) {
+                    saveSettings(successMessage: "Local URL saved")
                 }
 
-                Button(isTestingLocal ? "Testing…" : "Test Local") {
+                Button(isTestingLocal ? L10n.tr("Testing…") : L10n.tr("Test Local")) {
                     test(endpoint: .local)
                 }
                 .disabled(isTestingLocal)
@@ -112,7 +112,7 @@ struct NetworkSettingsView: View {
                 }
             }
         }
-        .navigationTitle("Advanced Network")
+        .navigationTitle(L10n.tr("Advanced Network"))
         .onAppear { syncFieldsFromAuth() }
         .onChange(of: auth.publicBaseURL) { _ in syncFieldsFromAuth() }
         .onChange(of: auth.localBaseURL) { _ in syncFieldsFromAuth() }
@@ -122,7 +122,7 @@ struct NetworkSettingsView: View {
 private extension NetworkSettingsView {
     func labeledValue(_ label: String, value: String) -> some View {
         HStack(alignment: .top) {
-            Text(label)
+            Text(L10n.tr(label))
             Spacer()
             Text(value)
                 .foregroundColor(.secondary)
@@ -134,15 +134,15 @@ private extension NetworkSettingsView {
     func transportLabel(_ transport: AuthManager.NetworkTransportKind) -> String {
         switch transport {
         case .offline:
-            return "Offline"
+            return L10n.tr("Offline")
         case .wifi:
-            return "Wi-Fi"
+            return L10n.tr("Wi-Fi")
         case .ethernet:
-            return "Ethernet"
+            return L10n.tr("Ethernet")
         case .cellular:
-            return "Cellular"
+            return L10n.tr("Cellular")
         case .other:
-            return "Other"
+            return L10n.tr("Other")
         }
     }
 
@@ -173,20 +173,20 @@ private extension NetworkSettingsView {
         let trimmedLocal = localURLText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         if !trimmedPublic.isEmpty && AuthManager.parseBaseURL(trimmedPublic) == nil {
-            validationMessage = "External URL is invalid."
-            ToastManager.shared.show("External URL is invalid.")
+            validationMessage = L10n.tr("External URL is invalid")
+            ToastManager.shared.show(L10n.tr("External URL is invalid"))
             return
         }
         if !trimmedLocal.isEmpty && AuthManager.parseBaseURL(trimmedLocal) == nil {
-            validationMessage = "Local URL is invalid."
-            ToastManager.shared.show("Local URL is invalid.")
+            validationMessage = L10n.tr("Local URL is invalid")
+            ToastManager.shared.show(L10n.tr("Local URL is invalid"))
             return
         }
 
         validationMessage = nil
         auth.saveConfiguredBaseURLs(publicBaseURL: trimmedPublic, localBaseURL: trimmedLocal)
         syncFieldsFromAuth()
-        ToastManager.shared.show(successMessage)
+        ToastManager.shared.show(L10n.tr(successMessage))
     }
 
     func test(endpoint: AuthManager.ManualPreferredEndpoint) {

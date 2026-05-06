@@ -47,12 +47,28 @@ class TeamManagementViewModel: ObservableObject {
         case all = "All roles"
         case admin = "admin"
         case regular = "regular"
+
+        var displayName: String {
+            switch self {
+            case .all: return L10n.tr("All roles")
+            case .admin: return L10n.tr("Admin")
+            case .regular: return L10n.tr("Regular")
+            }
+        }
     }
 
     enum StatusFilter: String, CaseIterable {
         case all = "All status"
         case active = "active"
         case disabled = "disabled"
+
+        var displayName: String {
+            switch self {
+            case .all: return L10n.tr("All status")
+            case .active: return L10n.tr("active")
+            case .disabled: return L10n.tr("disabled")
+            }
+        }
     }
 
     // MARK: - Computed Properties

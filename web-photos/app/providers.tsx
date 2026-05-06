@@ -11,6 +11,7 @@ import { useE2EEStore } from '@/lib/stores/e2ee';
 import { logger } from '@/lib/logger';
 import { useAuthStore } from '@/lib/stores/auth';
 import { tryRestoreUMK } from '@/lib/remember';
+import { I18nProvider } from '@/lib/i18n/I18nProvider';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const pathname = (() => {
@@ -258,18 +259,20 @@ export function Providers({ children }: { children: React.ReactNode }) {
 
   return (
     <QueryClientProvider client={queryClient}>
-      <ToastProvider>
-        {isPublicViewer ? (
-          <>{children}</>
-        ) : (
-          <AuthRefreshProvider>
-            <ReindexProvider>
-              {children}
-            </ReindexProvider>
-          </AuthRefreshProvider>
-        )}
-        <Toaster />
-      </ToastProvider>
+      <I18nProvider>
+        <ToastProvider>
+          {isPublicViewer ? (
+            <>{children}</>
+          ) : (
+            <AuthRefreshProvider>
+              <ReindexProvider>
+                {children}
+              </ReindexProvider>
+            </AuthRefreshProvider>
+          )}
+          <Toaster />
+        </ToastProvider>
+      </I18nProvider>
     </QueryClientProvider>
   );
 }

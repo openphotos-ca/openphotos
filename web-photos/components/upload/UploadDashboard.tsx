@@ -16,6 +16,7 @@ import { TreePine, X as XIcon } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { PinDialog } from '@/components/security/PinDialog';
 import { UnlockModal } from '@/components/security/UnlockModal';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 const BASE58_ALPHABET = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 
@@ -57,6 +58,7 @@ async function computeAssetIdB58(blob: Blob, userId: string): Promise<string | n
 
 export function UploadDashboardModal({ open, onClose, onComplete, moderationEnabled, isOwner }: { open: boolean; onClose: () => void; onComplete?: () => void; moderationEnabled?: boolean; isOwner?: boolean }) {
   const { token } = useAuthStore();
+  const { locale, translateSource: tx, formatSource } = useI18n();
   const uppyRef = React.useRef<any>(null);
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -220,7 +222,40 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
     // Reset HEIC/prepare counters each time the modal opens
     try { heicIdsRef.current.clear(); heicDoneIdsRef.current.clear(); } catch {}
     setHeicTotal(0); setHeicDone(0);
-    const uppy: any = new (Uppy as any)({ autoProceed: false, allowMultipleUploadBatches: true });
+    const uppyLocale = locale !== 'en'
+      ? {
+          strings: {
+            addMoreFiles: tx('Add more files'),
+            addingMoreFiles: tx('Adding more files'),
+            browseFiles: tx('browse files'),
+            browseFolders: tx('browse folders'),
+            cancelUpload: tx('Cancel upload'),
+            complete: tx('Complete'),
+            dropPasteBoth: tx('Drop files or folders here, or %{browseFiles}'),
+            dropPasteFiles: tx('Drop files here or %{browseFiles}'),
+            dropPasteFolders: tx('Drop folders here or %{browseFolders}'),
+            pauseUpload: tx('Pause upload'),
+            resumeUpload: tx('Resume upload'),
+            retryUpload: tx('Retry upload'),
+            uploadComplete: tx('Upload complete'),
+            uploadPaused: tx('Upload paused'),
+            uploading: tx('Uploading'),
+            xFilesSelected: {
+              0: tx('%{smart_count} files selected'),
+              1: tx('%{smart_count} files selected'),
+            },
+            uploadingXFiles: {
+              0: tx('Uploading %{smart_count} files'),
+              1: tx('Uploading %{smart_count} files'),
+            },
+            processingXFiles: {
+              0: tx('Processing %{smart_count} files'),
+              1: tx('Processing %{smart_count} files'),
+            },
+          },
+        }
+      : undefined;
+    const uppy: any = new (Uppy as any)({ autoProceed: false, allowMultipleUploadBatches: true, locale: uppyLocale });
     // If running on a public link page (identified by URL params), always include
     // the public link context in TUS metadata so uploads are associated with the link
     // even if the viewer happens to be logged in in this browser.
@@ -265,8 +300,8 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
           // Remove non-photo/video files
           uppy.removeFile(file.id);
           toastRef.current?.({
-            title: "File type not supported",
-            description: `Only photos and videos are allowed. "${file.name}" was removed.`,
+            title: tx("File type not supported"),
+            description: formatSource('Only photos and videos are allowed. "%s" was removed.', file.name),
             variant: "destructive"
           });
           return;
@@ -424,7 +459,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
       target: '#uppy-dashboard-mount',
       proudlyDisplayPoweredByUppy: false,
       showProgressDetails: true,
-      note: 'Only photos and videos are supported',
+      note: tx('Only photos and videos are supported'),
       hideUploadButton: false,
       restrictions: {
         allowedFileTypes: allowedFileTypes,
@@ -635,7 +670,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
       try { uppy?.destroy?.(); } catch {}
       if (uppyRef.current === uppy) uppyRef.current = null;
     };
-  }, [open]);
+  }, [open, locale, tx, formatSource]);
 
   // Dynamically toggle the Dashboard upload button based on conversion progress
   React.useEffect(() => {
@@ -746,13 +781,13 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
             {/* HEIC conversion progress for locked uploads */}
             {lockedUpload && heicTotal > 0 && heicDone < heicTotal ? (
               <div className="mb-3">
-                <div className="text-sm text-muted-foreground mb-1">Preparing encrypted files… ({heicDone}/{heicTotal})</div>
+                <div className="text-sm text-muted-foreground mb-1">{tx('Preparing encrypted files…')} ({heicDone}/{heicTotal})</div>
                 <div className="w-full h-2 bg-muted rounded overflow-hidden"><div className="h-2 bg-primary" style={{ width: `${Math.round((heicDone/heicTotal)*100)}%` }} /></div>
               </div>
             ) : null}
             <div id="uppy-dashboard-mount" />
             {!canEncrypt && (
-              <p className="text-xs text-muted-foreground mt-2">Locked uploads require client-side encryption support. This is initializing.</p>
+              <p className="text-xs text-muted-foreground mt-2">{tx('Locked uploads require client-side encryption support. This is initializing.')}</p>
             )}
           </div>
           {/* Bottom action bar removed — Close is now in the top-right */}
@@ -778,7 +813,7 @@ export function UploadDashboardModal({ open, onClose, onComplete, moderationEnab
       mode={pinMode}
       onClose={() => { setPinOpen(false); pinResolverRef.current?.(false); pinResolverRef.current = null; }}
       onVerified={() => { setPinOpen(false); pinResolverRef.current?.(true); pinResolverRef.current = null; }}
-      description={pinMode === 'verify' ? 'Enter your 8‑character PIN to enable locked uploads.' : undefined}
+      description={pinMode === 'verify' ? tx('Enter your 8-character PIN to enable locked uploads.') : undefined}
     />
     <UnlockModal
       open={unlockOpen}

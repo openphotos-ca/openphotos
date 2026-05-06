@@ -85,25 +85,25 @@ struct ShareViewerView: View {
                             Button {
                                 viewModel.toggleSelectionMode()
                             } label: {
-                                Label("Select", systemImage: "checkmark.circle")
+                                Label(L10n.tr("Select"), systemImage: "checkmark.circle")
                             }
                         } else {
                             Button {
                                 viewModel.selectAll()
                             } label: {
-                                Label("Select All", systemImage: "checkmark.square")
+                                Label(L10n.tr("Select All"), systemImage: "checkmark.square")
                             }
 
                             Button {
                                 viewModel.deselectAll()
                             } label: {
-                                Label("Deselect All", systemImage: "square")
+                                Label(L10n.tr("Deselect All"), systemImage: "square")
                             }
 
                             Button {
                                 viewModel.toggleSelectionMode()
                             } label: {
-                                Label("Cancel", systemImage: "xmark")
+                                Label(L10n.tr("Cancel"), systemImage: "xmark")
                             }
                         }
 

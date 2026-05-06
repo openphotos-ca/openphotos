@@ -5,6 +5,7 @@ import { useQueryState, MediaFacet } from '@/hooks/useQueryState';
 import { useQuery } from '@tanstack/react-query';
 import { photosApi } from '@/lib/api/photos';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 export interface Counts { all?: number; photos?: number; videos?: number; locked?: number; locked_photos?: number; locked_videos?: number; total_size_bytes?: number; trash?: number }
 
@@ -15,6 +16,7 @@ interface Props {
 
 export function MediaTypeSegment({ counts: countsProp, onEmptyTrash }: Props) {
   const { state, setMedia, setTrash } = useQueryState();
+  const { translateSource: tx } = useI18n();
   const current: MediaFacet = state.media || 'all';
   const [showEmptyConfirm, setShowEmptyConfirm] = React.useState(false);
   
@@ -91,16 +93,16 @@ export function MediaTypeSegment({ counts: countsProp, onEmptyTrash }: Props) {
     <div className="sticky top-[var(--top-2,4.5rem)] z-20 bg-background/80 backdrop-blur border-b border-border">
       <div className="px-4 sm:px-6 lg:px-8 py-2">
         <div className="inline-flex gap-2 items-center">
-          {btn('all', 'All', allDisplay)}
-          {btn('photo', 'Photos', photosDisplay)}
-          {btn('video', 'Videos', videosDisplay)}
+          {btn('all', tx('All'), allDisplay)}
+          {btn('photo', tx('Photos'), photosDisplay)}
+          {btn('video', tx('Videos'), videosDisplay)}
           <div className={`inline-flex items-center rounded-md border ${isTrashActive ? 'bg-primary/10 text-primary border-primary/30' : 'bg-card text-foreground border-border'}`}>
             <button
               onClick={() => setTrash(!isTrashActive)}
               className={`px-2 sm:px-3 py-1 sm:py-1.5 text-xs sm:text-sm whitespace-nowrap rounded-l-md ${isTrashActive ? 'hover:bg-primary/20' : 'hover:bg-muted'}`}
               aria-pressed={isTrashActive}
             >
-              Trash ({trashCount})
+              {tx('Trash')} ({trashCount})
             </button>
             {isTrashActive && (
               <button

@@ -26,7 +26,7 @@ struct ServerAlbumTreeView: View {
             VStack(spacing: 0) {
                 // Include sub‑albums toggle
                 HStack {
-                    Toggle("Include sub‑albums", isOn: $includeSubalbums)
+                    Toggle(L10n.tr("Include sub-albums"), isOn: $includeSubalbums)
                         .toggleStyle(SwitchToggleStyle(tint: .accentColor))
                         .font(.subheadline)
                 }
@@ -38,7 +38,7 @@ struct ServerAlbumTreeView: View {
                 // Root row with add button
                 HStack(spacing: 12) {
                     Image(systemName: "house.fill").foregroundColor(.blue).frame(width: 24, height: 24).padding(.leading, 12)
-                    Text("Root").font(.system(size: 15)).foregroundColor(.primary)
+                    Text(L10n.tr("Root")).font(.system(size: 15)).foregroundColor(.primary)
                     Spacer()
                     Button { addParentId = nil; newAlbumName = ""; showAddSheet = true } label: {
                         Image(systemName: "plus.circle.fill").font(.system(size: 22, weight: .semibold)).foregroundColor(.accentColor)
@@ -65,7 +65,7 @@ struct ServerAlbumTreeView: View {
 
                 // Bottom actions
                 HStack {
-                    Button("Cancel") { isPresented = false }.buttonStyle(BorderedButtonStyle())
+                    Button(L10n.tr("Cancel")) { isPresented = false }.buttonStyle(BorderedButtonStyle())
                     Spacer()
                     Button {
                         if let id = selectedAlbumId {
@@ -77,12 +77,12 @@ struct ServerAlbumTreeView: View {
                         }
                         isPresented = false
                     } label: {
-                        Label("OK", systemImage: "checkmark")
+                        Label(L10n.tr("OK"), systemImage: "checkmark")
                     }.buttonStyle(BorderedProminentButtonStyle()).disabled(selectedAlbumId == nil)
                 }
                 .padding()
             }
-            .navigationTitle("Choose an album")
+            .navigationTitle(L10n.tr("Choose an album"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) { Button { isPresented = false } label: { Image(systemName: "xmark.circle.fill").foregroundColor(.secondary) } }
@@ -91,19 +91,19 @@ struct ServerAlbumTreeView: View {
         .onAppear { Task { await reloadTree() } }
         .sheet(isPresented: $showAddSheet) { addAlbumSheet }
         .alert("Delete \(pendingDeleteName)?", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) { Task { await deleteAlbum() } }
-            Button("Cancel", role: .cancel) { pendingDeleteId = nil; pendingDeleteName = "" }
-        } message: { Text("This removes the album and its sub‑albums. Photos are not deleted.") }
+            Button(L10n.tr("Delete"), role: .destructive) { Task { await deleteAlbum() } }
+            Button(L10n.tr("Cancel"), role: .cancel) { pendingDeleteId = nil; pendingDeleteName = "" }
+        } message: { Text(L10n.tr("This removes the album and its sub‑albums. Photos are not deleted.")) }
     }
 
     // MARK: - Sheets
     private var addAlbumSheet: some View {
         NavigationView {
-            Form { TextField("Album name", text: $newAlbumName) }
-                .navigationTitle("New Album")
+            Form { TextField(L10n.tr("Album name"), text: $newAlbumName) }
+                .navigationTitle(L10n.tr("New Album"))
                 .toolbar {
-                    ToolbarItem(placement: .cancellationAction) { Button("Cancel") { showAddSheet = false } }
-                    ToolbarItem(placement: .confirmationAction) { Button("Create") { Task { await createAlbum() } }.disabled(newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
+                    ToolbarItem(placement: .cancellationAction) { Button(L10n.tr("Cancel")) { showAddSheet = false } }
+                    ToolbarItem(placement: .confirmationAction) { Button(L10n.tr("Create")) { Task { await createAlbum() } }.disabled(newAlbumName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty) }
                 }
         }
         .presentationDetents([.fraction(0.25)])

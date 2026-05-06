@@ -12,17 +12,17 @@ struct UsersTabView: View {
             VStack(spacing: 8) {
                 HStack(spacing: 12) {
                     // Role Filter
-                    Picker("Role", selection: $viewModel.roleFilter) {
+                    Picker(L10n.tr("Role"), selection: $viewModel.roleFilter) {
                         ForEach(TeamManagementViewModel.RoleFilter.allCases, id: \.self) { filter in
-                            Text(filter.rawValue).tag(filter)
+                            Text(filter.displayName).tag(filter)
                         }
                     }
                     .pickerStyle(.menu)
 
                     // Status Filter
-                    Picker("Status", selection: $viewModel.statusFilter) {
+                    Picker(L10n.tr("Status"), selection: $viewModel.statusFilter) {
                         ForEach(TeamManagementViewModel.StatusFilter.allCases, id: \.self) { filter in
-                            Text(filter.rawValue).tag(filter)
+                            Text(filter.displayName).tag(filter)
                         }
                     }
                     .pickerStyle(.menu)
@@ -54,7 +54,7 @@ struct UsersTabView: View {
                     Image(systemName: "person.3")
                         .font(.system(size: 48))
                         .foregroundColor(.secondary)
-                    Text("No users match your filters")
+                    Text(L10n.tr("No users match your filters"))
                         .foregroundColor(.secondary)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)

@@ -15,7 +15,7 @@ struct PublicLinksTab: View {
     var body: some View {
         Group {
             if viewModel.isLoadingPublicLinks && viewModel.publicLinks.isEmpty {
-                ProgressView("Loading public links...")
+                ProgressView(L10n.tr("Loading public links..."))
             } else if let error = viewModel.publicLinksError {
                 ErrorView(message: error) {
                     Task {
@@ -28,7 +28,7 @@ struct PublicLinksTab: View {
                     title: "No Public Links",
                     message: "Create a public link to share via URL"
                 ) {
-                    Button("Create Public Link") {
+                    Button(L10n.tr("Create Public Link")) {
                         showCreateLink = true
                     }
                     .buttonStyle(.borderedProminent)

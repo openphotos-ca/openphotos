@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
@@ -9,18 +9,14 @@ import { Eye, EyeOff, Mail, Lock, User, UserPlus } from 'lucide-react';
 
 import { useAuthStore } from '@/lib/stores/auth';
 import { authApi } from '@/lib/api/auth';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
-const registerSchema = z.object({
-  name: z.string().min(2, 'Name must be at least 2 characters'),
-  email: z.string().email('Please enter a valid email address'),
-  password: z.string().min(6, 'Password must be at least 6 characters'),
-  confirmPassword: z.string(),
-}).refine((data) => data.password === data.confirmPassword, {
-  message: "Passwords don't match",
-  path: ['confirmPassword'],
-});
-
-type RegisterFormData = z.infer<typeof registerSchema>;
+type RegisterFormData = {
+  name: string;
+  email: string;
+  password: string;
+  confirmPassword: string;
+};
 
 interface RegisterFormProps {
   onSwitchToLogin: () => void;
@@ -32,6 +28,16 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
   const [isLoading, setIsLoading] = useState(false);
   const router = useRouter();
   const { login } = useAuthStore();
+  const { t } = useI18n();
+  const registerSchema = useMemo(() => z.object({
+    name: z.string().min(2, t('auth.errors.name_min')),
+    email: z.string().email(t('auth.errors.invalid_email')),
+    password: z.string().min(6, t('auth.errors.password_min')),
+    confirmPassword: z.string(),
+  }).refine((data) => data.password === data.confirmPassword, {
+    message: t('auth.errors.passwords_mismatch'),
+    path: ['confirmPassword'],
+  }), [t]);
 
   const {
     register,
@@ -57,7 +63,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
     } catch (error: any) {
       setError('root', {
         type: 'manual',
-        message: error.message || 'Registration failed. Please try again.',
+        message: error.message || t('auth.errors.registration_failed'),
       });
     } finally {
       setIsLoading(false);
@@ -67,9 +73,9 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
   return (
     <div className="w-full max-w-md space-y-6">
       <div className="text-center">
-        <h1 className="text-3xl font-bold text-foreground">Create account</h1>
+        <h1 className="text-3xl font-bold text-foreground">{t('auth.register.title')}</h1>
         <p className="mt-2 text-sm text-muted-foreground">
-          Start organizing your photos today
+          {t('auth.register.subtitle')}
         </p>
       </div>
 
@@ -82,7 +88,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
 
         <div>
           <label htmlFor="name" className="block text-sm font-medium text-foreground">
-            Full name
+            {t('auth.name.label')}
           </label>
           <div className="mt-1 relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -93,7 +99,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
               type="text"
               autoComplete="name"
               className="appearance-none block w-full pl-10 pr-3 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm"
-              placeholder="Enter your full name"
+              placeholder={t('auth.name.placeholder')}
               {...register('name')}
             />
           </div>
@@ -104,7 +110,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
 
         <div>
           <label htmlFor="email" className="block text-sm font-medium text-foreground">
-            Email address
+            {t('auth.email.label')}
           </label>
           <div className="mt-1 relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -115,7 +121,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
               type="email"
               autoComplete="email"
               className="appearance-none block w-full pl-10 pr-3 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm"
-              placeholder="Enter your email"
+              placeholder={t('auth.email.placeholder')}
               {...register('email')}
             />
           </div>
@@ -126,7 +132,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
 
         <div>
           <label htmlFor="password" className="block text-sm font-medium text-foreground">
-            Password
+            {t('auth.password.label')}
           </label>
           <div className="mt-1 relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -137,7 +143,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
               type={showPassword ? 'text' : 'password'}
               autoComplete="new-password"
               className="appearance-none block w-full pl-10 pr-10 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm"
-              placeholder="Create a password"
+              placeholder={t('auth.password.create_placeholder')}
               {...register('password')}
             />
             <button
@@ -159,7 +165,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
 
         <div>
           <label htmlFor="confirmPassword" className="block text-sm font-medium text-foreground">
-            Confirm password
+            {t('auth.password.confirm_label')}
           </label>
           <div className="mt-1 relative">
             <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none">
@@ -170,7 +176,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
               type={showConfirmPassword ? 'text' : 'password'}
               autoComplete="new-password"
               className="appearance-none block w-full pl-10 pr-10 py-2 border border-border bg-background text-foreground rounded-md placeholder:text-muted-foreground focus:outline-none focus:ring-primary focus:border-primary sm:text-sm"
-              placeholder="Confirm your password"
+              placeholder={t('auth.password.confirm_placeholder')}
               {...register('confirmPassword')}
             />
             <button
@@ -198,12 +204,12 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
           {isLoading ? (
             <div className="flex items-center">
               <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
-              Creating account...
+              {t('auth.creating_account')}
             </div>
           ) : (
             <div className="flex items-center">
               <UserPlus className="h-4 w-4 mr-2" />
-              Create account
+              {t('auth.create_account')}
             </div>
           )}
         </button>
@@ -215,7 +221,7 @@ export function RegisterForm({ onSwitchToLogin }: RegisterFormProps) {
           onClick={onSwitchToLogin}
           className="text-sm text-primary hover:text-primary/80"
         >
-          Already have an account? Sign in
+          {t('auth.switch_to_login')}
         </button>
       </div>
     </div>

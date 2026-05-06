@@ -54,9 +54,9 @@ struct AuthorizedHTTPClient {
             throw NSError(domain: "HTTP", code: -1, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
         if http.statusCode == 401 {
-            // Try a forced refresh once
-            let refreshed = await AuthManager.shared.forceRefresh()
-            guard refreshed else {
+            // Try a forced refresh, then bypass the auto-login cooldown once before surfacing login UI.
+            let recovered = await AuthManager.shared.recoverSessionIfPossible(ignoreAutoLoginCooldown: true)
+            guard recovered else {
                 notifyUnauthorized()
                 throw NSError(domain: "HTTP", code: 401, userInfo: [NSLocalizedDescriptionKey: "Unauthorized"])
             }

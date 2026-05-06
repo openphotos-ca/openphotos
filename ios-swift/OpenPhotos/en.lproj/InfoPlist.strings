@@ -1,0 +1,4 @@
+"NSFaceIDUsageDescription" = "Enable Face ID to unlock your PIN and encrypted items quickly and securely.";
+"NSLocalNetworkUsageDescription" = "OpenPhotos connects to your local server to sync your library.";
+"NSPhotoLibraryAddUsageDescription" = "OpenPhotos can save processed photos and edited images to your photo library.";
+"NSPhotoLibraryUsageDescription" = "OpenPhotos needs access to your photo library to organize and clean up your photos.";

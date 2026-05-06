@@ -14,15 +14,15 @@ struct TimeRangeDialog: View {
         if let customStartDate = customStartDate {
             return formatDate(customStartDate)
         } else if case .allTime = selectedPreset {
-            return "Select Start Date"
+            return L10n.tr("Select Start Date")
         } else if case .custom = selectedPreset {
-            return "Select Start Date"
+            return L10n.tr("Select Start Date")
         } else {
             let dateRange = selectedPreset.dateRange
             if let from = dateRange.from {
                 return formatDate(from)
             }
-            return "Select Start Date"
+            return L10n.tr("Select Start Date")
         }
     }
     
@@ -30,22 +30,22 @@ struct TimeRangeDialog: View {
         if let customEndDate = customEndDate {
             return formatDate(customEndDate)
         } else if case .allTime = selectedPreset {
-            return "Select End Date"
+            return L10n.tr("Select End Date")
         } else if case .custom = selectedPreset {
-            return "Select End Date"
+            return L10n.tr("Select End Date")
         } else {
             let dateRange = selectedPreset.dateRange
             if let to = dateRange.to {
                 return formatDate(to)
             }
-            return "Select End Date"
+            return L10n.tr("Select End Date")
         }
     }
     
     var body: some View {
         VStack(spacing: 24) {
             // Title
-            Text("Select Time Range")
+            Text(L10n.tr("Select Time Range"))
                 .font(.title2)
                 .fontWeight(.semibold)
                 .padding(.top, 24)
@@ -89,7 +89,7 @@ struct TimeRangeDialog: View {
             // Custom date range
             VStack(spacing: 16) {
                 HStack(spacing: 16) {
-                    Text("From:")
+                    Text(L10n.tr("From:"))
                         .font(.body)
                         .frame(width: 50, alignment: .leading)
                     
@@ -114,7 +114,7 @@ struct TimeRangeDialog: View {
                 }
                 
                 HStack(spacing: 16) {
-                    Text("To:")
+                    Text(L10n.tr("To:"))
                         .font(.body)
                         .frame(width: 50, alignment: .leading)
                     
@@ -144,13 +144,13 @@ struct TimeRangeDialog: View {
             
             // Action buttons
             HStack(spacing: 40) {
-                Button("Cancel") {
+                Button(L10n.tr("Cancel")) {
                     dismiss()
                 }
                 .font(.body)
                 .foregroundColor(.blue)
                 
-                Button("Apply") {
+                Button(L10n.tr("Apply")) {
                     applyTimeRange()
                     dismiss()
                 }
@@ -226,6 +226,7 @@ struct TimeRangeDialog: View {
     private func formatDate(_ date: Date) -> String {
         let formatter = DateFormatter()
         formatter.dateStyle = .medium
+        formatter.locale = LocaleController.shared.swiftUILocale
         return formatter.string(from: date)
     }
 }
@@ -237,7 +238,7 @@ struct PresetButton: View {
     
     var body: some View {
         Button(action: action) {
-            Text(title)
+            Text(L10n.tr(title))
                 .font(.subheadline)
                 .foregroundColor(isSelected ? .blue : .primary)
                 .frame(maxWidth: .infinity)
@@ -263,7 +264,7 @@ struct DatePickerSheet: View {
         NavigationView {
             VStack {
                 DatePicker(
-                    "Select date",
+                    L10n.tr("Select date"),
                     selection: $selectedDate,
                     displayedComponents: .date
                 )
@@ -272,16 +273,16 @@ struct DatePickerSheet: View {
                 
                 Spacer()
             }
-            .navigationTitle(title)
+            .navigationTitle(L10n.tr(title))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Cancel") {
+                    Button(L10n.tr("Cancel")) {
                         dismiss()
                     }
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
-                    Button("OK") {
+                    Button(L10n.tr("OK")) {
                         dismiss()
                     }
                     .fontWeight(.semibold)

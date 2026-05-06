@@ -9,6 +9,14 @@ import UniformTypeIdentifiers
 import CryptoKit
 import Network
 
+struct ContinuedProcessingUploadProgressSnapshot {
+    let completedMilliUnits: Int64
+    let terminalAssets: Int
+    let activeAssets: Int
+    let verifyingAssets: Int
+    let pendingAssets: Int
+}
+
 final class HybridUploadManager: NSObject, ObservableObject {
     static let shared = HybridUploadManager()
 
@@ -38,7 +46,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private var pendingTus: [UploadItem] = []
     private var tusEnqueuedAtUptime: [UUID: TimeInterval] = [:]
     private var activeTusWorkers: Int = 0
+    private var tusWorkerTasks: [Int: Task<Void, Never>] = [:]
+    private var nextTusWorkerToken: Int = 0
     private var foregroundTusSuspended: Bool = false
+    private var activeForegroundUploadsByContentId: [String: Int] = [:]
     private var liveComponentPendingByContentId: [String: Int] = [:]
     private let minTusWorkers: Int = 2
     private let maxTusWorkers: Int = 3
@@ -167,6 +178,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private let verifyImmediateProbeInterval: Int = 12
     private var verifyImmediateMissStreak: Int = 0
     private var verifyPolicyBypassCount: Int = 0
+    private let ingestConfirmationQueue = DispatchQueue(label: "hybrid.upload.ingest.confirmation")
+    private var uploadIngestEventTask: Task<Void, Never>?
+    private var trackedDirectConfirmationContentIds: Set<String> = []
+    private var ingestedContentIdsFromEvents: Set<String> = []
 
     // Upload performance metrics (summary-oriented, low-overhead).
     private let perfQueue = DispatchQueue(label: "hybrid.upload.perf.queue")
@@ -205,6 +220,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         let localIdentifier: String?
         let verificationKind: VerificationLookupKind
         let verificationValue: String
+        let confirmationMode: DeferredVerifyConfirmationMode
         let waitForLivePairing: Bool
         var attempts: Int
         let queuedAtUptime: TimeInterval
@@ -221,6 +237,11 @@ final class HybridUploadManager: NSObject, ObservableObject {
     private enum VerificationLookupKind: String {
         case assetId = "asset_id"
         case backupId = "backup_id"
+    }
+
+    private enum DeferredVerifyConfirmationMode: String {
+        case cloudExists = "exists"
+        case directContentId = "content_id"
     }
 
     private struct TusUploadProfile {
@@ -449,12 +470,216 @@ final class HybridUploadManager: NSObject, ObservableObject {
         }
     }
 
+    private func trackForegroundUploadStart(_ item: UploadItem) {
+        tusQueue.sync {
+            let previous = activeForegroundUploadsByContentId[item.contentId] ?? 0
+            let updated = previous + 1
+            activeForegroundUploadsByContentId[item.contentId] = updated
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] foreground-upload-track content_id=\(item.contentId) phase=start active=\(updated)"
+            )
+        }
+    }
+
+    @discardableResult
+    private func trackForegroundUploadSettled(_ item: UploadItem) -> Int {
+        tusQueue.sync {
+            let previous = activeForegroundUploadsByContentId[item.contentId] ?? 0
+            let updated = max(0, previous - 1)
+            if updated == 0 {
+                activeForegroundUploadsByContentId.removeValue(forKey: item.contentId)
+            } else {
+                activeForegroundUploadsByContentId[item.contentId] = updated
+            }
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] foreground-upload-track content_id=\(item.contentId) phase=settled active=\(updated)"
+            )
+            return updated
+        }
+    }
+
     private func clearDeferredVerificationWork() {
         deferredVerifyStateQueue.sync {
             deferredVerifyLoopTask?.cancel()
             deferredVerifyLoopTask = nil
             deferredVerifyEntriesByContentId.removeAll(keepingCapacity: true)
         }
+        ingestConfirmationQueue.sync {
+            uploadIngestEventTask?.cancel()
+            uploadIngestEventTask = nil
+            trackedDirectConfirmationContentIds.removeAll(keepingCapacity: true)
+            ingestedContentIdsFromEvents.removeAll(keepingCapacity: true)
+        }
+    }
+
+    private func shouldUseDirectIngestConfirmation(
+        for item: UploadItem,
+        waitForLivePairing: Bool
+    ) -> Bool {
+        guard shouldMarkSyncedInRepository(for: item) else { return false }
+        return !item.isLocked && !waitForLivePairing
+    }
+
+    private func shouldUseDirectIngestConfirmation(
+        isLocked: Bool,
+        shouldMarkSynced: Bool,
+        waitForLivePairing: Bool
+    ) -> Bool {
+        guard shouldMarkSynced else { return false }
+        return !isLocked && !waitForLivePairing
+    }
+
+    private func registerDirectIngestConfirmation(_ contentId: String) {
+        guard !contentId.isEmpty else { return }
+        ingestConfirmationQueue.async {
+            self.trackedDirectConfirmationContentIds.insert(contentId)
+            self.ensureUploadIngestEventStreamRunningLocked()
+        }
+    }
+
+    private func settleDirectIngestConfirmation(_ contentId: String) {
+        guard !contentId.isEmpty else { return }
+        ingestConfirmationQueue.async {
+            self.trackedDirectConfirmationContentIds.remove(contentId)
+            self.ingestedContentIdsFromEvents.remove(contentId)
+            if self.trackedDirectConfirmationContentIds.isEmpty {
+                self.uploadIngestEventTask?.cancel()
+                self.uploadIngestEventTask = nil
+            }
+        }
+    }
+
+    private func knownDirectIngestedContentIds(_ contentIds: [String]) -> Set<String> {
+        let requested = Set(contentIds.filter { !$0.isEmpty })
+        guard !requested.isEmpty else { return [] }
+        return ingestConfirmationQueue.sync {
+            requested.intersection(ingestedContentIdsFromEvents)
+        }
+    }
+
+    private func rememberDirectIngestedContentIds(_ contentIds: Set<String>) {
+        guard !contentIds.isEmpty else { return }
+        ingestConfirmationQueue.async {
+            self.ingestedContentIdsFromEvents.formUnion(contentIds)
+        }
+    }
+
+    private func ensureUploadIngestEventStreamRunningLocked() {
+        guard uploadIngestEventTask == nil else { return }
+        uploadIngestEventTask = Task.detached(priority: .utility) { [weak self] in
+            await self?.runUploadIngestEventStream()
+        }
+    }
+
+    private func runUploadIngestEventStream() async {
+        struct UploadIngestEvent: Decodable {
+            let type: String
+            let content_id: String?
+        }
+
+        var reconnectDelayNanoseconds: UInt64 = 1_000_000_000
+        while !Task.isCancelled {
+            let shouldContinue = ingestConfirmationQueue.sync { !trackedDirectConfirmationContentIds.isEmpty }
+            if !shouldContinue {
+                ingestConfirmationQueue.async {
+                    self.uploadIngestEventTask = nil
+                }
+                return
+            }
+
+            do {
+                await AuthManager.shared.refreshIfNeeded()
+                var request = URLRequest(
+                    url: AuthorizedHTTPClient.shared.buildURL(path: "/api/uploads/stream")
+                )
+                request.setValue("text/event-stream", forHTTPHeaderField: "Accept")
+                AuthManager.shared.authHeader().forEach { key, value in
+                    request.setValue(value, forHTTPHeaderField: key)
+                }
+                let (bytes, response) = try await URLSession.shared.bytes(for: request)
+                guard let http = response as? HTTPURLResponse else {
+                    throw NSError(
+                        domain: "UploadIngestSSE",
+                        code: -1,
+                        userInfo: [NSLocalizedDescriptionKey: "Missing HTTP response"]
+                    )
+                }
+                if http.statusCode == 401 {
+                    let refreshed = await AuthManager.shared.forceRefresh()
+                    if !refreshed {
+                        throw NSError(
+                            domain: "UploadIngestSSE",
+                            code: 401,
+                            userInfo: [NSLocalizedDescriptionKey: "Unauthorized"]
+                        )
+                    }
+                    continue
+                }
+                guard (200..<300).contains(http.statusCode) else {
+                    throw NSError(
+                        domain: "UploadIngestSSE",
+                        code: http.statusCode,
+                        userInfo: [NSLocalizedDescriptionKey: "Unexpected status \(http.statusCode)"]
+                    )
+                }
+
+                reconnectDelayNanoseconds = 1_000_000_000
+                var eventDataLines: [String] = []
+                for try await line in bytes.lines {
+                    if Task.isCancelled { break }
+                    if line.isEmpty {
+                        if !eventDataLines.isEmpty {
+                            let payload = eventDataLines.joined(separator: "\n")
+                            eventDataLines.removeAll(keepingCapacity: true)
+                            guard let data = payload.data(using: .utf8),
+                                  let event = try? JSONDecoder().decode(UploadIngestEvent.self, from: data)
+                            else {
+                                continue
+                            }
+                            guard event.type == "upload_ingested",
+                                  let contentId = event.content_id?.trimmingCharacters(in: .whitespacesAndNewlines),
+                                  !contentId.isEmpty
+                            else {
+                                continue
+                            }
+                            rememberDirectIngestedContentIds(Set([contentId]))
+                            AppLog.debug(
+                                AppLog.upload,
+                                "[PERF] verify-direct-event content_id=\(contentId)"
+                            )
+                        }
+                        continue
+                    }
+                    guard line.hasPrefix("data:") else { continue }
+                    let dataLine = String(line.dropFirst(5)).trimmingCharacters(in: .whitespaces)
+                    eventDataLines.append(dataLine)
+                }
+            } catch {
+                AppLog.debug(
+                    AppLog.upload,
+                    "[PERF] verify-direct-stream-error error=\(error.localizedDescription)"
+                )
+            }
+
+            if Task.isCancelled { break }
+            try? await Task.sleep(nanoseconds: reconnectDelayNanoseconds)
+            reconnectDelayNanoseconds = min(reconnectDelayNanoseconds * 2, 8_000_000_000)
+        }
+
+        ingestConfirmationQueue.async {
+            self.uploadIngestEventTask = nil
+        }
+    }
+
+    private func fetchDirectIngestedContentIds(_ contentIds: [String]) async throws -> Set<String> {
+        let requested = Array(Set(contentIds.filter { !$0.isEmpty }))
+        guard !requested.isEmpty else { return [] }
+        let matches = try await ServerPhotosService.shared.ingestedContentIds(requested)
+        let found = matches.contentIds
+        rememberDirectIngestedContentIds(found)
+        return found
     }
 
     private func perfStartRun(totalAssets: Int) {
@@ -466,6 +691,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         }
         tusQueue.sync {
             liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+            activeForegroundUploadsByContentId.removeAll(keepingCapacity: true)
             tusConcurrencyState.targetWorkers = minTusWorkers
             tusConcurrencyState.uploadSamples = 0
             tusConcurrencyState.ewmaUploadMBps = 0
@@ -756,6 +982,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
         currentStopMode() != .none
     }
 
+    private func shouldAbortBackgroundRetry() -> Bool {
+        currentStopMode() != .none
+    }
+
     private func isStopForResyncRequested() -> Bool {
         currentStopMode() == .resync
     }
@@ -883,6 +1113,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 pendingTus.removeAll()
                 tusEnqueuedAtUptime.removeAll(keepingCapacity: true)
                 liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+                activeForegroundUploadsByContentId.removeAll(keepingCapacity: true)
                 tusConcurrencyState.targetWorkers = 0
             } else if activeTusWorkers > 0 && pendingTus.isEmpty {
                 // Scene active: recover from stale worker counters after background suspension.
@@ -1058,6 +1289,30 @@ final class HybridUploadManager: NSObject, ObservableObject {
     }
 
     func stopCurrentSync() {
+        let stopSnapshot = tusQueue.sync {
+            (
+                itemsCount: items.count,
+                pendingTusCount: pendingTus.count,
+                activeTusWorkers: activeTusWorkers,
+                foregroundTusSuspended: foregroundTusSuspended,
+                queuedItems: items.filter { $0.status == .queued }.count,
+                exportingItems: items.filter { $0.status == .exporting }.count,
+                uploadingItems: items.filter { $0.status == .uploading }.count,
+                backgroundQueuedItems: items.filter { $0.status == .backgroundQueued }.count
+            )
+        }
+        print(
+            "[SYNC-UPLOAD] stopCurrentSync requested " +
+            "stop_mode=\(String(describing: currentStopMode())) " +
+            "items=\(stopSnapshot.itemsCount) " +
+            "pending_tus=\(stopSnapshot.pendingTusCount) " +
+            "active_workers=\(stopSnapshot.activeTusWorkers) " +
+            "foreground_suspended=\(stopSnapshot.foregroundTusSuspended ? 1 : 0) " +
+            "queued=\(stopSnapshot.queuedItems) " +
+            "exporting=\(stopSnapshot.exportingItems) " +
+            "uploading=\(stopSnapshot.uploadingItems) " +
+            "background_queued=\(stopSnapshot.backgroundQueuedItems)"
+        )
         setStopMode(.pause)
         clearDeferredVerificationWork()
         tusQueue.sync {
@@ -1065,18 +1320,52 @@ final class HybridUploadManager: NSObject, ObservableObject {
             pendingTus.removeAll()
             tusEnqueuedAtUptime.removeAll(keepingCapacity: true)
             liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+            activeForegroundUploadsByContentId.removeAll(keepingCapacity: true)
         }
+        cancelActiveTusWorkers(reason: "user-pause")
         cancelActiveExports()
+        cancelActiveBackgroundMultipartUploads(reason: "user-pause")
         scheduleForegroundUploadIdleTimerRefresh()
+        print(
+            "[SYNC-UPLOAD] stopCurrentSync dispatched " +
+            "stop_mode=\(String(describing: currentStopMode())) " +
+            "busy_after_dispatch=\(isSyncBusy() ? 1 : 0)"
+        )
         DispatchQueue.main.async {
             for idx in self.items.indices {
                 switch self.items[idx].status {
-                case .queued, .exporting, .uploading:
+                case .queued, .exporting, .uploading, .backgroundQueued:
                     self.items[idx].status = .queued
                     SyncRepository.shared.markPending(contentId: self.items[idx].contentId, note: "Sync paused")
                 default:
                     break
                 }
+            }
+        }
+    }
+
+    private func cancelActiveBackgroundMultipartUploads(reason: String) {
+        if bgSession == nil { setupBackgroundSession() }
+        guard let bgSession else {
+            print("[UPLOAD] Background multipart cancel skipped reason=\(reason) session_unavailable=1")
+            return
+        }
+        bgSession.getAllTasks { tasks in
+            let cancellableTasks = tasks.filter { task in
+                switch task.state {
+                case .running, .suspended:
+                    return true
+                default:
+                    return false
+                }
+            }
+            print("[UPLOAD] Background multipart cancel requested reason=\(reason) count=\(cancellableTasks.count)")
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] bg-cancel reason=\(reason) count=\(cancellableTasks.count)"
+            )
+            for task in cancellableTasks {
+                task.cancel()
             }
         }
     }
@@ -1432,6 +1721,97 @@ final class HybridUploadManager: NSObject, ObservableObject {
         return activityBusy || tusBusy || deferredVerifyBusy
     }
 
+    func continuedProcessingProgressSnapshot(
+        for assetLocalIdentifiers: Set<String>
+    ) -> ContinuedProcessingUploadProgressSnapshot {
+        guard !assetLocalIdentifiers.isEmpty else {
+            return ContinuedProcessingUploadProgressSnapshot(
+                completedMilliUnits: 0,
+                terminalAssets: 0,
+                activeAssets: 0,
+                verifyingAssets: 0,
+                pendingAssets: 0
+            )
+        }
+
+        let itemSnapshot: [UploadItem]
+        if Thread.isMainThread {
+            itemSnapshot = items
+        } else {
+            itemSnapshot = DispatchQueue.main.sync { items }
+        }
+        let deferredVerifyContentIds = deferredVerifyStateQueue.sync {
+            Set(deferredVerifyEntriesByContentId.keys)
+        }
+
+        let grouped = Dictionary(grouping: itemSnapshot) { $0.assetLocalIdentifier }
+        var completedFractionTotal: Double = 0
+        var terminalAssets = 0
+        var activeAssets = 0
+        var verifyingAssets = 0
+        var pendingAssets = 0
+
+        for localIdentifier in assetLocalIdentifiers {
+            guard let group = grouped[localIdentifier], !group.isEmpty else {
+                pendingAssets += 1
+                continue
+            }
+
+            let hasDeferredVerification = !deferredVerifyContentIds.isDisjoint(
+                with: Set(group.map(\.contentId))
+            )
+            var fraction = min(
+                1.0,
+                max(0.0, group.map(progressFraction(for:)).reduce(0, +) / Double(group.count))
+            )
+            let isFinalizingVerification = hasDeferredVerification && fraction >= 0.999
+            if isFinalizingVerification {
+                fraction = min(fraction, 0.995)
+            }
+            completedFractionTotal += fraction
+
+            if isFinalizingVerification {
+                verifyingAssets += 1
+            } else if fraction >= 0.999 {
+                terminalAssets += 1
+            } else if fraction > 0.001 {
+                activeAssets += 1
+            } else {
+                pendingAssets += 1
+            }
+        }
+
+        return ContinuedProcessingUploadProgressSnapshot(
+            completedMilliUnits: Int64((completedFractionTotal * 1_000.0).rounded(.down)),
+            terminalAssets: terminalAssets,
+            activeAssets: activeAssets,
+            verifyingAssets: verifyingAssets,
+            pendingAssets: pendingAssets
+        )
+    }
+
+    private func progressFraction(for item: UploadItem) -> Double {
+        switch item.status {
+        case .completed, .failed, .canceled:
+            return 1.0
+        case .uploading:
+            let byteFraction = item.totalBytes > 0
+                ? Double(max(0, item.sentBytes)) / Double(max(1, item.totalBytes))
+                : 0
+            return max(0.05, min(0.99, byteFraction))
+        case .backgroundQueued:
+            return 0.85
+        case .queued:
+            if item.sentBytes > 0 && item.totalBytes > 0 {
+                let byteFraction = Double(max(0, item.sentBytes)) / Double(max(1, item.totalBytes))
+                return max(0.03, min(0.95, byteFraction))
+            }
+            return 0.03
+        case .exporting:
+            return 0.01
+        }
+    }
+
     /// Only mark a content item as synced from its primary upload component.
     /// - Live Photo paired video components should not flip sync to success.
     /// - Locked thumbnails should not flip sync to success (only locked originals do).
@@ -1454,6 +1834,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         for item: UploadItem,
         preferDeferred: Bool = false,
         preferDeferredReason: String? = nil,
+        preferContentIdIngestConfirmation: Bool = false,
         waitForLivePairing: Bool = false
     ) async -> VerifyResult {
         guard shouldMarkSyncedInRepository(for: item) else { return .immediateOk }
@@ -1466,6 +1847,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             localIdentifier: item.assetLocalIdentifier,
             preferDeferred: preferDeferred,
             preferDeferredReason: preferDeferredReason,
+            preferContentIdIngestConfirmation: preferContentIdIngestConfirmation,
             waitForLivePairing: waitForLivePairing
         )
     }
@@ -1506,6 +1888,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         localIdentifier: String?,
         verificationKind: VerificationLookupKind,
         verificationValue: String,
+        confirmationMode: DeferredVerifyConfirmationMode = .cloudExists,
         waitForLivePairing: Bool = false
     ) {
         deferredVerifyStateQueue.async {
@@ -1516,6 +1899,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     localIdentifier: localIdentifier,
                     verificationKind: verificationKind,
                     verificationValue: verificationValue,
+                    confirmationMode: confirmationMode,
                     waitForLivePairing: waitForLivePairing,
                     attempts: 0,
                     queuedAtUptime: self.perfNow(),
@@ -1523,9 +1907,12 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     lastPolledAtUptime: 0
                 )
                 self.deferredVerifyEntriesByContentId[contentId] = entry
+                if confirmationMode == .directContentId {
+                    self.registerDirectIngestConfirmation(contentId)
+                }
                 AppLog.debug(
                     AppLog.upload,
-                    "[PERF] verify-deferred-enqueue content_id=\(contentId) \(verificationKind.rawValue)=\(verificationValue) pending_entries=\(self.deferredVerifyEntriesByContentId.count)"
+                    "[PERF] verify-deferred-enqueue content_id=\(contentId) \(verificationKind.rawValue)=\(verificationValue) confirmation=\(confirmationMode.rawValue) pending_entries=\(self.deferredVerifyEntriesByContentId.count)"
                 )
             }
             self.ensureDeferredVerifierLoopRunningLocked()
@@ -1587,9 +1974,6 @@ final class HybridUploadManager: NSObject, ObservableObject {
                         }
                         return entry
                     }
-                    if hasForegroundUploadWork {
-                        return nil
-                    }
                     let elapsedSinceTimeout = max(0, loopNow - timedOutAt)
                     guard elapsedSinceTimeout >= timedOutRepollSeconds else {
                         return nil
@@ -1621,34 +2005,59 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 continue
             }
 
+            let directSnapshot = snapshot.filter { $0.confirmationMode == .directContentId }
+            let existsSnapshot = snapshot.filter { $0.confirmationMode == .cloudExists }
+            let unresolvedDirectIds = directSnapshot.map(\.contentId)
+            var directConfirmedContentIds = knownDirectIngestedContentIds(unresolvedDirectIds)
+            var directPollFailed = false
+            if !unresolvedDirectIds.isEmpty {
+                let missingDirectIds = unresolvedDirectIds.filter {
+                    !directConfirmedContentIds.contains($0)
+                }
+                if !missingDirectIds.isEmpty {
+                    do {
+                        let found = try await fetchDirectIngestedContentIds(missingDirectIds)
+                        directConfirmedContentIds.formUnion(found)
+                    } catch {
+                        directPollFailed = true
+                        AppLog.debug(
+                            AppLog.upload,
+                            "[PERF] verify-direct-poll-failed pending_entries=\(missingDirectIds.count) error=\(error.localizedDescription)"
+                        )
+                    }
+                }
+            }
+
             let uniqueAssetIds = Array(
                 Set(
-                    snapshot.compactMap { entry in
+                    existsSnapshot.compactMap { entry in
                         entry.verificationKind == .assetId ? entry.verificationValue : nil
                     }
                 )
             )
             let uniqueBackupIds = Array(
                 Set(
-                    snapshot.compactMap { entry in
+                    existsSnapshot.compactMap { entry in
                         entry.verificationKind == .backupId ? entry.verificationValue : nil
                     }
                 )
             )
             var matches = CloudExistsMatches.empty
             var pollFailed = false
-            do {
-                matches = try await existsCloudMatchesWithRetry(
-                    assetIds: uniqueAssetIds,
-                    backupIds: uniqueBackupIds,
-                    includeDeletedMatches: true
-                )
-            } catch {
-                pollFailed = true
-                AppLog.debug(
-                    AppLog.upload,
-                    "[PERF] verify-deferred-poll-failed pending_entries=\(snapshot.count) error=\(error.localizedDescription)"
-                )
+            if !existsSnapshot.isEmpty {
+                do {
+                    matches = try await existsCloudMatchesWithRetry(
+                        assetIds: uniqueAssetIds,
+                        backupIds: uniqueBackupIds,
+                        includeDeletedMatches: true
+                    )
+                } catch {
+                    pollFailed = true
+                    AppLog.debug(
+                        AppLog.upload,
+                        "[PERF] verify-deferred-poll-failed pending_entries=\(existsSnapshot.count) error=\(error.localizedDescription)"
+                    )
+                }
             }
 
             var confirmed: [DeferredVerifyEntry] = []
@@ -1663,18 +2072,29 @@ final class HybridUploadManager: NSObject, ObservableObject {
                         continue
                     }
                     entry.lastPolledAtUptime = now
+                    if entry.confirmationMode == .directContentId {
+                        if directConfirmedContentIds.contains(entry.contentId) {
+                            deferredVerifyEntriesByContentId.removeValue(forKey: entry.contentId)
+                            confirmed.append(entry)
+                            continue
+                        }
+                        if directPollFailed {
+                            deferredVerifyEntriesByContentId[entry.contentId] = entry
+                            continue
+                        }
+                    }
                     let lookup = (kind: entry.verificationKind, value: entry.verificationValue)
-                    if cloudMatches(matches, contain: lookup) {
+                    if entry.confirmationMode == .cloudExists && cloudMatches(matches, contain: lookup) {
                         deferredVerifyEntriesByContentId.removeValue(forKey: entry.contentId)
                         confirmed.append(entry)
                         continue
                     }
-                    if cloudDeletedMatches(matches, contain: lookup) {
+                    if entry.confirmationMode == .cloudExists && cloudDeletedMatches(matches, contain: lookup) {
                         deferredVerifyEntriesByContentId.removeValue(forKey: entry.contentId)
                         deletedConfirmed.append(entry)
                         continue
                     }
-                    if pollFailed {
+                    if pollFailed || (entry.confirmationMode == .directContentId && directPollFailed) {
                         deferredVerifyEntriesByContentId[entry.contentId] = entry
                         continue
                     }
@@ -1695,6 +2115,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             }
 
             for entry in confirmed {
+                settleDirectIngestConfirmation(entry.contentId)
                 SyncRepository.shared.markSynced(contentId: entry.contentId)
                 if let localId = entry.localIdentifier {
                     SyncRepository.shared.setCloudStatusForLocalIdentifier(localId, status: .backedUp)
@@ -1709,6 +2130,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 )
             }
             for entry in deletedConfirmed {
+                settleDirectIngestConfirmation(entry.contentId)
                 SyncRepository.shared.markSynced(contentId: entry.contentId)
                 if let localId = entry.localIdentifier {
                     SyncRepository.shared.setCloudStatusForLocalIdentifier(localId, status: .deletedInCloud)
@@ -1775,6 +2197,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
         localIdentifier: String? = nil,
         preferDeferred: Bool = false,
         preferDeferredReason: String? = nil,
+        preferContentIdIngestConfirmation: Bool = false,
         waitForLivePairing: Bool = false
     ) async -> VerifyResult {
         let lookup: (kind: VerificationLookupKind, value: String)?
@@ -1793,6 +2216,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
             return .failed
         }
 
+        let confirmationMode: DeferredVerifyConfirmationMode =
+            preferContentIdIngestConfirmation ? .directContentId : .cloudExists
+
         if preferDeferred {
             let note = "Awaiting server ingest confirmation"
             SyncRepository.shared.markPending(contentId: contentId, note: note)
@@ -1804,12 +2230,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 localIdentifier: localIdentifier,
                 verificationKind: lookup.kind,
                 verificationValue: lookup.value,
+                confirmationMode: confirmationMode,
                 waitForLivePairing: waitForLivePairing
             )
             print("[UPLOAD] verify deferred by policy \(lookup.kind.rawValue)=\(lookup.value) file=\(filename) reason=\(preferDeferredReason ?? "unspecified")")
             AppLog.debug(
                 AppLog.upload,
-                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred reason=policy_\(preferDeferredReason ?? "unspecified")"
+                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred confirmation=\(confirmationMode.rawValue) reason=policy_\(preferDeferredReason ?? "unspecified")"
             )
             return .deferredQueued
         }
@@ -1862,12 +2289,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 localIdentifier: localIdentifier,
                 verificationKind: lookup.kind,
                 verificationValue: lookup.value,
+                confirmationMode: confirmationMode,
                 waitForLivePairing: waitForLivePairing
             )
             print("[UPLOAD] verify deferred ingest-confirmation \(lookup.kind.rawValue)=\(lookup.value) file=\(filename)")
             AppLog.debug(
                 AppLog.upload,
-                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred"
+                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred confirmation=\(confirmationMode.rawValue)"
             )
             return .deferredQueued
         } catch {
@@ -1880,12 +2308,13 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 localIdentifier: localIdentifier,
                 verificationKind: lookup.kind,
                 verificationValue: lookup.value,
+                confirmationMode: confirmationMode,
                 waitForLivePairing: waitForLivePairing
             )
             print("[UPLOAD] verify request failed; deferred file=\(filename) err=\(error.localizedDescription)")
             AppLog.debug(
                 AppLog.upload,
-                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred reason=request_failed"
+                "[PERF] verify-deferred-queued content_id=\(contentId) \(lookup.kind.rawValue)=\(lookup.value) mode=fast_deferred confirmation=\(confirmationMode.rawValue) reason=request_failed"
             )
             return .deferredQueued
         }
@@ -2184,13 +2613,17 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
         while activeTusWorkers < tusConcurrencyState.targetWorkers && !pendingTus.isEmpty {
             activeTusWorkers += 1
+            nextTusWorkerToken += 1
+            let workerToken = nextTusWorkerToken
             AppLog.debug(
                 AppLog.upload,
                 "[PERF] tus-worker-start active_workers=\(activeTusWorkers) target_workers=\(tusConcurrencyState.targetWorkers) pending=\(pendingTus.count)"
             )
-            Task.detached { [weak self] in
-                await self?.runTusWorker()
+            let workerTask: Task<Void, Never> = Task.detached { [weak self] in
+                guard let self else { return }
+                await self.runTusWorker(workerToken: workerToken)
             }
+            tusWorkerTasks[workerToken] = workerTask
         }
     }
 
@@ -2230,9 +2663,10 @@ final class HybridUploadManager: NSObject, ObservableObject {
         return retired
     }
 
-    private func finishWorker(reason: String = "idle") {
+    private func finishWorker(workerToken: Int, reason: String = "idle") {
         var shouldLogSummary = false
         tusQueue.sync {
+            tusWorkerTasks.removeValue(forKey: workerToken)
             activeTusWorkers = max(0, activeTusWorkers - 1)
             AppLog.debug(
                 AppLog.upload,
@@ -2246,14 +2680,23 @@ final class HybridUploadManager: NSObject, ObservableObject {
         scheduleForegroundUploadIdleTimerRefresh()
     }
 
-    private func runTusWorker() async {
+    private func runTusWorker(workerToken: Int) async {
         while true {
-            if retireWorkerIfOverTarget() { return }
+            if retireWorkerIfOverTarget() {
+                let _ = tusQueue.sync {
+                    tusWorkerTasks.removeValue(forKey: workerToken)
+                }
+                return
+            }
             guard let next = nextTusItem() else {
-                finishWorker(reason: "idle")
+                finishWorker(workerToken: workerToken, reason: "idle")
                 return
             }
             await performTusUpload(next.item, queueWait: next.queueWait)
+            if Task.isCancelled {
+                finishWorker(workerToken: workerToken, reason: "cancelled")
+                return
+            }
             perfLogSummary(reason: "foreground-progress")
             tusQueue.sync {
                 maybeStartTusWorkers(reason: "post-item")
@@ -2264,6 +2707,21 @@ final class HybridUploadManager: NSObject, ObservableObject {
     func cancelAllForeground() {
         tusQueue.sync {
             for item in items { tusCancelFlags[item.id] = true }
+        }
+        cancelActiveTusWorkers(reason: "foreground-cancel")
+    }
+
+    private func cancelActiveTusWorkers(reason: String) {
+        let workerTasks = tusQueue.sync { () -> [Task<Void, Never>] in
+            let tasks = Array(tusWorkerTasks.values)
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] tus-worker-cancel reason=\(reason) count=\(tasks.count)"
+            )
+            return tasks
+        }
+        for workerTask in workerTasks {
+            workerTask.cancel()
         }
     }
 
@@ -2277,13 +2735,16 @@ final class HybridUploadManager: NSObject, ObservableObject {
             pendingTus.removeAll()
             tusEnqueuedAtUptime.removeAll(keepingCapacity: true)
             liveComponentPendingByContentId.removeAll(keepingCapacity: true)
+            activeForegroundUploadsByContentId.removeAll(keepingCapacity: true)
         }
+        cancelActiveTusWorkers(reason: "resync")
         cancelActiveExports()
+        cancelActiveBackgroundMultipartUploads(reason: "resync")
         scheduleForegroundUploadIdleTimerRefresh()
         DispatchQueue.main.async {
             for idx in self.items.indices {
                 switch self.items[idx].status {
-                case .queued, .exporting, .uploading:
+                case .queued, .exporting, .uploading, .backgroundQueued:
                     self.items[idx].status = .canceled
                 default:
                     break
@@ -2652,6 +3113,9 @@ final class HybridUploadManager: NSObject, ObservableObject {
                 let plainBackupCandidates = self.computeBackupIdCandidatesForUpload(fileURL: plainURL, isVideo: isVideo)
                 if let bid = plainBackupCandidates.first {
                     tusLockedMeta["backup_id"] = bid
+                }
+                if !isVideo, let visualBackupId = self.computeVisualBackupId(fileURL: plainURL) {
+                    tusLockedMeta["visual_backup_id"] = visualBackupId
                 }
                 self.cacheBackupIdCandidates(
                     asset: asset,
@@ -3160,7 +3624,20 @@ final class HybridUploadManager: NSObject, ObservableObject {
 
     private func performTusUpload(_ item: UploadItem, queueWait: TimeInterval?) async {
         let opStartedAt = perfNow()
-        defer { trackLiveComponentSettledIfNeeded(item) }
+        var didTrackForegroundUpload = false
+        var shouldClearUploadingStateOnSuccess = false
+        defer {
+            if didTrackForegroundUpload {
+                let remainingForegroundUploads = trackForegroundUploadSettled(item)
+                if shouldClearUploadingStateOnSuccess && remainingForegroundUploads == 0 {
+                    SyncRepository.shared.clearUploadingIfNeeded(
+                        contentId: item.contentId,
+                        note: "Awaiting primary component confirmation"
+                    )
+                }
+            }
+            trackLiveComponentSettledIfNeeded(item)
+        }
         guard let tusClient else { return }
         let uploadProfile = tusUploadProfile(for: item)
         let patchTimeoutSeconds = uploadProfile.patchTimeoutSeconds
@@ -3182,6 +3659,8 @@ final class HybridUploadManager: NSObject, ObservableObject {
             "[PERF] tus-start filename=\(item.filename) size=\(item.totalBytes) queue_wait_ms=\(queueWait.map(perfMs) ?? 0) pending=\(pendingTusCount()) workers=\(tusQueue.sync { activeTusWorkers }) chunk_bytes=\(uploadProfile.initialChunkSize) min_chunk_bytes=\(uploadProfile.minimumChunkSize) max_chunk_bytes=\(uploadProfile.maximumChunkSize) patch_timeout_s=\(Int(patchTimeoutSeconds.rounded())) stall_recovery_budget=\(uploadProfile.maxStallRecoveries)"
         )
         await setUploading(item.id)
+        trackForegroundUploadStart(item)
+        didTrackForegroundUpload = true
         SyncRepository.shared.markUploading(contentId: item.contentId)
 
         func tusResumeKey(for item: UploadItem) -> String {
@@ -3241,6 +3720,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                     ]
                     if let assetId = item.assetId ?? self.computeAssetId(fileURL: item.tempFileURL) { meta["asset_id"] = assetId }
                     if let backupId = item.backupId ?? self.computeBackupId(fileURL: item.tempFileURL) { meta["backup_id"] = backupId }
+                    if let visualBackupId = self.computeVisualBackupId(fileURL: item.tempFileURL) { meta["visual_backup_id"] = visualBackupId }
                     if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["caption"] = cap }
                     if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["description"] = des }
                     print("[UPLOAD] TUS meta filename=\(item.filename) content_id=\(item.contentId) created_at=\(item.creationTs) favorite=\(item.isFavorite ? 1 : 0) caption='\(item.caption ?? "")' description='\(item.longDescription ?? "")' asset_id='\(meta["asset_id"] ?? "")' backup_id='\(meta["backup_id"] ?? "")'")
@@ -3294,6 +3774,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
                         ]
                         if let assetId = item.assetId ?? self.computeAssetId(fileURL: item.tempFileURL) { meta["asset_id"] = assetId }
                         if let backupId = item.backupId ?? self.computeBackupId(fileURL: item.tempFileURL) { meta["backup_id"] = backupId }
+                        if let visualBackupId = self.computeVisualBackupId(fileURL: item.tempFileURL) { meta["visual_backup_id"] = visualBackupId }
                         if let cap = item.caption, !cap.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["caption"] = cap }
                         if let des = item.longDescription, !des.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { meta["description"] = des }
                         if let albums = item.albumPathsJSON, AuthManager.shared.syncPreserveAlbum { meta["albums"] = albums }
@@ -3366,13 +3847,21 @@ final class HybridUploadManager: NSObject, ObservableObject {
             } else {
                 verifyPolicy = shouldPreferDeferredVerificationForForeground()
             }
+            let preferDirectContentIdIngestConfirmation = shouldUseDirectIngestConfirmation(
+                for: item,
+                waitForLivePairing: waitForLivePairing
+            )
             let verifyResult = await markSyncedAfterServerVerification(
                 for: item,
                 preferDeferred: verifyPolicy.prefer,
                 preferDeferredReason: verifyPolicy.reason,
+                preferContentIdIngestConfirmation: preferDirectContentIdIngestConfirmation,
                 waitForLivePairing: waitForLivePairing
             )
             let verified = (verifyResult != .failed)
+            if verified && !shouldMarkSyncedInRepository(for: item) {
+                shouldClearUploadingStateOnSuccess = true
+            }
             verifyDeferred = (verifyResult == .deferredQueued)
             verifySeconds = max(0, perfNow() - verifyStart)
             await update(itemID: item.id, status: verified ? .completed : .failed)
@@ -3537,6 +4026,7 @@ final class HybridUploadManager: NSObject, ObservableObject {
             writeField(name: "content_id", value: item.contentId)
             if let aid = item.assetId ?? computeAssetId(fileURL: item.tempFileURL) { writeField(name: "asset_id", value: aid) }
             if let bid = item.backupId ?? computeBackupId(fileURL: item.tempFileURL) { writeField(name: "backup_id", value: bid) }
+            if let visualBackupId = computeVisualBackupId(fileURL: item.tempFileURL) { writeField(name: "visual_backup_id", value: visualBackupId) }
             writeField(name: "media_type", value: item.isVideo ? "video" : "image")
             writeField(name: "created_at", value: String(item.creationTs))
             writeField(name: "favorite", value: item.isFavorite ? "1" : "0")
@@ -3567,12 +4057,18 @@ final class HybridUploadManager: NSObject, ObservableObject {
         // Create upload task using file-based body
         let task = bgSession.uploadTask(with: req, fromFile: bodyURL)
         // taskDescription format:
-        // uploadItemUUID|bodyFilename|boundary|attempt|contentId|mediaKind|syncMark|assetId|backupId
+        // uploadItemUUID|bodyFilename|boundary|attempt|contentId|mediaKind|syncMark|assetId|backupId|verifyMode
         // syncMark: "mark" for primary components, "skip" for non-primary components.
         let syncMark = shouldMarkSyncedInRepository(for: item) ? "mark" : "skip"
+        let waitForLivePairing = shouldDelayVerificationForLivePairing(for: item)
+        let verifyModeForDesc = shouldUseDirectIngestConfirmation(
+            for: item,
+            waitForLivePairing: waitForLivePairing
+        ) ? DeferredVerifyConfirmationMode.directContentId.rawValue
+          : DeferredVerifyConfirmationMode.cloudExists.rawValue
         let assetIdForDesc = preflightAssetId(for: item) ?? ""
         let backupIdForDesc = preflightBackupId(for: item) ?? ""
-        let taskDescription = item.id.uuidString + "|" + bodyURL.lastPathComponent + "|" + boundary + "|0|" + item.contentId + "|" + (item.isVideo ? "video" : "photo") + "|" + syncMark + "|" + assetIdForDesc + "|" + backupIdForDesc
+        let taskDescription = item.id.uuidString + "|" + bodyURL.lastPathComponent + "|" + boundary + "|0|" + item.contentId + "|" + (item.isVideo ? "video" : "photo") + "|" + syncMark + "|" + assetIdForDesc + "|" + backupIdForDesc + "|" + verifyModeForDesc
         task.taskDescription = taskDescription
         perfRegisterBackgroundTaskStart(taskDescription: taskDescription, bodyName: bodyURL.lastPathComponent)
 
@@ -3667,6 +4163,9 @@ extension HybridUploadManager {
         if let primary = computeBackupId(fileURL: fileURL) {
             candidates.append(primary)
         }
+        if !isVideo, let visual = computeVisualBackupId(fileURL: fileURL), !candidates.contains(visual) {
+            candidates.append(visual)
+        }
         if !isVideo && isHEICContainerForBackupCache(url: fileURL) {
             if let converted = ImageConversion.convertHEICtoJPEG(inputURL: fileURL, quality: 0.9) {
                 if let alt = computeBackupId(fileURL: converted.url), !candidates.contains(alt) {
@@ -3691,7 +4190,7 @@ extension HybridUploadManager {
         let modified = Int64(asset.modificationDate?.timeIntervalSince1970 ?? 0)
         let durationMs = Int64((asset.mediaType == .video ? asset.duration : 0) * 1000.0)
         let fingerprint = [
-            "v1",
+            "v2-content-fallback",
             "mt=\(asset.mediaType.rawValue)",
             "st=\(asset.mediaSubtypes.rawValue)",
             "rt=\(resource.type.rawValue)",
@@ -3709,6 +4208,11 @@ extension HybridUploadManager {
             fingerprint: fingerprint,
             candidates: candidates
         )
+    }
+
+    fileprivate func computeVisualBackupId(fileURL: URL) -> String? {
+        guard let uid = AuthManager.shared.userId, !uid.isEmpty else { return nil }
+        return BackupId.computeVisualBackupId(fileURL: fileURL, userId: uid)
     }
 
     fileprivate func computeAssetId(fileURL: URL) -> String? {
@@ -3826,6 +4330,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         let assetIdFromDesc = (assetIdFromDescRaw?.isEmpty == false) ? assetIdFromDescRaw : nil
         let backupIdFromDescRaw = comps.count >= 9 ? String(comps[8]) : nil
         let backupIdFromDesc = (backupIdFromDescRaw?.isEmpty == false) ? backupIdFromDescRaw : nil
+        let verificationModeFromDesc = comps.count >= 10 ? String(comps[9]) : nil
         let maxAttempts = 3
         let scopedBodyURL = uploadTempFileURL(name: bodyName)
         let bodyURL = FileManager.default.fileExists(atPath: scopedBodyURL.path)
@@ -3857,6 +4362,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 syncMarkFromDesc: syncMarkFromDesc,
                 assetIdFromDesc: assetIdFromDesc,
                 backupIdFromDesc: backupIdFromDesc,
+                verificationModeFromDesc: verificationModeFromDesc,
                 maxAttempts: maxAttempts,
                 bodyURL: bodyURL,
                 bodyBytes: bodyBytes,
@@ -3879,6 +4385,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         syncMarkFromDesc: String?,
         assetIdFromDesc: String?,
         backupIdFromDesc: String?,
+        verificationModeFromDesc: String?,
         maxAttempts: Int,
         bodyURL: URL,
         bodyBytes: Int64,
@@ -3928,6 +4435,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         }()
         let payloadBytes: Int64 = itemIndex.map { items[$0].totalBytes } ?? max(Int64(0), bodyBytes)
         let attemptMs = attemptDuration.map(perfMs) ?? -1
+        let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
 
         func setItemStatus(_ status: UploadStatus) {
             if let idx = itemIndex { items[idx].status = status }
@@ -3952,6 +4460,14 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 if let exportedTempURL { try? FileManager.default.removeItem(at: exportedTempURL) }
                 try? FileManager.default.removeItem(at: bodyURL)
             }
+        }
+
+        func isCancellationError(_ err: Error) -> Bool {
+            if let urlError = err as? URLError {
+                return urlError.code == .cancelled
+            }
+            let nsErr = err as NSError
+            return nsErr.domain == NSURLErrorDomain && nsErr.code == NSURLErrorCancelled
         }
 
         func isTransientTransportError(_ err: Error) -> Bool {
@@ -3999,6 +4515,48 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
             return code == 408 || code == 429 || (500...599).contains(code)
         }
 
+        func handleStoppedBackgroundTask(stopMode: StopMode, reason: String) {
+            switch stopMode {
+            case .pause:
+                setItemStatus(.queued)
+                markPendingInDB("Sync paused")
+                print(
+                    "[UPLOAD] BG upload paused during stop content_id=\(dbContentId ?? "(none)") reason=\(reason)"
+                )
+            case .resync:
+                setItemStatus(.canceled)
+                markPendingInDB("ReSync requested")
+                print(
+                    "[UPLOAD] BG upload canceled for ReSync content_id=\(dbContentId ?? "(none)") reason=\(reason)"
+                )
+            case .none:
+                return
+            }
+            removeFiles(exportedTempURL: exportedTempURL)
+            let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
+            AppLog.debug(
+                AppLog.upload,
+                "[PERF] bg-stopped body=\(bodyName) reason=\(reason) stop_mode=\(String(describing: stopMode)) attempt=\(attempt) payload_bytes=\(payloadBytes) attempt_ms=\(attemptMs) total_ms=\(total.map(perfMs) ?? -1)"
+            )
+        }
+
+        let stopMode = currentStopMode()
+        if stopMode != .none {
+            let shouldShortCircuit = completionError != nil || statusCode.map { !(200..<300).contains($0) } ?? false
+            if shouldShortCircuit {
+                let reason: String
+                if let err = completionError {
+                    reason = isCancellationError(err) ? "cancelled" : "error"
+                } else if let code = statusCode {
+                    reason = "http\(code)"
+                } else {
+                    reason = "stopped"
+                }
+                handleStoppedBackgroundTask(stopMode: stopMode, reason: reason)
+                return
+            }
+        }
+
         // 1) Transport error (e.g., offline). Retry up to N times while preserving the body file.
         if let err = completionError {
             let msg = err.localizedDescription
@@ -4007,6 +4565,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 setItemStatus(.backgroundQueued)
                 let delay = pow(2.0, Double(attempt))
                 DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                    if self.shouldAbortBackgroundRetry() { return }
                     var retryReq = URLRequest(url: URL(string: AuthManager.shared.serverURL + "/api/upload")!)
                     retryReq.httpMethod = "POST"
                     AuthManager.shared.authHeader().forEach { k, v in retryReq.setValue(v, forHTTPHeaderField: k) }
@@ -4023,7 +4582,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                     let aidValue = assetIdFromDesc ?? ""
                     let bidValue = backupIdFromDesc ?? ""
                     let boundaryValue = boundary ?? ""
-                    let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue
+                    let verifyMode = verificationModeFromDesc ?? DeferredVerifyConfirmationMode.cloudExists.rawValue
+                    let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue + "|" + verifyMode
                     newTask.taskDescription = newDescription
                     self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                     newTask.resume()
@@ -4068,17 +4628,29 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
             if shouldMarkSyncedResolved {
                 if let idx = itemIndex {
                     let completedItem = items[idx]
-                    let verifyResult = await markSyncedAfterServerVerification(for: completedItem)
+                    let waitForLivePairing = shouldDelayVerificationForLivePairing(for: completedItem)
+                    let preferDirectContentIdIngestConfirmation = shouldUseDirectIngestConfirmation(
+                        for: completedItem,
+                        waitForLivePairing: waitForLivePairing
+                    )
+                    let verifyResult = await markSyncedAfterServerVerification(
+                        for: completedItem,
+                        preferContentIdIngestConfirmation: preferDirectContentIdIngestConfirmation,
+                        waitForLivePairing: waitForLivePairing
+                    )
                     verified = (verifyResult != .failed)
                     setItemStatus(verified ? .completed : .failed)
                 } else {
                     if let cid = dbContentId {
+                        let preferDirectContentIdIngestConfirmation =
+                            verificationModeFromDesc == DeferredVerifyConfirmationMode.directContentId.rawValue
                         let verifyResult = await markSyncedAfterServerVerification(
                             contentId: cid,
                             filename: bodyName,
                             assetId: assetIdFromDesc,
                             backupId: backupIdFromDesc,
-                            localIdentifier: localIdentifierForVerify
+                            localIdentifier: localIdentifierForVerify,
+                            preferContentIdIngestConfirmation: preferDirectContentIdIngestConfirmation
                         )
                         verified = (verifyResult != .failed)
                     } else {
@@ -4110,6 +4682,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
             let refreshed = await AuthManager.shared.forceRefresh()
             let nextAttempt = attempt + 1
             let scheduleRetry = {
+                if self.shouldAbortBackgroundRetry() { return }
                 var retryReq = URLRequest(url: URL(string: AuthManager.shared.serverURL + "/api/upload")!)
                 retryReq.httpMethod = "POST"
                 AuthManager.shared.authHeader().forEach { k, v in retryReq.setValue(v, forHTTPHeaderField: k) }
@@ -4123,7 +4696,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 let marker = syncMarkFromDesc ?? (shouldMarkSyncedResolved ? "mark" : "skip")
                 let aidValue = assetIdFromDesc ?? ""
                 let bidValue = backupIdFromDesc ?? ""
-                let newDescription = idStr + "|" + bodyName + "|" + boundary + "|" + String(nextAttempt) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue
+                let verifyMode = verificationModeFromDesc ?? DeferredVerifyConfirmationMode.cloudExists.rawValue
+                let newDescription = idStr + "|" + bodyName + "|" + boundary + "|" + String(nextAttempt) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue + "|" + verifyMode
                 newTask.taskDescription = newDescription
                 self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                 newTask.resume()
@@ -4147,6 +4721,7 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
             setItemStatus(.backgroundQueued)
             let delay = pow(2.0, Double(attempt))
             DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + delay) {
+                if self.shouldAbortBackgroundRetry() { return }
                 var retryReq = URLRequest(url: URL(string: AuthManager.shared.serverURL + "/api/upload")!)
                 retryReq.httpMethod = "POST"
                 AuthManager.shared.authHeader().forEach { k, v in retryReq.setValue(v, forHTTPHeaderField: k) }
@@ -4163,7 +4738,8 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
                 let aidValue = assetIdFromDesc ?? ""
                 let bidValue = backupIdFromDesc ?? ""
                 let boundaryValue = boundary ?? ""
-                let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue
+                let verifyMode = verificationModeFromDesc ?? DeferredVerifyConfirmationMode.cloudExists.rawValue
+                let newDescription = idStr + "|" + bodyName + "|" + boundaryValue + "|" + String(attempt + 1) + "|" + cidValue + "|" + mediaKind + "|" + marker + "|" + aidValue + "|" + bidValue + "|" + verifyMode
                 newTask.taskDescription = newDescription
                 self.perfRegisterBackgroundTaskStart(taskDescription: newDescription, bodyName: bodyName)
                 newTask.resume()
@@ -4197,7 +4773,6 @@ extension HybridUploadManager: URLSessionDelegate, URLSessionTaskDelegate {
         setItemStatus(.failed)
         let errMsg = statusCode.map { "HTTP \($0)" } ?? "Unknown error"
         markFailedInDB(errMsg)
-        let exportedTempURL = itemIndex.map { items[$0].tempFileURL }
         removeFiles(exportedTempURL: exportedTempURL)
         let total = perfFinishBackgroundEndToEndDuration(bodyName: bodyName)
         perfRecordFailure()

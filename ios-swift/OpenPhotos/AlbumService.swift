@@ -6,8 +6,24 @@ import SQLite3
 class AlbumService {
     static let shared = AlbumService()
     private let db = DatabaseManager.shared
+    private let refreshStateQueue = DispatchQueue(label: "album.service.refresh.state")
+    private var lastSystemAlbumMembershipRefreshUptime: TimeInterval = 0
     
     private init() {}
+
+    private func recordSystemAlbumMembershipRefresh() {
+        refreshStateQueue.async {
+            self.lastSystemAlbumMembershipRefreshUptime = ProcessInfo.processInfo.systemUptime
+        }
+    }
+
+    private func didRefreshSystemAlbumMembershipsRecently(minInterval: TimeInterval) -> Bool {
+        refreshStateQueue.sync {
+            let last = lastSystemAlbumMembershipRefreshUptime
+            guard last > 0 else { return false }
+            return (ProcessInfo.processInfo.systemUptime - last) < minInterval
+        }
+    }
     
     // MARK: - Album CRUD Operations
     
@@ -383,12 +399,25 @@ class AlbumService {
         }
         
         db.commitTransaction()
+        recordSystemAlbumMembershipRefresh()
         print("Imported \(importedCount) user albums successfully")
     }
 
     // Incrementally refresh existing user-created albums and their memberships.
     // - Creates any new albums not yet in the DB
     // - Adds any missing asset memberships for existing albums (idempotent)
+    @discardableResult
+    func refreshSystemAlbumMembershipsIfNeeded(minInterval: TimeInterval = 30) -> Bool {
+        if didRefreshSystemAlbumMembershipsRecently(minInterval: minInterval) {
+            print(
+                "Skipped user album membership refresh — last refresh was within \(Int(minInterval))s"
+            )
+            return false
+        }
+        refreshSystemAlbumMemberships()
+        return true
+    }
+
     func refreshSystemAlbumMemberships() {
         let fetchOptions = PHFetchOptions()
         let userAlbums = PHAssetCollection.fetchAssetCollections(
@@ -441,6 +470,7 @@ class AlbumService {
         }
 
         db.commitTransaction()
+        recordSystemAlbumMembershipRefresh()
         print("Refreshed user albums — created: \(created), updated: \(updated)")
     }
     

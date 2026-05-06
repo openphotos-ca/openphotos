@@ -3083,6 +3083,9 @@ pub async fn list_photos(
     if let Some(city) = &query.filter_city {
         where_clauses.push(format!("p.city = '{}'", city.replace("'", "''")));
     }
+    if let Some(province) = &query.filter_province {
+        where_clauses.push(format!("p.province = '{}'", province.replace("'", "''")));
+    }
     if let Some(country) = &query.filter_country {
         where_clauses.push(format!("p.country = '{}'", country.replace("'", "''")));
     }
@@ -4255,6 +4258,20 @@ pub async fn media_counts(
         } else {
             ""
         };
+        let sql_lit = |value: &str| format!("'{}'", value.replace('\'', "''"));
+        let mut location_clause = String::new();
+        if let Some(city) = incoming.filter_city.as_deref() {
+            location_clause.push_str(" AND p.city = ");
+            location_clause.push_str(&sql_lit(city));
+        }
+        if let Some(province) = incoming.filter_province.as_deref() {
+            location_clause.push_str(" AND p.province = ");
+            location_clause.push_str(&sql_lit(province));
+        }
+        if let Some(country) = incoming.filter_country.as_deref() {
+            location_clause.push_str(" AND p.country = ");
+            location_clause.push_str(&sql_lit(country));
+        }
         let include_trashed = incoming.include_trashed.unwrap_or(false);
         let trashed_only = incoming.filter_trashed_only.unwrap_or(false);
         let trash_clause = if trashed_only {
@@ -4264,28 +4281,28 @@ pub async fn media_counts(
         } else {
             ""
         };
-        let mut sql_all = format!(
-            "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{}{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
-            fav_clause, trash_clause
+        let sql_all = format!(
+            "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{}{}{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
+            fav_clause, trash_clause, location_clause
         );
-        let mut sql_photos = format!(
-            "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2 AND p.is_video=FALSE{}{}",
-            fav_clause, trash_clause
+        let sql_photos = format!(
+            "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2 AND p.is_video=FALSE{}{}{}",
+            fav_clause, trash_clause, location_clause
         );
-        let mut sql_videos = format!(
-            "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2 AND p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=FALSE{}{}",
-            fav_clause, trash_clause
+        let sql_videos = format!(
+            "SELECT COUNT(*) FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2 AND p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=FALSE{}{}{}",
+            fav_clause, trash_clause, location_clause
         );
         let sql_locked = format!(
             "SELECT COALESCE(SUM(CASE WHEN p.locked THEN 1 ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN p.locked AND p.is_video THEN 1 ELSE 0 END),0),
                     COALESCE(SUM(CASE WHEN p.locked AND NOT p.is_video THEN 1 ELSE 0 END),0)
-             FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
-            trash_clause
+             FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{}{}{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
+            fav_clause, trash_clause, location_clause
         );
         let sql_total_size = format!(
-            "SELECT COALESCE(SUM(COALESCE(p.size,0)),0)::BIGINT FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{}{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
-            fav_clause, trash_clause
+            "SELECT COALESCE(SUM(COALESCE(p.size,0)),0)::BIGINT FROM photos p WHERE p.organization_id=$1 AND p.user_id=$2{}{}{} AND NOT (p.is_video=TRUE AND COALESCE(p.is_live_photo,FALSE)=TRUE)",
+            fav_clause, trash_clause, location_clause
         );
         let all: i64 = pg
             .query_one(&sql_all, &[&org_id, &user.user_id])
@@ -4391,6 +4408,9 @@ pub async fn media_counts(
     }
     if let Some(city) = &query.filter_city {
         where_clauses.push(format!("p.city = '{}'", city.replace("'", "''")));
+    }
+    if let Some(province) = &query.filter_province {
+        where_clauses.push(format!("p.province = '{}'", province.replace("'", "''")));
     }
     if let Some(country) = &query.filter_country {
         where_clauses.push(format!("p.country = '{}'", country.replace("'", "''")));
@@ -7445,13 +7465,15 @@ pub async fn get_filter_metadata(
     headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     let user = get_user_from_headers(&headers, &state.auth_service).await?;
-    // Cities/countries/date/cameras and faces
-    let (cities, countries, date_range, cameras, faces) = if let Some(pg) = &state.pg_client {
+    // Cities/countries/provinces/date/cameras and faces
+    let (cities, countries, provinces, date_range, cameras, faces) = if let Some(pg) =
+        &state.pg_client
+    {
         // Postgres path (no DuckDB usage)
         let cities_rows = pg
             .query(
-                "SELECT DISTINCT city FROM photos WHERE organization_id=$1 AND city IS NOT NULL ORDER BY city",
-                &[&user.organization_id],
+                "SELECT DISTINCT city FROM photos WHERE organization_id=$1 AND user_id=$2 AND city IS NOT NULL ORDER BY city",
+                &[&user.organization_id, &user.user_id],
             )
             .await
             .unwrap_or_default();
@@ -7462,8 +7484,8 @@ pub async fn get_filter_metadata(
 
         let country_rows = pg
             .query(
-                "SELECT DISTINCT country FROM photos WHERE organization_id=$1 AND country IS NOT NULL ORDER BY country",
-                &[&user.organization_id],
+                "SELECT DISTINCT country FROM photos WHERE organization_id=$1 AND user_id=$2 AND country IS NOT NULL ORDER BY country",
+                &[&user.organization_id, &user.user_id],
             )
             .await
             .unwrap_or_default();
@@ -7472,10 +7494,22 @@ pub async fn get_filter_metadata(
             countries.push(r.get::<_, String>(0));
         }
 
+        let province_rows = pg
+            .query(
+                "SELECT DISTINCT province FROM photos WHERE organization_id=$1 AND user_id=$2 AND province IS NOT NULL ORDER BY province",
+                &[&user.organization_id, &user.user_id],
+            )
+            .await
+            .unwrap_or_default();
+        let mut provinces: Vec<String> = Vec::new();
+        for r in province_rows {
+            provinces.push(r.get::<_, String>(0));
+        }
+
         let dr_opt = pg
             .query_opt(
-                "SELECT MIN(created_at), MAX(created_at) FROM photos WHERE organization_id=$1",
-                &[&user.organization_id],
+                "SELECT MIN(created_at), MAX(created_at) FROM photos WHERE organization_id=$1 AND user_id=$2",
+                &[&user.organization_id, &user.user_id],
             )
             .await
             .ok()
@@ -7497,8 +7531,8 @@ pub async fn get_filter_metadata(
 
         let camera_rows = pg
             .query(
-                "SELECT DISTINCT camera_model FROM photos WHERE organization_id=$1 AND camera_model IS NOT NULL ORDER BY camera_model",
-                &[&user.organization_id],
+                "SELECT DISTINCT camera_model FROM photos WHERE organization_id=$1 AND user_id=$2 AND camera_model IS NOT NULL ORDER BY camera_model",
+                &[&user.organization_id, &user.user_id],
             )
             .await
             .unwrap_or_default();
@@ -7528,11 +7562,11 @@ pub async fn get_filter_metadata(
                 }));
             }
         }
-        (cities, countries, dr_opt, cameras, faces)
+        (cities, countries, provinces, dr_opt, cameras, faces)
     } else {
         // DuckDB path
         // 1) Query scalar filter facets from data DB (release lock ASAP)
-        let (cities, countries, date_range, cameras) = {
+        let (cities, countries, provinces, date_range, cameras) = {
             let user_db = state
                 .multi_tenant_db
                 .as_ref()
@@ -7541,31 +7575,50 @@ pub async fn get_filter_metadata(
             let conn = user_db.lock();
 
             let mut cities_stmt = conn
-                .prepare("SELECT DISTINCT city FROM photos WHERE city IS NOT NULL ORDER BY city")?;
+                .prepare("SELECT DISTINCT city FROM photos WHERE organization_id = ? AND user_id = ? AND city IS NOT NULL ORDER BY city")?;
             let cities: Vec<String> = cities_stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map(
+                    duckdb::params![user.organization_id, &user.user_id],
+                    |row| row.get::<_, String>(0),
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
 
             let mut countries_stmt = conn.prepare(
-                "SELECT DISTINCT country FROM photos WHERE country IS NOT NULL ORDER BY country",
+                "SELECT DISTINCT country FROM photos WHERE organization_id = ? AND user_id = ? AND country IS NOT NULL ORDER BY country",
             )?;
             let countries: Vec<String> = countries_stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map(
+                    duckdb::params![user.organization_id, &user.user_id],
+                    |row| row.get::<_, String>(0),
+                )?
+                .collect::<Result<Vec<_>, _>>()?;
+
+            let mut provinces_stmt = conn.prepare(
+                "SELECT DISTINCT province FROM photos WHERE organization_id = ? AND user_id = ? AND province IS NOT NULL ORDER BY province",
+            )?;
+            let provinces: Vec<String> = provinces_stmt
+                .query_map(
+                    duckdb::params![user.organization_id, &user.user_id],
+                    |row| row.get::<_, String>(0),
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
 
             let date_range: Option<(i64, i64)> = conn
                 .query_row(
-                    "SELECT MIN(created_at), MAX(created_at) FROM photos",
-                    [],
+                    "SELECT MIN(created_at), MAX(created_at) FROM photos WHERE organization_id = ? AND user_id = ?",
+                    duckdb::params![user.organization_id, &user.user_id],
                     |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .ok();
 
-            let mut cameras_stmt = conn.prepare("SELECT DISTINCT camera_model FROM photos WHERE camera_model IS NOT NULL ORDER BY camera_model")?;
+            let mut cameras_stmt = conn.prepare("SELECT DISTINCT camera_model FROM photos WHERE organization_id = ? AND user_id = ? AND camera_model IS NOT NULL ORDER BY camera_model")?;
             let cameras: Vec<String> = cameras_stmt
-                .query_map([], |row| row.get::<_, String>(0))?
+                .query_map(
+                    duckdb::params![user.organization_id, &user.user_id],
+                    |row| row.get::<_, String>(0),
+                )?
                 .collect::<Result<Vec<_>, _>>()?;
-            (cities, countries, date_range, cameras)
+            (cities, countries, provinces, date_range, cameras)
         };
 
         // 2) Faces facet from embedding DB, intersected with this user's visible photos
@@ -7593,21 +7646,23 @@ pub async fn get_filter_metadata(
             faces
         };
 
-        (cities, countries, date_range, cameras, faces)
+        (cities, countries, provinces, date_range, cameras, faces)
     };
 
     let out = json!({
         "cities": cities,
         "countries": countries,
+        "provinces": provinces,
         "date_range": date_range.map(|(min, max)| json!({"min": min, "max": max})),
         "faces": faces,
         "cameras": cameras
     });
     tracing::info!(
-        "[FILTERS] user={} cities={} countries={} faces={}",
+        "[FILTERS] user={} cities={} countries={} provinces={} faces={}",
         user.user_id,
         out["cities"].as_array().map(|a| a.len()).unwrap_or(0),
         out["countries"].as_array().map(|a| a.len()).unwrap_or(0),
+        out["provinces"].as_array().map(|a| a.len()).unwrap_or(0),
         out["faces"].as_array().map(|a| a.len()).unwrap_or(0)
     );
     Ok(Json(out))
@@ -8165,6 +8220,9 @@ pub async fn bucket_years(
     if let Some(city) = &query.filter_city {
         where_clauses.push(format!("p.city = '{}'", city.replace("'", "''")));
     }
+    if let Some(province) = &query.filter_province {
+        where_clauses.push(format!("p.province = '{}'", province.replace("'", "''")));
+    }
     if let Some(country) = &query.filter_country {
         where_clauses.push(format!("p.country = '{}'", country.replace("'", "''")));
     }
@@ -8481,6 +8539,9 @@ pub async fn bucket_quarters(
     }
     if let Some(city) = &query.filter_city {
         where_clauses.push(format!("p.city = '{}'", city.replace("'", "''")));
+    }
+    if let Some(province) = &query.filter_province {
+        where_clauses.push(format!("p.province = '{}'", province.replace("'", "''")));
     }
     if let Some(country) = &query.filter_country {
         where_clauses.push(format!("p.country = '{}'", country.replace("'", "''")));

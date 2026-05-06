@@ -26,7 +26,7 @@ struct SyncAlbumsView: View {
                 )
             }
             Section(footer:
-                        Text("Lock controls encryption: a locked album uploads items as end‑to‑end encrypted. The switch on the right selects the album for syncing.")
+                        Text(L10n.tr("Lock controls encryption: a locked album uploads items as end‑to‑end encrypted. The switch on the right selects the album for syncing."))
                         .font(.footnote)
                         .foregroundColor(.secondary)
             ) {
@@ -49,7 +49,7 @@ struct SyncAlbumsView: View {
             }
         }
         .listStyle(.plain)
-        .navigationTitle("Selected Albums")
+        .navigationTitle(L10n.tr("Selected Albums"))
         .onAppear { load() }
         .sheet(isPresented: $showPinSheet) {
             PinSheetView(mode: pinMode) {
@@ -84,7 +84,7 @@ struct SyncAlbumsView: View {
     private func toggleLocked(_ albumId: Int64, _ locked: Bool) {
         if locked {
             // Try to bypass prompt if session verified or biometric quick verify succeeds
-            if PinManager.shared.isSessionVerified() || PinManager.shared.quickVerifyWithBiometrics(prompt: "Verify to lock album") {
+            if PinManager.shared.isSessionVerified() || PinManager.shared.quickVerifyWithBiometrics(prompt: L10n.tr("Verify to lock album")) {
                 if AlbumService.shared.setAlbumLocked(albumId: albumId, locked: true) { lockedMap[albumId] = true }
                 return
             }
@@ -101,7 +101,7 @@ struct SyncAlbumsView: View {
 
     private func toggleUnassignedLocked(_ locked: Bool) {
         if locked {
-            if PinManager.shared.isSessionVerified() || PinManager.shared.quickVerifyWithBiometrics(prompt: "Verify to lock Unassigned") {
+            if PinManager.shared.isSessionVerified() || PinManager.shared.quickVerifyWithBiometrics(prompt: L10n.tr("Verify to lock Unassigned")) {
                 auth.setSyncUnassignedLocked(true)
                 return
             }
@@ -129,12 +129,12 @@ private struct UnassignedRow: View {
                 Image(systemName: isLocked ? "lock.fill" : "lock.open.fill")
                     .font(.system(size: 22))
                     .foregroundColor(isLocked ? .blue : .secondary)
-                    .accessibilityLabel(isLocked ? "Unlock album" : "Lock album")
+                    .accessibilityLabel(isLocked ? L10n.tr("Unlock album") : L10n.tr("Lock album"))
             }
             .buttonStyle(.plain)
             VStack(alignment: .leading, spacing: 2) {
-                Text("Unassigned")
-                Text("Sync photos not in any album")
+                Text(L10n.tr("Unassigned"))
+                Text(L10n.tr("Sync photos not in any album"))
                     .font(.footnote)
                     .foregroundColor(.secondary)
             }

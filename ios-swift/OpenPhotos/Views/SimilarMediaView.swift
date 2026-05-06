@@ -58,7 +58,7 @@ struct SimilarMediaView: View {
 
             Spacer()
 
-            Text("Similar Photos/Videos")
+            Text(L10n.tr("Similar Photos/Videos"))
                 .font(.headline)
                 .padding(.vertical, 12)
 
@@ -83,6 +83,12 @@ struct SimilarMediaView: View {
     }
 }
 
+private func similarLoadButtonTitle(done: Bool, loading: Bool) -> String {
+    if done { return L10n.tr("All loaded") }
+    if loading { return L10n.tr("Loading…") }
+    return L10n.tr("Load more")
+}
+
 // MARK: - Photo Groups Section
 
 private struct SimilarPhotoGroupsSection: View {
@@ -93,9 +99,9 @@ private struct SimilarPhotoGroupsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Similar Photo Groups")
+                    Text(L10n.tr("Similar Photo Groups"))
                         .font(.headline)
-                    Text("\(viewModel.photoGroups.count) groups loaded")
+                    Text(L10n.tr("%d groups loaded", viewModel.photoGroups.count))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -103,14 +109,14 @@ private struct SimilarPhotoGroupsSection: View {
                 Button {
                     Task { await viewModel.loadMorePhotos() }
                 } label: {
-                    Text(viewModel.photoDone ? "All loaded" : (viewModel.isLoadingPhotos ? "Loading…" : "Load more"))
+                    Text(similarLoadButtonTitle(done: viewModel.photoDone, loading: viewModel.isLoadingPhotos))
                         .font(.subheadline)
                 }
                 .buttonStyle(.bordered)
                 .disabled(viewModel.photoDone || viewModel.isLoadingPhotos)
             }
             if viewModel.photoGroups.isEmpty && !viewModel.isLoadingPhotos {
-                Text("No similar photo groups found. Try indexing more photos.")
+                Text(L10n.tr("No similar photo groups found. Try indexing more photos."))
                     .font(.footnote)
                     .foregroundColor(.secondary)
                     .padding(.top, 4)
@@ -141,9 +147,9 @@ private struct SimilarVideoGroupsSection: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Similar Video Groups")
+                    Text(L10n.tr("Similar Video Groups"))
                         .font(.headline)
-                    Text("\(viewModel.videoGroups.count) groups loaded")
+                    Text(L10n.tr("%d groups loaded", viewModel.videoGroups.count))
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -151,14 +157,14 @@ private struct SimilarVideoGroupsSection: View {
                 Button {
                     Task { await viewModel.loadMoreVideos() }
                 } label: {
-                    Text(viewModel.videoDone ? "All loaded" : (viewModel.isLoadingVideos ? "Loading…" : "Load more"))
+                    Text(similarLoadButtonTitle(done: viewModel.videoDone, loading: viewModel.isLoadingVideos))
                         .font(.subheadline)
                 }
                 .buttonStyle(.bordered)
                 .disabled(viewModel.videoDone || viewModel.isLoadingVideos)
             }
             if viewModel.videoGroups.isEmpty && !viewModel.isLoadingVideos {
-                Text("No similar video groups found.")
+                Text(L10n.tr("No similar video groups found."))
                     .font(.footnote)
                     .foregroundColor(.secondary)
                     .padding(.top, 4)
@@ -276,7 +282,7 @@ private struct SimilarPhotoGroupCard: View {
                 Spacer()
                 HStack(spacing: 8) {
                     if !group.selected.isEmpty {
-                        Text("Selected (\(group.selected.count))")
+                        Text(L10n.tr("Selected (%d)", group.selected.count))
                             .font(.caption2)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -287,15 +293,15 @@ private struct SimilarPhotoGroupCard: View {
                     }
                     Menu {
                         Section {
-                            Button("Select All") {
+                            Button(L10n.tr("Select All")) {
                                 viewModel.toggleSelectAllPhotos(groupIndex: index)
                             }
                             if !group.selected.isEmpty {
-                                Button("Clear Selection") {
+                                Button(L10n.tr("Clear Selection")) {
                                     viewModel.clearSelectionForPhotoGroup(groupIndex: index)
                                 }
                             }
-                            Button("Select Inferior") {
+                            Button(L10n.tr("Select Inferior")) {
                                 viewModel.selectInferiorPhotos(groupIndex: index)
                             }
                         }
@@ -305,14 +311,14 @@ private struct SimilarPhotoGroupCard: View {
                                     await viewModel.deleteSelectedPhotos(groupIndex: index)
                                 }
                             } label: {
-                                Text("Delete Selected")
+                                Text(L10n.tr("Delete Selected"))
                             }
                             .disabled(group.selected.isEmpty)
                         }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "ellipsis.circle")
-                            Text("Actions")
+                            Text(L10n.tr("Actions"))
                         }
                         .font(.caption)
                         .padding(.horizontal, 8)
@@ -469,7 +475,7 @@ private struct SimilarVideoGroupCard: View {
                 Spacer()
                 HStack(spacing: 8) {
                     if !group.selected.isEmpty {
-                        Text("Selected (\(group.selected.count))")
+                        Text(L10n.tr("Selected (%d)", group.selected.count))
                             .font(.caption2)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 4)
@@ -480,15 +486,15 @@ private struct SimilarVideoGroupCard: View {
                     }
                     Menu {
                         Section {
-                            Button("Select All") {
+                            Button(L10n.tr("Select All")) {
                                 viewModel.toggleSelectAllVideos(groupIndex: index)
                             }
                             if !group.selected.isEmpty {
-                                Button("Clear Selection") {
+                                Button(L10n.tr("Clear Selection")) {
                                     viewModel.clearSelectionForVideoGroup(groupIndex: index)
                                 }
                             }
-                            Button("Select Inferior") {
+                            Button(L10n.tr("Select Inferior")) {
                                 Task {
                                     await viewModel.selectInferiorVideos(groupIndex: index)
                                 }
@@ -500,14 +506,14 @@ private struct SimilarVideoGroupCard: View {
                                     await viewModel.deleteSelectedVideos(groupIndex: index)
                                 }
                             } label: {
-                                Text("Delete Selected")
+                                Text(L10n.tr("Delete Selected"))
                             }
                             .disabled(group.selected.isEmpty)
                         }
                     } label: {
                         HStack(spacing: 4) {
                             Image(systemName: "ellipsis.circle")
-                            Text("Actions")
+                            Text(L10n.tr("Actions"))
                         }
                         .font(.caption)
                         .padding(.horizontal, 8)

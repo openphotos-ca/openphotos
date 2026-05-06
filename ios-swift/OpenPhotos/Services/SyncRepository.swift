@@ -1,6 +1,7 @@
 import Foundation
 import SQLite3
 import CryptoKit
+import Photos
 
 enum CloudItemStatus: Int {
     case unknown = 0
@@ -125,6 +126,19 @@ final class SyncRepository {
         // Do not downgrade assets that have already been successfully synced.
         _ = db.executeQuery(
             "UPDATE photos SET sync_state = 0, last_error = ?, last_attempt_at = ? WHERE content_id = ? AND sync_state <> 2",
+            parameters: [note ?? "", now, contentId]
+        )
+        scheduleStatsChangedNotification()
+    }
+
+    // Clear a stale "uploading" state after a non-primary component (for example a Live Photo
+    // paired video or locked thumbnail) finishes transport. This intentionally only touches
+    // rows that are still marked uploading so it will not override failed/background/synced states
+    // that may have been set by another component in the meantime.
+    func clearUploadingIfNeeded(contentId: String, note: String? = nil) {
+        let now = Int64(Date().timeIntervalSince1970)
+        _ = db.executeQuery(
+            "UPDATE photos SET sync_state = 0, last_error = ?, last_attempt_at = ? WHERE content_id = ? AND sync_state = 1",
             parameters: [note ?? "", now, contentId]
         )
         scheduleStatsChangedNotification()
@@ -499,7 +513,25 @@ extension SyncRepository {
     /// - For `.all`, returns global stats across all known local identifiers.
     /// - For `.selectedAlbums`, returns stats only for assets currently selected via
     ///   albums.sync_enabled (plus unassigned assets when enabled).
-    func getStats(scope: AuthManager.SyncScope, includeUnassigned: Bool) -> SyncStats {
+    func getStats(
+        scope: AuthManager.SyncScope,
+        includeUnassigned: Bool,
+        photosOnly: Bool = false
+    ) -> SyncStats {
+        if photosOnly {
+            let imageLocalIds = currentImageLocalIdentifiers()
+            let stats = getStats(
+                localIdentifiers: imageLocalIds,
+                scope: scope,
+                includeUnassigned: includeUnassigned
+            )
+            AppLog.debug(
+                AppLog.sync,
+                "sync-stats photokit pending=\(stats.pending) uploading=\(stats.uploading) bgQueued=\(stats.bgQueued) failed=\(stats.failed) synced=\(stats.synced) lastSyncAt=\(stats.lastSyncAt) current_images=\(imageLocalIds.count) scope=\(scope.rawValue) includeUnassigned=\(includeUnassigned)"
+            )
+            return stats
+        }
+
         guard scope == .selectedAlbums else { return getStats() }
 
         let selectedSubquery = """
@@ -573,7 +605,7 @@ extension SyncRepository {
 
         AppLog.debug(
             AppLog.sync,
-            "sync-stats scoped pending=\(pending) uploading=\(uploading) bgQueued=\(bgQueued) failed=\(failed) synced=\(synced) lastSyncAt=\(last) includeUnassigned=\(includeUnassigned)"
+            "sync-stats scoped pending=\(pending) uploading=\(uploading) bgQueued=\(bgQueued) failed=\(failed) synced=\(synced) lastSyncAt=\(last) includeUnassigned=\(includeUnassigned) photosOnly=0"
         )
         return SyncStats(
             pending: pending,
@@ -585,7 +617,17 @@ extension SyncRepository {
         )
     }
 
-    func getStats() -> SyncStats {
+    func getStats(photosOnly: Bool = false) -> SyncStats {
+        if photosOnly {
+            let imageLocalIds = currentImageLocalIdentifiers()
+            let stats = getStats(localIdentifiers: imageLocalIds, scope: .all, includeUnassigned: false)
+            AppLog.debug(
+                AppLog.sync,
+                "sync-stats photokit pending=\(stats.pending) uploading=\(stats.uploading) bgQueued=\(stats.bgQueued) failed=\(stats.failed) synced=\(stats.synced) lastSyncAt=\(stats.lastSyncAt) current_images=\(imageLocalIds.count) scope=all includeUnassigned=0"
+            )
+            return stats
+        }
+
         // Aggregate by asset (local_identifier) with precedence:
         // uploading > bgQueued > failed > synced (any part) > pending (no parts synced)
         let sql = """
@@ -618,12 +660,136 @@ extension SyncRepository {
         if let first = vals.first {
             uploading = first.0; bgQueued = first.1; failed = first.2; synced = first.3; pending = first.4
         }
-        let last: Int64 = db.executeSelect("SELECT IFNULL(MAX(sync_at),0) FROM photos") { stmt in sqlite3_column_int64(stmt, 0) }.first ?? 0
+        let lastSql = """
+        SELECT IFNULL(MAX(sync_at),0)
+        FROM photos
+        WHERE local_identifier IS NOT NULL AND local_identifier <> ''
+        """
+        let last: Int64 = db.executeSelect(lastSql) { stmt in sqlite3_column_int64(stmt, 0) }.first ?? 0
         AppLog.debug(
             AppLog.sync,
-            "sync-stats pending=\(pending) uploading=\(uploading) bgQueued=\(bgQueued) failed=\(failed) synced=\(synced) lastSyncAt=\(last)"
+            "sync-stats pending=\(pending) uploading=\(uploading) bgQueued=\(bgQueued) failed=\(failed) synced=\(synced) lastSyncAt=\(last) photosOnly=0"
         )
         return SyncStats(pending: pending, uploading: uploading, bgQueued: bgQueued, failed: failed, synced: synced, lastSyncAt: last)
+    }
+
+    private func currentImageLocalIdentifiers() -> Set<String> {
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        guard status == .authorized || status == .limited else { return [] }
+
+        let options = PHFetchOptions()
+        options.fetchLimit = 0
+        let fetchResult = PHAsset.fetchAssets(with: .image, options: options)
+        var localIds = Set<String>()
+        localIds.reserveCapacity(fetchResult.count)
+        fetchResult.enumerateObjects { asset, _, _ in
+            localIds.insert(asset.localIdentifier)
+        }
+        return localIds
+    }
+
+    private func getStats(
+        localIdentifiers: Set<String>,
+        scope: AuthManager.SyncScope,
+        includeUnassigned: Bool
+    ) -> SyncStats {
+        guard !localIdentifiers.isEmpty else {
+            return SyncStats(pending: 0, uploading: 0, bgQueued: 0, failed: 0, synced: 0, lastSyncAt: 0)
+        }
+
+        let selectedSubquery = """
+            SELECT DISTINCT ap.asset_id
+            FROM album_photos ap
+            WHERE EXISTS (
+                SELECT 1 FROM album_closure ac
+                JOIN albums a ON a.id = ac.ancestor_id
+                WHERE ac.descendant_id = ap.album_id AND a.sync_enabled = 1
+            )
+        """
+        let unassignedClause = " OR (? = 1 AND local_identifier NOT IN (SELECT DISTINCT asset_id FROM album_photos))"
+        let scopedClause = scope == .selectedAlbums
+            ? """
+              AND (
+                local_identifier IN (\(selectedSubquery))
+                \(unassignedClause)
+              )
+              """
+            : ""
+
+        var uploading = 0
+        var bgQueued = 0
+        var failed = 0
+        var synced = 0
+        var pending = 0
+        var lastSyncAt: Int64 = 0
+        let ids = Array(localIdentifiers)
+        let chunkSize = 500
+        var index = 0
+
+        while index < ids.count {
+            let end = min(index + chunkSize, ids.count)
+            let chunk = Array(ids[index..<end])
+            index = end
+
+            let placeholders = Array(repeating: "?", count: chunk.count).joined(separator: ",")
+            let sql = """
+            SELECT
+              SUM(CASE WHEN has1=1 THEN 1 ELSE 0 END) AS uploading,
+              SUM(CASE WHEN has1=0 AND has4=1 THEN 1 ELSE 0 END) AS bg,
+              SUM(CASE WHEN has1=0 AND has4=0 AND has3=1 THEN 1 ELSE 0 END) AS failed,
+              SUM(CASE WHEN has1=0 AND has4=0 AND has3=0 AND has2=1 THEN 1 ELSE 0 END) AS synced,
+              SUM(CASE WHEN has1=0 AND has4=0 AND has3=0 AND has2=0 THEN 1 ELSE 0 END) AS pending,
+              IFNULL(MAX(latest_sync_at), 0) AS last_sync_at
+            FROM (
+              SELECT local_identifier,
+                MAX(CASE WHEN sync_state=1 THEN 1 ELSE 0 END) AS has1,
+                MAX(CASE WHEN sync_state=4 THEN 1 ELSE 0 END) AS has4,
+                MAX(CASE WHEN sync_state=3 THEN 1 ELSE 0 END) AS has3,
+                MAX(CASE WHEN sync_state=2 THEN 1 ELSE 0 END) AS has2,
+                MAX(COALESCE(sync_at, 0)) AS latest_sync_at
+              FROM photos
+              WHERE local_identifier IN (\(placeholders))
+                \(scopedClause)
+              GROUP BY local_identifier
+            ) t
+            """
+
+            var parameters: [Any] = chunk
+            if scope == .selectedAlbums {
+                parameters.append(includeUnassigned)
+            }
+
+            let vals: [(Int, Int, Int, Int, Int, Int64)] = db.executeSelect(
+                sql,
+                parameters: parameters
+            ) { stmt in
+                (
+                    Int(sqlite3_column_int(stmt, 0)),
+                    Int(sqlite3_column_int(stmt, 1)),
+                    Int(sqlite3_column_int(stmt, 2)),
+                    Int(sqlite3_column_int(stmt, 3)),
+                    Int(sqlite3_column_int(stmt, 4)),
+                    sqlite3_column_int64(stmt, 5)
+                )
+            }
+
+            guard let first = vals.first else { continue }
+            uploading += first.0
+            bgQueued += first.1
+            failed += first.2
+            synced += first.3
+            pending += first.4
+            lastSyncAt = max(lastSyncAt, first.5)
+        }
+
+        return SyncStats(
+            pending: pending,
+            uploading: uploading,
+            bgQueued: bgQueued,
+            failed: failed,
+            synced: synced,
+            lastSyncAt: lastSyncAt
+        )
     }
 
     // Reset any lingering 'uploading' rows to 'pending' (e.g., after app restart)

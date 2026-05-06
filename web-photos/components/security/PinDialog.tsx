@@ -5,6 +5,7 @@ import { Lock as LockIcon } from "lucide-react";
 import { PinInput } from "@/components/security/PinInput";
 import { useE2EEStore } from "@/lib/stores/e2ee";
 import { cryptoApi } from "@/lib/api/crypto";
+import { useI18n } from "@/lib/i18n/I18nProvider";
 
 type Mode = "verify" | "set";
 
@@ -29,6 +30,7 @@ export function PinDialog({
   const [error, setError] = useState<string>("");
   const [busy, setBusy] = useState<boolean>(false);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const { translateSource: tx } = useI18n();
 
   // Auto-focus hidden input when dialog opens
   useEffect(() => {
@@ -57,20 +59,20 @@ export function PinDialog({
   }, [open, busy, onClose]);
 
   const effectiveTitle = useMemo(() => {
-    if (title) return title;
-    if (mode === "set") return phase === "confirm" ? "Confirm your PIN" : "Set an 8‑character PIN";
-    return "Enter your PIN";
-  }, [mode, phase, title]);
+    if (title) return tx(title);
+    if (mode === "set") return phase === "confirm" ? tx("Confirm your PIN") : tx("Set an 8-character PIN");
+    return tx("Enter your PIN");
+  }, [mode, phase, title, tx]);
 
   const effectiveDescription = useMemo(() => {
-    if (description) return description;
+    if (description) return tx(description);
     if (mode === "set") {
       return phase === "confirm"
-        ? "Re‑enter the PIN to confirm"
-        : "This protects locked items. Use 8 characters.";
+        ? tx("Re-enter the PIN to confirm")
+        : tx("This protects locked items. Use 8 characters.");
     }
-    return "To view locked items, enter your 8‑character PIN.";
-  }, [mode, phase, description]);
+    return tx("To view locked items, enter your 8-character PIN.");
+  }, [mode, phase, description, tx]);
 
   const submit = async (pin: string) => {
     setBusy(true);
@@ -83,13 +85,13 @@ export function PinDialog({
           try { await st.loadEnvelope(); } catch {}
         }
         if (!useE2EEStore.getState().envelope) {
-          throw new Error('No PIN is set on this account');
+          throw new Error(tx('No PIN is set on this account'));
         }
         // Unwrap UMK using worker
         // @ts-ignore
         const worker = new Worker(new URL('../../workers/e2ee.worker.ts', import.meta.url), { type: 'module' });
         const umkB64: string = await new Promise((resolve, reject) => {
-          worker.onmessage = (ev: MessageEvent) => { const d:any = ev.data; if (d?.ok && d.kind === 'umk') { try{worker.terminate();}catch{}; resolve(d.umkB64); } else if (d?.ok===false) { try{worker.terminate();}catch{}; reject(new Error(d.error||'Unlock failed')); } };
+          worker.onmessage = (ev: MessageEvent) => { const d:any = ev.data; if (d?.ok && d.kind === 'umk') { try{worker.terminate();}catch{}; resolve(d.umkB64); } else if (d?.ok===false) { try{worker.terminate();}catch{}; reject(new Error(d.error||tx('Unlock failed'))); } };
           worker.onerror = (er) => { try{worker.terminate();}catch{}; reject(er.error||new Error(String(er.message||er))); };
           worker.postMessage({ type: 'unwrap-umk', password: pin, envelope: useE2EEStore.getState().envelope });
         });
@@ -103,7 +105,7 @@ export function PinDialog({
         // @ts-ignore
         const worker = new Worker(new URL('../../workers/e2ee.worker.ts', import.meta.url), { type: 'module' });
         const env: any = await new Promise((resolve, reject) => {
-          worker.onmessage = (ev: MessageEvent) => { const d:any = ev.data; if (d?.ok && d.kind === 'envelope') { try{worker.terminate();}catch{}; resolve(d.envelope); } else if (d?.ok===false) { try{worker.terminate();}catch{}; reject(new Error(d.error||'Wrap failed')); } };
+          worker.onmessage = (ev: MessageEvent) => { const d:any = ev.data; if (d?.ok && d.kind === 'envelope') { try{worker.terminate();}catch{}; resolve(d.envelope); } else if (d?.ok===false) { try{worker.terminate();}catch{}; reject(new Error(d.error||tx('Wrap failed'))); } };
           worker.onerror = (er) => { try{worker.terminate();}catch{}; reject(er.error||new Error(String(er.message||er))); };
           const params = useE2EEStore.getState().params || { m: 128, t: 3, p: 1 };
           worker.postMessage({ type: 'wrap-umk', umkHex, password: pin, params });
@@ -121,9 +123,9 @@ export function PinDialog({
     } catch (e: any) {
       const msg = (e?.message || "").toString();
       if (mode === "verify") {
-        setError(msg || "Incorrect PIN code");
+        setError(msg || tx("Incorrect PIN code"));
       } else {
-        setError(msg || "Invalid PIN. Try again.");
+        setError(msg || tx("Invalid PIN. Try again."));
       }
       setCode("");
       setPhase(mode === "set" && first ? "confirm" : "enter");
@@ -150,7 +152,7 @@ export function PinDialog({
           setTimeout(() => inputRef.current?.focus(), 10);
         } else {
           if (s !== first) {
-            setError("PINs do not match");
+            setError(tx("PINs do not match"));
             setCode("");
             setTimeout(() => inputRef.current?.focus(), 10);
           } else {
@@ -179,7 +181,7 @@ export function PinDialog({
 
             {/* 8 boxes input */}
             <div className="mb-3">
-              <PinInput value={code} onChange={onInput} length={8} autoFocus ariaLabel="PIN" />
+              <PinInput value={code} onChange={onInput} length={8} autoFocus ariaLabel={tx("PIN")} />
             </div>
 
             {error && (
@@ -193,7 +195,7 @@ export function PinDialog({
                 onClick={() => !busy && onClose()}
                 disabled={busy}
               >
-                Cancel
+                {tx("Cancel")}
               </button>
               <button
                 type="button"
@@ -201,7 +203,7 @@ export function PinDialog({
                 onClick={() => submit(code)}
                 disabled={busy || (mode === "set" ? (phase === "enter" ? code.length !== 8 : code.length !== 8) : code.length !== 8)}
               >
-                {mode === "verify" ? (busy ? "Verifying..." : "Verify") : phase === "enter" ? (busy ? "Setting..." : "Next") : (busy ? "Setting..." : "Set PIN")}
+                {mode === "verify" ? (busy ? tx("Verifying...") : tx("Verify")) : phase === "enter" ? (busy ? tx("Setting...") : tx("Next")) : (busy ? tx("Setting...") : tx("Set PIN"))}
               </button>
             </div>
           </div>

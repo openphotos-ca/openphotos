@@ -35,6 +35,7 @@ import { useQueryState } from '@/hooks/useQueryState';
 import UpdateFaceOverlay from '@/components/faces/UpdateFaceOverlay';
 import { logger } from '@/lib/logger';
 import { useToast } from '@/hooks/use-toast';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 const PHOTOS_PER_PAGE_GRID = 100;
 const PHOTOS_PER_PAGE_TIMELINE = 500;
@@ -191,6 +192,7 @@ async function waitUntilAssetUnlocked(
 export default function HomePage() {
   const router = useRouter();
   const { toast } = useToast();
+  const { translateSource: tx } = useI18n();
   const { isAuthenticated, token, hasHydrated, setHydrated } = useAuthStore();
   const queryClient = useQueryClient();
   const qs = useQueryState();
@@ -2599,7 +2601,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
           {/* Centered title */}
           <div className="absolute top-2 left-0 right-0 z-10 pointer-events-none">
             <h2 className="text-center text-xl md:text-2xl font-semibold tracking-wide text-foreground">
-              Similar Photos/Videos
+              {tx("Similar Photos/Videos")}
             </h2>
           </div>
           <div className="absolute inset-0 pt-14 md:pt-16 overflow-y-auto">
@@ -2636,7 +2638,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
         pinResolverRef.current?.(true);
         pinResolverRef.current = null;
       }}
-      description={pinMode === 'verify' ? 'Enter your 8‑character PIN to access locked items.' : undefined}
+      description={pinMode === 'verify' ? tx('Enter your 8-character PIN to access locked items.') : undefined}
     />
     </div>
   );

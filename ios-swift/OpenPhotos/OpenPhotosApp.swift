@@ -5,8 +5,10 @@ import Photos
 struct OpenPhotosApp: App {
     @Environment(\.scenePhase) private var scenePhase
     @UIApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
+    @StateObject private var localeController = LocaleController.shared
 
     init() {
+        LocaleController.shared.apply()
         do {
             let cachesDir = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
             if let cachesDir {
@@ -26,6 +28,7 @@ struct OpenPhotosApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView()
+                .id(localeController.localeIdentifier)
                 .onAppear {
 #if DEBUG
                     // Optional debug-only validation for disk cache correctness across app relaunches.
@@ -66,21 +69,34 @@ struct OpenPhotosApp: App {
                 .environmentObject(AuthManager.shared)
                 .environmentObject(HybridUploadManager.shared)
                 .environmentObject(E2EEUnlockController.shared)
+                .environmentObject(localeController)
+                .environment(\.locale, localeController.swiftUILocale)
         }
         .onChange(of: scenePhase) { phase in
             switch phase {
             case .background:
-                print("[UPLOAD] scenePhase=background → switch to background uploads")
-                HybridUploadManager.shared.switchToBackgroundUploads()
+                let shouldSwitchToBackgroundUploads = SyncService.shared.handleSceneDidEnterBackground()
+                if shouldSwitchToBackgroundUploads {
+                    print("[UPLOAD] scenePhase=background → switch to background uploads")
+                    HybridUploadManager.shared.switchToBackgroundUploads()
+                } else {
+                    print("[UPLOAD] scenePhase=background → keep foreground sync alive via BGContinuedProcessingTask")
+                }
                 // Clear PIN session cache on background
                 PinManager.shared.clearSession()
             case .inactive:
                 // No-op; handled by willResignActive as well
                 break
             case .active:
+                SyncService.shared.noteSceneDidBecomeActive()
                 // On resume, repair any stale 'uploading' state
                 SyncRepository.shared.recoverStuckUploading()
                 HybridUploadManager.shared.handleSceneDidBecomeActive()
+                let automaticResumeSuppressed = SyncService.shared.isAutomaticResumeSuppressed()
+                if automaticResumeSuppressed {
+                    print("[SYNC] scene-active automatic sync resume suppressed reason=user-stop")
+                    break
+                }
                 // Auto-retry background-queued items older than N minutes
                 let mins = max(1, AuthManager.shared.autoRetryBgMinutes)
                 let requeuedBg = SyncRepository.shared.retryBackgroundQueued(olderThan: Int64(mins * 60))
@@ -95,15 +111,19 @@ struct OpenPhotosApp: App {
                     }
                     ToastManager.shared.show("Requeued \(requeuedTotal) stalled \(itemsWord)")
                     // Kick a normal sync pass (respects current network policy)
-                    SyncService.shared.syncNow(forceRetryFailed: false)
+                    SyncService.shared.syncNow(forceRetryFailed: false, userInitiated: true)
+                } else if SyncService.shared.resumeSyncIfNeededOnForeground() {
+                    // An earlier foreground run was interrupted while backgrounded.
+                    // Resume it even if repo counters are currently zero.
                 } else {
                     let stats = SyncRepository.shared.getStats(
                         scope: AuthManager.shared.syncScope,
-                        includeUnassigned: AuthManager.shared.syncIncludeUnassigned
+                        includeUnassigned: AuthManager.shared.syncIncludeUnassigned,
+                        photosOnly: AuthManager.shared.syncPhotosOnly
                     )
-                    if stats.pending > 0 || stats.uploading > 0 || stats.bgQueued > 0 {
+                    if stats.pending > 0 || stats.uploading > 0 {
                         // Resume interrupted runs promptly after app returns to foreground.
-                        SyncService.shared.syncNow(forceRetryFailed: false)
+                        SyncService.shared.syncNow(forceRetryFailed: false, userInitiated: true)
                     }
                 }
             @unknown default:

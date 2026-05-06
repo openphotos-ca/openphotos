@@ -380,7 +380,7 @@ struct ServerGalleryView: View {
                 VStack(spacing: 16) {
                     Image(systemName: "rectangle.and.pencil.and.ellipsis").font(.system(size: 64)).foregroundColor(.blue)
                     Text("Log in to view your Photos").font(.headline)
-                    Button("Log In") { showLogin = true }.buttonStyle(.borderedProminent)
+                    Button(L10n.tr("Log In")) { showLogin = true }.buttonStyle(.borderedProminent)
                 }
                 Spacer()
             } else {
@@ -657,24 +657,24 @@ struct ServerGalleryView: View {
     // MARK: - Subviews and Sheets
     private var selectionBar: some View {
         return HStack {
-            Button("Select All") { viewModel.selectAll() }
-            Button("Deselect All") { viewModel.deselectAll() }
+            Button(L10n.tr("Select All")) { viewModel.selectAll() }
+            Button(L10n.tr("Deselect All")) { viewModel.deselectAll() }
             Spacer()
             if !viewModel.selected.isEmpty {
-                Button("Actions") { showingActions = true }
+                Button(L10n.tr("Actions")) { showingActions = true }
             }
         }
         .padding()
         .background(.ultraThinMaterial)
-        .confirmationDialog("Actions", isPresented: $showingActions) {
+        .confirmationDialog(L10n.tr("Actions"), isPresented: $showingActions) {
             if viewModel.selectedMediaType == .trash {
-                Button("Restore") { Task { await bulkRestore() } }
-                Button("Delete Permanently...", role: .destructive) {
+                Button(L10n.tr("Restore")) { Task { await bulkRestore() } }
+                Button(L10n.tr("Delete Permanently..."), role: .destructive) {
                     showSelectedPurgeConfirm = true
                 }
             } else {
-                Button("Add to Album…") { albumPickerRemoveMode = false; showAlbumPicker = true }
-                Button("Share") {
+                Button(L10n.tr("Add to Album…")) { albumPickerRemoveMode = false; showAlbumPicker = true }
+                Button(L10n.tr("Share")) {
                     // Dismiss the action dialog first
                     showingActions = false
 
@@ -753,12 +753,12 @@ struct ServerGalleryView: View {
                         }
                     }
                 }
-                Button("Lock") { Task { await bulkLock() } }
-                Button("Add to Favorites") { Task { await bulkFavorite(true) } }
-                Button("Delete", role: .destructive) { Task { await bulkDelete() } }
-                Button("Clear Rating") { Task { await bulkRating(nil) } }
+                Button(L10n.tr("Lock")) { Task { await bulkLock() } }
+                Button(L10n.tr("Add to Favorites")) { Task { await bulkFavorite(true) } }
+                Button(L10n.tr("Delete"), role: .destructive) { Task { await bulkDelete() } }
+                Button(L10n.tr("Clear Rating")) { Task { await bulkRating(nil) } }
             }
-            Button("Cancel", role: .cancel) {}
+            Button(L10n.tr("Cancel"), role: .cancel) {}
         }
     }
 
@@ -816,7 +816,7 @@ struct ServerGalleryView: View {
 
     private func mediaTypeTab(title: String, count: Int, isSelected: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
-            Text("\(title) \(count)")
+            Text("\(L10n.tr(title)) \(count)")
                 .font(.caption2)
                 .fontWeight(isSelected ? .semibold : .regular)
                 .foregroundColor(isSelected ? .blue : .secondary)
@@ -838,7 +838,7 @@ struct ServerGalleryView: View {
     ) -> some View {
         HStack(spacing: 4) {
             Button(action: onSelect) {
-                Text("Trash \(count)")
+                Text("\(L10n.tr("Trash")) \(count)")
                     .font(.caption2)
                     .fontWeight(isSelected ? .semibold : .regular)
                     .foregroundColor(isSelected ? .blue : .secondary)
@@ -858,7 +858,7 @@ struct ServerGalleryView: View {
                 }
                 .buttonStyle(PlainButtonStyle())
                 .disabled(count <= 0)
-                .accessibilityLabel("Empty Trash")
+                .accessibilityLabel(L10n.tr("Empty Trash"))
             }
         }
         .padding(.horizontal, 10)
@@ -976,6 +976,7 @@ struct ServerGalleryView: View {
                     locked: locked,
                     locked_photos: lockedPhotos,
                     locked_videos: lockedVideos,
+                    total_size_bytes: counts.total_size_bytes,
                     trash: trash
                 )
             }
@@ -1033,6 +1034,7 @@ struct ServerGalleryView: View {
                     locked: locked,
                     locked_photos: lockedPhotos,
                     locked_videos: lockedVideos,
+                    total_size_bytes: counts.total_size_bytes,
                     trash: trash
                 )
             }
@@ -1063,6 +1065,7 @@ struct ServerGalleryView: View {
                         locked: counts.locked,
                         locked_photos: counts.locked_photos,
                         locked_videos: counts.locked_videos,
+                        total_size_bytes: counts.total_size_bytes,
                         trash: max(0, (counts.trash ?? 0) - purgedCount)
                     )
                 }
@@ -1091,6 +1094,7 @@ struct ServerGalleryView: View {
                         locked: counts.locked,
                         locked_photos: counts.locked_photos,
                         locked_videos: counts.locked_videos,
+                        total_size_bytes: counts.total_size_bytes,
                         trash: 0
                     )
                 }
@@ -1315,59 +1319,63 @@ private struct ServerAppBar: View {
         HStack(spacing: 16) {
             Button(action: onSearch) { Image(systemName: "magnifyingglass").font(.title3).foregroundColor(.primary) }
             Menu {
-                Button("Newest First") { onSort(.createdNewest) }
-                Button("Oldest First") { onSort(.createdOldest) }
-                Button("Imported Newest") { onSort(.importedNewest) }
-                Button("Imported Oldest") { onSort(.importedOldest) }
-                Button("Largest First") { onSort(.largest) }
-                Button("Random") { onSort(.random(seed: Int.random(in: 0...1_000_000))) }
+                Button(L10n.tr("Newest First")) { onSort(.createdNewest) }
+                Button(L10n.tr("Oldest First")) { onSort(.createdOldest) }
+                Button(L10n.tr("Imported Newest")) { onSort(.importedNewest) }
+                Button(L10n.tr("Imported Oldest")) { onSort(.importedOldest) }
+                Button(L10n.tr("Largest First")) { onSort(.largest) }
+                Button(L10n.tr("Random")) { onSort(.random(seed: Int.random(in: 0...1_000_000))) }
             } label: { Image(systemName: "arrow.up.arrow.down").font(.title3).foregroundColor(.primary) }
             if showLayoutToggle {
-                Picker("Layout", selection: Binding(get: { currentLayout }, set: { onLayoutChange($0) })) {
+                Picker(L10n.tr("Layout"), selection: Binding(get: { currentLayout }, set: { onLayoutChange($0) })) {
                     // Icon-only segments; the highlighted segment conveys selection.
                     Image(systemName: currentLayout == .grid ? "square.grid.2x2.fill" : "square.grid.2x2")
-                        .accessibilityLabel("Grid")
+                        .accessibilityLabel(L10n.tr("Grid"))
                         .tag(ServerGalleryViewModel.LayoutOption.grid)
                     Image(systemName: currentLayout == .timeline ? "calendar.circle.fill" : "calendar")
-                        .accessibilityLabel("Timeline")
+                        .accessibilityLabel(L10n.tr("Timeline"))
                         .tag(ServerGalleryViewModel.LayoutOption.timeline)
                 }
                 .pickerStyle(.segmented)
                 .frame(width: 140)
             }
             Spacer()
-            Button(action: onSelect) {
-                Text(isSelectionMode ? "Cancel" : "Select").font(.headline).foregroundColor(isSelectionMode ? .red : .blue)
-            }
             Menu {
+                Button(action: onSelect) {
+                    Label(
+                        L10n.tr(isSelectionMode ? "Cancel" : "Select"),
+                        systemImage: isSelectionMode ? "xmark.circle" : "checkmark.circle"
+                    )
+                }
+                Divider()
                 Button(action: onSlideshow) {
-                    Label("Slideshow", systemImage: "play.rectangle")
+                    Label(L10n.tr("Slideshow"), systemImage: "play.rectangle")
                 }
                 Divider()
                 if isEnterpriseEdition && isAuthenticated {
                     Button(action: onShowSharing) {
-                        Label("Sharing", systemImage: "square.and.arrow.up")
+                        Label(L10n.tr("Sharing"), systemImage: "square.and.arrow.up")
                     }
                 }
                 // Users & Groups (Enterprise Edition only, server enforces role permissions)
                 if isEnterpriseEdition && isAuthenticated {
                     Button(action: onTeamManagement) {
-                        Label("Users & Groups", systemImage: "person.2")
+                        Label(L10n.tr("Users & Groups"), systemImage: "person.2")
                     }
                 }
                 Button(action: onManageFaces) {
-                    Label("Manage Faces", systemImage: "face.smiling")
+                    Label(L10n.tr("Manage Faces"), systemImage: "face.smiling")
                 }
                 Button {
                     onShowSimilarMedia()
                 } label: {
-                    Label("Similar Media", systemImage: "photo.on.rectangle.angled")
+                    Label(L10n.tr("Similar Media"), systemImage: "photo.on.rectangle.angled")
                 }
                 Divider()
                 Button(role: .destructive) {
                     onSignOut()
                 } label: {
-                    Label("Sign out", systemImage: "rectangle.portrait.and.arrow.right")
+                    Label(L10n.tr("Sign out"), systemImage: "rectangle.portrait.and.arrow.right")
                 }
             } label: {
                 Image(systemName: "line.3.horizontal")

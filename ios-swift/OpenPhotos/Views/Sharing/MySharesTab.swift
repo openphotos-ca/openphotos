@@ -15,7 +15,7 @@ struct MySharesTab: View {
     var body: some View {
         Group {
             if viewModel.isLoadingOutgoing && viewModel.outgoingShares.isEmpty {
-                ProgressView("Loading shares...")
+                ProgressView(L10n.tr("Loading shares..."))
             } else if let error = viewModel.outgoingError {
                 ErrorView(message: error) {
                     Task {
@@ -28,7 +28,7 @@ struct MySharesTab: View {
                     title: "No Shares",
                     message: "Create a share to get started"
                 ) {
-                    Button("Create Share") {
+                    Button(L10n.tr("Create Share")) {
                         showCreateShare = true
                     }
                     .buttonStyle(.borderedProminent)

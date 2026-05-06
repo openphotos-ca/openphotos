@@ -7,6 +7,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { useQueryState } from '@/hooks/useQueryState';
 import { photosApi } from '@/lib/api/photos';
 import { useToast } from '@/hooks/use-toast';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 interface AlbumPickerDialogProps {
   open: boolean;
@@ -32,6 +33,7 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const queryClient = useQueryClient();
   const { toast } = useToast();
+  const { translateSource: tx } = useI18n();
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
 
   const createMutation = useMutation({
@@ -47,14 +49,14 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
       return album as Album;
     },
     onSuccess: (album) => {
-      toast({ title: `Created album`, description: album.name, variant: 'success' });
+      toast({ title: tx('Created album'), description: album.name, variant: 'success' });
       setCreatingName('');
       setShowCreate(false);
       setSelectedId(album.id);
       try { queryClient.invalidateQueries({ queryKey: ['albums'] }); } catch {}
     },
     onError: (e: any) => {
-      toast({ title: 'Failed to create album', description: e?.message || String(e), variant: 'destructive' });
+      toast({ title: tx('Failed to create album'), description: e?.message || String(e), variant: 'destructive' });
     },
   });
 
@@ -107,13 +109,13 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
       return id;
     },
     onSuccess: (id) => {
-      toast({ title: 'Album deleted' });
+      toast({ title: tx('Album deleted') });
       if (selectedId === id) setSelectedId(undefined);
       try { queryClient.invalidateQueries({ queryKey: ['albums'] }); } catch {}
       setDeletingId(null);
     },
     onError: (e: any) => {
-      toast({ title: 'Failed to delete album', description: e?.message || String(e), variant: 'destructive' });
+      toast({ title: tx('Failed to delete album'), description: e?.message || String(e), variant: 'destructive' });
     },
   });
 
@@ -199,7 +201,7 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
       className="fixed inset-0 z-[70] flex items-center justify-center"
       role="dialog"
       aria-modal="true"
-      aria-label="Choose an album"
+      aria-label={tx('Choose an album')}
       onKeyDown={(e) => {
         if (e.key === 'Escape') { e.stopPropagation(); onClose(); }
         if (e.key === 'Tab') {
@@ -218,9 +220,9 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
         <div className="flex items-center justify-between px-4 py-3 border-b bg-background">
           <div className="flex items-center gap-2 text-sm font-medium text-foreground">
             <TreePine className="w-4 h-4" />
-            Choose an album
+            {tx('Choose an album')}
           </div>
-          <button className="w-6 h-6 rounded-full grid place-items-center bg-foreground text-background hover:opacity-90" onClick={onClose} aria-label="Close">
+          <button className="w-6 h-6 rounded-full grid place-items-center bg-foreground text-background hover:opacity-90" onClick={onClose} aria-label={tx('Close')}>
             <X className="w-4 h-4" />
           </button>
         </div>
@@ -233,7 +235,7 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
                 checked={qsState.albumSubtree === '1'}
                 onChange={(e) => setAlbumSubtree(e.target.checked)}
               />
-              Include sub‑albums
+              {tx('Include sub-albums')}
             </label>
           </div>
         ) : null}
@@ -248,15 +250,15 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
                 value={creatingName}
                 onChange={e => setCreatingName(e.target.value)}
                 onKeyDown={e => { if (e.key === 'Enter' && creatingName.trim()) { createMutation.mutate({ parent_id: creatingParentId, name: creatingName }); } if (e.key === 'Escape') { setShowCreate(false); setCreatingName(''); } }}
-                placeholder={creatingParentId ? 'New sub‑album name' : 'New album name'}
+                placeholder={creatingParentId ? tx('New sub-album name') : tx('New album name')}
                 className={`flex-1 px-2 py-1 rounded border-2 border-input bg-background text-foreground text-sm focus:border-primary focus:outline-none`}
               />
               <button
                 className={`px-2.5 py-1 rounded text-sm ${(!creatingName.trim()) ? 'bg-gray-300 text-gray-600 cursor-not-allowed' : 'bg-primary text-primary-foreground hover:bg-primary/90'}`}
                 disabled={!creatingName.trim() || createMutation.isPending}
                 onClick={() => createMutation.mutate({ parent_id: creatingParentId, name: creatingName })}
-              >Create</button>
-              <button className="px-2.5 py-1 rounded text-sm border border-border hover:bg-muted" onClick={() => { setShowCreate(false); setCreatingName(''); }}>Cancel</button>
+              >{tx('Create')}</button>
+              <button className="px-2.5 py-1 rounded text-sm border border-border hover:bg-muted" onClick={() => { setShowCreate(false); setCreatingName(''); }}>{tx('Cancel')}</button>
             </div>
           </div>
         ) : null}
@@ -281,22 +283,22 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
         {deletingId ? (
           <div className="px-4 py-2 border-t bg-background text-sm text-foreground">
             <div className="flex items-center justify-between gap-2">
-              <span>Delete this album? Sub‑albums are also removed. Photos are not deleted.</span>
+              <span>{tx('Delete this album? Sub-albums are also removed. Photos are not deleted.')}</span>
               <div className="flex items-center gap-2">
-                <button className="px-2 py-1 rounded border border-border hover:bg-muted" onClick={() => setDeletingId(null)}>Cancel</button>
-                <button className="px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700" onClick={() => { if (deletingId) deleteMutation.mutate(deletingId); }}>Delete</button>
+                <button className="px-2 py-1 rounded border border-border hover:bg-muted" onClick={() => setDeletingId(null)}>{tx('Cancel')}</button>
+                <button className="px-2 py-1 rounded bg-red-600 text-white hover:bg-red-700" onClick={() => { if (deletingId) deleteMutation.mutate(deletingId); }}>{tx('Delete')}</button>
               </div>
             </div>
           </div>
         ) : null}
         <div className="flex items-center justify-end gap-2 px-4 py-3 border-t bg-background">
-          <button className="px-3 py-1.5 rounded border border-border text-foreground hover:bg-muted" onClick={onClose}>Cancel</button>
+          <button className="px-3 py-1.5 rounded border border-border text-foreground hover:bg-muted" onClick={onClose}>{tx('Cancel')}</button>
           <button
             className={`px-3 py-1.5 rounded ${(selectedId === undefined || (selectedId === ROOT_NODE_ID && !allowSelectRoot)) ? 'bg-gray-300 text-gray-600 cursor-not-allowed' : 'bg-primary text-primary-foreground hover:bg-primary/90'}`}
             onClick={handleConfirm}
             disabled={selectedId === undefined || (selectedId === ROOT_NODE_ID && !allowSelectRoot)}
           >
-            <Check className="w-4 h-4 inline mr-1" /> OK
+            <Check className="w-4 h-4 inline mr-1" /> {tx('OK')}
           </button>
         </div>
       </div>
@@ -306,6 +308,7 @@ export function AlbumPickerDialog({ open, albums, onClose, onConfirm, initialSel
 
 function TreeItem({ node, depth = 0, selectedId, onSelect, expanded, setExpanded, onAdd, onDelete, setFirstLast }: { node: TreeNode; depth?: number; selectedId?: number; onSelect: (id: number) => void; expanded: Set<number>; setExpanded: (s: Set<number>) => void; onAdd: (parentId: number) => void; onDelete: (id: number) => void; setFirstLast?: (first?: HTMLButtonElement | null, last?: HTMLButtonElement | null) => void }) {
   const ref = React.useRef<HTMLButtonElement | null>(null);
+  const { translateSource: tx } = useI18n();
   React.useEffect(() => {
     if (depth === 0 && setFirstLast) {
       setFirstLast(ref.current, undefined);
@@ -327,7 +330,7 @@ function TreeItem({ node, depth = 0, selectedId, onSelect, expanded, setExpanded
         <button
           className="tree-toggle mr-1 text-gray-500 hover:text-gray-700 w-4 h-4 flex items-center justify-center"
           onClick={toggle}
-          aria-label={isExpanded ? 'Collapse' : 'Expand'}
+          aria-label={isExpanded ? tx('Collapse') : tx('Expand')}
           aria-expanded={isExpanded}
           style={{ visibility: hasChildren ? 'visible' : 'hidden' }}
         >
@@ -342,8 +345,8 @@ function TreeItem({ node, depth = 0, selectedId, onSelect, expanded, setExpanded
         >
           <span className="truncate flex items-center gap-2">
             {isRoot ? (
-              <span title="Root">
-                <Home className="w-4 h-4 text-amber-500" aria-label="Root (top level)" />
+              <span title={tx('Root')}>
+                <Home className="w-4 h-4 text-amber-500" aria-label={tx('Root (top level)')} />
               </span>
             ) : (
               <>
@@ -363,8 +366,8 @@ function TreeItem({ node, depth = 0, selectedId, onSelect, expanded, setExpanded
               <button
                 className={`w-6 h-6 grid place-items-center rounded hover:bg-muted ${(!isRoot && node.is_live) ? 'opacity-40 cursor-not-allowed' : ''}`}
                 onClick={(e) => { e.stopPropagation(); if (!node.is_live || isRoot) onAdd(node.id); }}
-                title={isRoot ? 'Create top-level album' : (node.is_live ? 'Cannot create under live album' : 'Create sub‑album')}
-                aria-label="Add sub-album"
+                title={isRoot ? tx('Create top-level album') : (node.is_live ? tx('Cannot create under live album') : tx('Create sub-album'))}
+                aria-label={tx('Add sub-album')}
                 disabled={!isRoot && node.is_live}
               >
                 <PlusCircle className="w-5 h-5 text-primary" />
@@ -374,8 +377,8 @@ function TreeItem({ node, depth = 0, selectedId, onSelect, expanded, setExpanded
                 <button
                   className="w-6 h-6 grid place-items-center rounded hover:bg-muted"
                   onClick={(e) => { e.stopPropagation(); onDelete(node.id); }}
-                  title="Delete album"
-                  aria-label="Delete album"
+                  title={tx('Delete album')}
+                  aria-label={tx('Delete album')}
                 >
                   <XCircle className="w-5 h-5 text-red-600" />
                 </button>

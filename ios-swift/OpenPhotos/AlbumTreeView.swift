@@ -45,7 +45,7 @@ struct AlbumTreeView: View {
                                 .foregroundColor(.blue)
                                 .frame(width: 24, height: 24)
                                 .padding(.leading, 12)
-                            Text("Root")
+                            Text(L10n.tr("Root"))
                                 .font(.system(size: 15))
                                 .foregroundColor(.primary)
                             Spacer()
@@ -88,7 +88,7 @@ struct AlbumTreeView: View {
                 
                 // Bottom buttons
                 HStack {
-                    Button("Cancel") {
+                    Button(L10n.tr("Cancel")) {
                         isPresented = false
                     }
                     .buttonStyle(BorderedButtonStyle())
@@ -101,14 +101,14 @@ struct AlbumTreeView: View {
                         }
                         isPresented = false
                     } label: {
-                        Label("OK", systemImage: "checkmark")
+                        Label(L10n.tr("OK"), systemImage: "checkmark")
                     }
                     .buttonStyle(BorderedProminentButtonStyle())
                     .disabled(selectedAlbumId == nil)
                 }
                 .padding()
             }
-            .navigationTitle("Choose an album")
+            .navigationTitle(L10n.tr("Choose an album"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
@@ -127,16 +127,16 @@ struct AlbumTreeView: View {
         // Add new album sheet
         .sheet(isPresented: $showAddSheet) {
             VStack(spacing: 12) {
-                Text("New Album")
+                Text(L10n.tr("New Album"))
                     .font(.headline)
-                TextField("Album name", text: $newAlbumName)
+                TextField(L10n.tr("Album name"), text: $newAlbumName)
                     .textFieldStyle(RoundedBorderTextFieldStyle())
                     .padding(.horizontal)
                 HStack {
-                    Button("Cancel") { showAddSheet = false }
+                    Button(L10n.tr("Cancel")) { showAddSheet = false }
                         .buttonStyle(BorderedButtonStyle())
                     Spacer()
-                    Button("Create") {
+                    Button(L10n.tr("Create")) {
                         createNewAlbum()
                     }
                     .buttonStyle(BorderedProminentButtonStyle())
@@ -148,7 +148,7 @@ struct AlbumTreeView: View {
         }
         // Delete confirmation
         .alert("Delete \(pendingDeleteName)?", isPresented: $showDeleteAlert) {
-            Button("Delete", role: .destructive) {
+            Button(L10n.tr("Delete"), role: .destructive) {
                 let id = pendingDeleteId
                 pendingDeleteId = nil
                 pendingDeleteName = ""
@@ -164,12 +164,12 @@ struct AlbumTreeView: View {
                     }
                 }
             }
-            Button("Cancel", role: .cancel) {
+            Button(L10n.tr("Cancel"), role: .cancel) {
                 pendingDeleteId = nil
                 pendingDeleteName = ""
             }
         } message: {
-            Text("This removes the album from OpenPhotos and deletes the iPhone system album too. Photos are not deleted.")
+            Text(L10n.tr("This removes the album from OpenPhotos and deletes the iPhone system album too. Photos are not deleted."))
         }
     }
     

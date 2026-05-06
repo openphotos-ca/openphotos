@@ -615,16 +615,18 @@ final class AuthManager: ObservableObject {
         return normalized
     }
 
-    private func canAttemptAutoLogin(now: Date = Date()) -> Bool {
-        if let lastAutoLoginAttemptAt, now.timeIntervalSince(lastAutoLoginAttemptAt) < autoLoginCooldownSeconds {
+    private func canAttemptAutoLogin(now: Date = Date(), ignoreCooldown: Bool = false) -> Bool {
+        if !ignoreCooldown,
+           let lastAutoLoginAttemptAt,
+           now.timeIntervalSince(lastAutoLoginAttemptAt) < autoLoginCooldownSeconds {
             return false
         }
         lastAutoLoginAttemptAt = now
         return true
     }
 
-    private func tryAutoLoginWithSavedCredentials() async -> Bool {
-        guard let creds = loadSavedCredentials(), canAttemptAutoLogin() else {
+    private func tryAutoLoginWithSavedCredentials(ignoreCooldown: Bool = false) async -> Bool {
+        guard let creds = loadSavedCredentials(), canAttemptAutoLogin(ignoreCooldown: ignoreCooldown) else {
             return false
         }
         do {
@@ -669,6 +671,13 @@ final class AuthManager: ObservableObject {
         await refreshAccessToken(force: true)
     }
 
+    func recoverSessionIfPossible(ignoreAutoLoginCooldown: Bool = false) async -> Bool {
+        if await forceRefresh() {
+            return true
+        }
+        return await tryAutoLoginWithSavedCredentials(ignoreCooldown: ignoreAutoLoginCooldown)
+    }
+
     private struct AuthSnapshot {
         let serverURL: String
         let accessToken: String?
@@ -682,6 +691,10 @@ final class AuthManager: ObservableObject {
         let refresh_token: String?
         let expires_in: Int64?
         let user: RefreshUser?
+    }
+    private enum RefreshRequestResult {
+        case success(RefreshResponse)
+        case rejected(statusCode: Int)
     }
     private struct LoginUser: Decodable {
         let user_id: String?
@@ -716,62 +729,68 @@ final class AuthManager: ObservableObject {
             )
         }
 
-        if !force {
-            guard let exp = snapshot.expiresAt else { return true }
-            if Date().addingTimeInterval(60) < exp { return true }
+        let hasAccessToken = !(snapshot.accessToken?.isEmpty ?? true)
+        let hasRefreshToken = !(snapshot.refreshToken?.isEmpty ?? true)
+
+        guard hasAccessToken || hasRefreshToken else {
+            return await tryAutoLoginWithSavedCredentials()
         }
 
-        guard snapshot.accessToken != nil || snapshot.refreshToken != nil else {
-            if force {
-                return await tryAutoLoginWithSavedCredentials()
+        if !force {
+            if hasAccessToken {
+                guard let exp = snapshot.expiresAt else { return true }
+                if Date().addingTimeInterval(60) < exp { return true }
             }
-            return false
         }
 
         let base = snapshot.serverURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         guard let url = URL(string: base + "/api/auth/refresh") else { return false }
 
         do {
-            let refreshed: RefreshResponse?
+            let refreshResult: RefreshRequestResult
             if let rt = snapshot.refreshToken, !rt.isEmpty {
                 let firstTry = try await requestRefresh(
                     url: url,
                     accessToken: snapshot.accessToken,
                     refreshToken: rt
                 )
-                if let firstTry {
-                    refreshed = firstTry
-                } else {
-                    refreshed = try await requestRefresh(
+                switch firstTry {
+                case .success:
+                    refreshResult = firstTry
+                case .rejected:
+                    refreshResult = try await requestRefresh(
                         url: url,
                         accessToken: snapshot.accessToken,
                         refreshToken: nil
                     )
                 }
             } else {
-                refreshed = try await requestRefresh(
+                refreshResult = try await requestRefresh(
                     url: url,
                     accessToken: snapshot.accessToken,
                     refreshToken: nil
                 )
             }
-            guard let decoded = refreshed else {
-                if force {
-                    return await tryAutoLoginWithSavedCredentials()
+            switch refreshResult {
+            case .success(let decoded):
+                await MainActor.run {
+                    self.saveTokens(token: decoded.token, refresh: decoded.refresh_token, expiresIn: decoded.expires_in)
+                    if let uid = decoded.user?.user_id { self.saveUserId(uid) }
                 }
-                return false
-            }
-            await MainActor.run {
-                self.saveTokens(token: decoded.token, refresh: decoded.refresh_token, expiresIn: decoded.expires_in)
-                if let uid = decoded.user?.user_id { self.saveUserId(uid) }
-            }
-            return true
-        } catch {
-            if force {
+                return true
+            case .rejected(let statusCode):
+                guard Self.shouldFallbackToCredentialLogin(afterRefreshStatus: statusCode) else {
+                    return false
+                }
                 return await tryAutoLoginWithSavedCredentials()
             }
+        } catch {
             return false
         }
+    }
+
+    private static func shouldFallbackToCredentialLogin(afterRefreshStatus statusCode: Int) -> Bool {
+        statusCode == 401 || statusCode == 403
     }
 
     private static func normalizeUserName(_ name: String?) -> String? {
@@ -857,7 +876,7 @@ final class AuthManager: ObservableObject {
         url: URL,
         accessToken: String?,
         refreshToken: String?
-    ) async throws -> RefreshResponse? {
+    ) async throws -> RefreshRequestResult {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
@@ -871,10 +890,13 @@ final class AuthManager: ObservableObject {
         }
 
         let (data, resp) = try await performData(for: req)
-        guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-            return nil
+        guard let http = resp as? HTTPURLResponse else {
+            throw NSError(domain: "Auth", code: 2, userInfo: [NSLocalizedDescriptionKey: "No response"])
         }
-        return try JSONDecoder().decode(RefreshResponse.self, from: data)
+        guard (200..<300).contains(http.statusCode) else {
+            return .rejected(statusCode: http.statusCode)
+        }
+        return .success(try JSONDecoder().decode(RefreshResponse.self, from: data))
     }
 
     func login(email: String, password: String) async throws {

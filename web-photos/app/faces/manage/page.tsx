@@ -10,9 +10,11 @@ import { useToast } from '@/hooks/use-toast';
 import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { ArrowLeft } from 'lucide-react';
 import EditFaceDialog from '@/components/faces/EditFaceDialog';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 export default function ManageFacesPage() {
   const router = useRouter();
+  const { translateSource: tx, formatSource } = useI18n();
 
   const qc = useQueryClient();
   const { toast } = useToast();
@@ -79,6 +81,8 @@ export default function ManageFacesPage() {
 
   const total = faces?.length ?? 0;
   const selectedCount = selection.size;
+  const totalLabel = formatSource('%d total', total);
+  const selectedLabel = formatSource('%d selected', selectedCount);
 
   const items = useMemo(() => (faces || []).map((f) => ({
     personId: (f as Face).person_id,
@@ -189,14 +193,14 @@ export default function ManageFacesPage() {
             className="h-10 w-10 grid place-items-center rounded-full border border-border hover:bg-muted text-foreground"
             onClick={() => router.back()}
             aria-label="Back"
-            title="Back"
+            title={tx("Back")}
           >
             <ArrowLeft className="w-5 h-5" />
           </button>
-          <div className="font-semibold">Manage Faces</div>
-          <div className="text-sm text-muted-foreground">{total} total</div>
+          <div className="font-semibold">{tx("Manage Faces")}</div>
+          <div className="text-sm text-muted-foreground">{totalLabel}</div>
           {selectedCount > 0 && (
-            <div className="ml-auto text-sm text-muted-foreground">{selectedCount} selected</div>
+            <div className="ml-auto text-sm text-muted-foreground">{selectedLabel}</div>
           )}
         </div>
       </div>
@@ -210,60 +214,60 @@ export default function ManageFacesPage() {
                 className="px-3 py-1.5 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={selectedCount < 2}
                 onClick={startMerge}
-              >Merge Faces</button>
+              >{tx("Merge Faces")}</button>
               <button
                 className="px-3 py-1.5 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={selectedCount === 0}
                 onClick={() => setDeleteOpen(true)}
-              >Delete</button>
+              >{tx("Delete")}</button>
             </>
           )}
 
           {mode === 'merge_select' && (
             <>
-              <div className="text-sm text-muted-foreground mr-2">Select at least two faces to merge</div>
-              <button className="px-3 py-1.5 rounded border border-border hover:bg-muted" onClick={resetMergeFlow}>Cancel</button>
+              <div className="text-sm text-muted-foreground mr-2">{tx("Select at least two faces to merge")}</div>
+              <button className="px-3 py-1.5 rounded border border-border hover:bg-muted" onClick={resetMergeFlow}>{tx("Cancel")}</button>
               <button
                 className="px-3 py-1.5 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={selection.size < 2}
                 onClick={nextFromSelect}
-              >Next</button>
+              >{tx("Next")}</button>
             </>
           )}
 
           {mode === 'merge_choose_primary' && (
             <>
-              <div className="text-sm text-muted-foreground mr-2">Pick the face to keep as primary</div>
-              <button className="px-3 py-1.5 rounded border border-border hover:bg-muted" onClick={resetMergeFlow}>Cancel</button>
+              <div className="text-sm text-muted-foreground mr-2">{tx("Pick the face to keep as primary")}</div>
+              <button className="px-3 py-1.5 rounded border border-border hover:bg-muted" onClick={resetMergeFlow}>{tx("Cancel")}</button>
               <button
                 className="px-3 py-1.5 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={!primaryId}
                 onClick={nextFromChoosePrimary}
-              >Next</button>
+              >{tx("Next")}</button>
             </>
           )}
 
           {mode === 'merge_edit' && (
             <>
               <div className="flex items-center gap-2 mr-2 text-sm">
-                <label className="text-muted-foreground">Name</label>
+                <label className="text-muted-foreground">{tx("Name")}</label>
                 <input value={editName} onChange={e => setEditName(e.target.value)}
                   className="h-8 px-2 rounded border border-border bg-background text-foreground"
-                  placeholder="Optional name" />
-                <label className="ml-3 text-muted-foreground">Birth</label>
+                  placeholder={tx("Optional name")} />
+                <label className="ml-3 text-muted-foreground">{tx("Birth")}</label>
                 <input type="date" value={editBirth} onChange={e => setEditBirth(e.target.value)}
                   className="h-8 px-2 rounded border border-border bg-background text-foreground" />
               </div>
-              <button className="px-3 py-1.5 rounded border border-border hover:bg-muted" onClick={resetMergeFlow}>Cancel</button>
+              <button className="px-3 py-1.5 rounded border border-border hover:bg-muted" onClick={resetMergeFlow}>{tx("Cancel")}</button>
               <button
                 className="px-3 py-1.5 rounded border border-border hover:bg-muted disabled:opacity-50 disabled:cursor-not-allowed"
                 onClick={submitMerge}
-              >Submit</button>
+              >{tx("Submit")}</button>
             </>
           )}
 
           {mode === 'merging' && (
-            <div className="text-sm text-muted-foreground">Merging…</div>
+            <div className="text-sm text-muted-foreground">{tx("Merging…")}</div>
           )}
         </div>
       </div>
@@ -271,7 +275,7 @@ export default function ManageFacesPage() {
       {/* Row 3: Grid of faces */}
       <div className="max-w-6xl mx-auto p-4 w-full" style={{ ['--face-size' as any]: '96px' }}>
         {isLoading ? (
-          <div className="text-sm text-muted-foreground">Loading faces…</div>
+          <div className="text-sm text-muted-foreground">{tx("Loading faces…")}</div>
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(var(--face-size), var(--face-size)))' }}>
             {items
@@ -302,12 +306,12 @@ export default function ManageFacesPage() {
                     title={label}
                     style={{ width: '100%' }}
                   >
-                    <button className="w-full" onClick={onClick} aria-label={`Select ${label}`}>
+                    <button className="w-full" onClick={onClick} aria-label={`${tx("Select")} ${label}`}>
                       <div className="w-full" style={{ aspectRatio: '1 / 1' }}>
                         <img src={thumb} alt={label} className="w-full h-full object-cover bg-muted" loading="lazy" />
                       </div>
                     </button>
-                    <button className="w-full p-2 text-xs flex items-center justify-between" onClick={() => openEdit(personId)} aria-label={`Edit ${label}`}>
+                    <button className="w-full p-2 text-xs flex items-center justify-between" onClick={() => openEdit(personId)} aria-label={`${tx("Edit")} ${label}`}>
                       <span className="truncate" title={label}>{label}</span>
                       {typeof count === 'number' && <span className="text-[10px] text-muted-foreground">({count})</span>}
                     </button>
@@ -323,12 +327,12 @@ export default function ManageFacesPage() {
         <div className="max-w-6xl mx-auto p-4">
           <div className="flex items-center justify-between mb-2">
             <div className="text-sm text-muted-foreground">
-              {activePersonId ? `Items for ${activePersonId}` : 'Select a face to preview items'}
+              {activePersonId ? formatSource('Items for %s', activePersonId) : tx("Select a face to preview items")}
             </div>
           </div>
           {activePersonId && (
             previewLoading ? (
-              <div className="text-sm text-muted-foreground">Loading items…</div>
+              <div className="text-sm text-muted-foreground">{tx("Loading items…")}</div>
             ) : (
               <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
                 {(preview?.items || []).slice(0, 10).map((it, idx) => (
@@ -341,12 +345,12 @@ export default function ManageFacesPage() {
                       style={{ aspectRatio: '1 / 1' }}
                     />
                     {it.is_video ? (
-                      <span className="absolute bottom-1 right-1 text-[10px] px-1 py-0.5 rounded bg-black/60 text-white">Video</span>
+                      <span className="absolute bottom-1 right-1 text-[10px] px-1 py-0.5 rounded bg-black/60 text-white">{tx("Video")}</span>
                     ) : null}
                   </div>
                 ))}
                 {(preview?.items || []).length === 0 && (
-                  <div className="text-sm text-muted-foreground">No items found for this face.</div>
+                  <div className="text-sm text-muted-foreground">{tx("No items found for this face.")}</div>
                 )}
               </div>
             )
@@ -362,10 +366,10 @@ export default function ManageFacesPage() {
       />
       <ConfirmDialog
         open={deleteOpen}
-        title="Delete faces?"
-        description={`Delete ${selection.size} face${selection.size>1?'s':''}. This cannot be undone.`}
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
+        title={tx("Delete faces?")}
+        description={formatSource('Delete %d face(s). This cannot be undone.', selection.size)}
+        confirmLabel={tx("Delete")}
+        cancelLabel={tx("Cancel")}
         variant="destructive"
         onClose={() => setDeleteOpen(false)}
         onConfirm={async () => {

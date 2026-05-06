@@ -16,9 +16,9 @@ struct TeamManagementView: View {
                 }
 
                 // Tab Picker
-                Picker("Tab", selection: $viewModel.activeTab) {
-                    Text("Users").tag(TeamManagementViewModel.Tab.users)
-                    Text("Groups").tag(TeamManagementViewModel.Tab.groups)
+                Picker(L10n.tr("Tab"), selection: $viewModel.activeTab) {
+                    Text(L10n.tr("Users")).tag(TeamManagementViewModel.Tab.users)
+                    Text(L10n.tr("Groups")).tag(TeamManagementViewModel.Tab.groups)
                 }
                 .pickerStyle(.segmented)
                 .padding()
@@ -33,7 +33,7 @@ struct TeamManagementView: View {
                         .environmentObject(viewModel)
                 }
             }
-            .navigationTitle("Users & Groups")
+            .navigationTitle(L10n.tr("Users & Groups"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
@@ -84,11 +84,11 @@ struct TeamManagementView: View {
     private var orgNameSection: some View {
         VStack(spacing: 8) {
             HStack(spacing: 12) {
-                Text("Organization Name")
+                Text(L10n.tr("Organization Name"))
                     .font(.caption)
                     .foregroundColor(.secondary)
 
-                TextField("Organization Name", text: Binding(
+                TextField(L10n.tr("Organization Name"), text: Binding(
                     get: { viewModel.org?.name ?? "" },
                     set: { newValue in
                         if var org = viewModel.org {
@@ -99,7 +99,7 @@ struct TeamManagementView: View {
                 ))
                 .textFieldStyle(.roundedBorder)
 
-                Button("Save") {
+                Button(L10n.tr("Save")) {
                     Task {
                         guard let name = viewModel.org?.name, !name.isEmpty else { return }
                         try? await viewModel.updateOrgName(name)

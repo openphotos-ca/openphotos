@@ -36,8 +36,10 @@ import { useE2EEStore } from '@/lib/stores/e2ee';
 import { UploadDebugModal } from '@/components/upload/UploadDebugModal';
 import { useUploadDebugStore } from '@/lib/stores/uploadDebug';
 import { UnlockModal } from '@/components/security/UnlockModal';
+import ConfirmDialog from '@/components/ui/ConfirmDialog';
 import { useToast } from '@/hooks/use-toast';
 import { isDemoEmail } from '@/lib/demo';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 interface HeaderProps {
   onSearch: (query: string) => void;
@@ -89,6 +91,7 @@ export function Header({
   const [showSortMenu, setShowSortMenu] = useState(false);
   const [showActionsMenu, setShowActionsMenu] = useState(false);
   const [isReindexing, setIsReindexing] = useState(false);
+  const [showReindexConfirm, setShowReindexConfirm] = useState(false);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -108,6 +111,7 @@ export function Header({
   const [showUploadDebug, setShowUploadDebug] = useState(false);
   const [showUnlockModal, setShowUnlockModal] = useState(false);
   const { toast } = useToast();
+  const { t: tr, translateSource: tx } = useI18n();
   const searchInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const collapseSearchField = React.useCallback(() => {
@@ -450,7 +454,7 @@ export function Header({
     onSearch(''); // This will show all photos
   };
 
-  const handleReindex = async () => {
+  const handleReindex = () => {
     if (isDemoUser) {
       toast({
         title: 'ReIndex unavailable',
@@ -459,10 +463,10 @@ export function Header({
       });
       return;
     }
-    if (typeof window !== 'undefined') {
-      const ok = window.confirm('Start reindex now? This may take a while.');
-      if (!ok) return;
-    }
+    setShowReindexConfirm(true);
+  };
+
+  const runReindex = async () => {
     setIsReindexing(true);
     // Close settings modal when starting reindex
     setShowSettings(false);
@@ -765,9 +769,11 @@ export function Header({
                 onClick={() => setShowSortMenu(!showSortMenu)}
                 className="flex items-center space-x-1 px-3 py-2 text-sm font-medium text-foreground bg-card border border-border rounded-md hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary"
                 type="button"
+                title={tr('toolbar.sort.label')}
+                aria-label={tr('toolbar.sort.label')}
               >
                 <SortAsc className="w-4 h-4" />
-                <span className="hidden sm:inline">Sort</span>
+                <span className="hidden sm:inline">{tr('toolbar.sort.label')}</span>
                 <ChevronDown className="w-4 h-4" />
               </button>
               
@@ -779,7 +785,7 @@ export function Header({
                       className="flex items-center justify-between w-full px-4 py-2 text-sm text-foreground hover:bg-muted"
                       type="button"
                     >
-                      <span>Date (Newest First)</span>
+                      <span>{tr('toolbar.sort.date_newest')}</span>
                       {currentSort === 'newest' && <Check className="w-4 h-4 text-primary" />}
                     </button>
                     <button
@@ -787,7 +793,7 @@ export function Header({
                       className="flex items-center justify-between w-full px-4 py-2 text-sm text-foreground hover:bg-muted"
                       type="button"
                     >
-                      <span>Date (Oldest First)</span>
+                      <span>{tr('toolbar.sort.date_oldest')}</span>
                       {currentSort === 'oldest' && <Check className="w-4 h-4 text-primary" />}
                     </button>
                     <div className="h-px bg-border my-1" />
@@ -796,7 +802,7 @@ export function Header({
                       className="flex items-center justify-between w-full px-4 py-2 text-sm text-foreground hover:bg-muted"
                       type="button"
                     >
-                      <span>Imported (Newest)</span>
+                      <span>{tr('toolbar.sort.imported_newest')}</span>
                       {currentSort === 'imported_newest' && <Check className="w-4 h-4 text-primary" />}
                     </button>
                     <button
@@ -804,7 +810,7 @@ export function Header({
                       className="flex items-center justify-between w-full px-4 py-2 text-sm text-foreground hover:bg-muted"
                       type="button"
                     >
-                      <span>Imported (Oldest)</span>
+                      <span>{tr('toolbar.sort.imported_oldest')}</span>
                       {currentSort === 'imported_oldest' && <Check className="w-4 h-4 text-primary" />}
                     </button>
                     <div className="h-px bg-border my-1" />
@@ -813,7 +819,7 @@ export function Header({
                       className="flex items-center justify-between w-full px-4 py-2 text-sm text-foreground hover:bg-muted"
                       type="button"
                     >
-                      <span>Size (Largest First)</span>
+                      <span>{tr('toolbar.sort.size_largest')}</span>
                       {currentSort === 'largest' && <Check className="w-4 h-4 text-primary" />}
                     </button>
                     <button
@@ -821,7 +827,7 @@ export function Header({
                       className="flex items-center justify-between w-full px-4 py-2 text-sm text-foreground hover:bg-muted"
                       type="button"
                     >
-                      <span>Random (Seeded)</span>
+                      <span>{tr('toolbar.sort.random_seeded')}</span>
                       {currentSort === 'random' && <Check className="w-4 h-4 text-primary" />}
                     </button>
                   </div>
@@ -835,22 +841,22 @@ export function Header({
                 <button
                   onClick={() => { qs.setLayout('grid'); }}
                   className={`px-2.5 py-2 text-sm flex items-center gap-1 ${layout==='grid' ? 'bg-primary text-primary-foreground' : 'bg-card text-foreground hover:bg-muted'}`}
-                  title="Grid layout"
+                  title={tr('toolbar.layout.grid_title')}
                   aria-pressed={layout==='grid'}
                   type="button"
                 >
                   <ImageIcon className="w-4 h-4" />
-                  <span className="hidden sm:inline">Grid</span>
+                  <span className="hidden sm:inline">{tr('toolbar.layout.grid')}</span>
                 </button>
                 <button
                   onClick={() => { qs.setLayout('timeline'); }}
                   className={`px-2.5 py-2 text-sm flex items-center gap-1 border-l border-border ${layout==='timeline' ? 'bg-primary text-primary-foreground' : 'bg-card text-foreground hover:bg-muted'}`}
-                  title="Timeline layout"
+                  title={tr('toolbar.layout.timeline_title')}
                   aria-pressed={layout==='timeline'}
                   type="button"
                 >
                   <List className="w-4 h-4" />
-                  <span className="hidden sm:inline">Timeline</span>
+                  <span className="hidden sm:inline">{tr('toolbar.layout.timeline')}</span>
                 </button>
               </div>
             )}
@@ -862,11 +868,13 @@ export function Header({
               onClick={handleReindex}
               disabled={isReindexing}
               className="flex items-center space-x-1 px-3 py-2 text-sm font-medium text-foreground bg-card border border-border rounded-md hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+              title={isReindexing ? tr('toolbar.indexing') : tr('toolbar.reindex')}
+              aria-label={isReindexing ? tr('toolbar.indexing') : tr('toolbar.reindex')}
             >
               {/* Use Scan icon to represent indexing/scanning */}
               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="16" height="16" className={`${isReindexing ? 'animate-spin' : ''}`} fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><rect x="7" y="7" width="10" height="10" rx="2"/></svg>
               <span className="hidden sm:inline">
-                {isReindexing ? 'Indexing...' : 'ReIndex'}
+                {isReindexing ? tr('toolbar.indexing') : tr('toolbar.reindex')}
               </span>
             </button>
 
@@ -875,10 +883,12 @@ export function Header({
               onClick={handleRefreshPhotos}
               disabled={isRefreshing}
               className="flex items-center space-x-1 px-3 py-2 text-sm font-medium text-foreground bg-card border border-border rounded-md hover:bg-muted focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-50"
+              title={isRefreshing ? tr('toolbar.refreshing') : tr('toolbar.refresh')}
+              aria-label={isRefreshing ? tr('toolbar.refreshing') : tr('toolbar.refresh')}
             >
               <RotateCcw className={`w-4 h-4 ${isRefreshing ? 'animate-spin' : ''}`} />
               <span className="hidden sm:inline">
-                {isRefreshing ? 'Refreshing...' : 'Refresh'}
+                {isRefreshing ? tr('toolbar.refreshing') : tr('toolbar.refresh')}
               </span>
             </button>
 
@@ -891,7 +901,7 @@ export function Header({
               <button
                 onClick={() => setShowUserMenu(!showUserMenu)}
                 className="p-2 text-foreground rounded-md hover:bg-muted"
-                title="Menu"
+                title={tr('toolbar.menu')}
               >
                 <Menu className="w-5 h-5" />
               </button>
@@ -911,7 +921,7 @@ export function Header({
                         role="menuitem"
                       >
                         <List className="w-4 h-4" />
-                        <span>Sharing</span>
+                        <span>{tr('toolbar.sharing')}</span>
                       </button>
                     )}
                     {/* Manage Groups & Users (EE only) */}
@@ -922,7 +932,7 @@ export function Header({
                         role="menuitem"
                       >
                         <Users className="w-4 h-4" />
-                          <span> Users &amp; Groups</span>
+                          <span>{tr('toolbar.users_groups')}</span>
                       </button>
                     )}
                     {/* E2EE Unlock/Reset moved from header */}
@@ -936,13 +946,13 @@ export function Header({
                           try { qs.setLocked(false); } catch {}
                           return;
                         }
-                        if (!e2ee.envelope) { alert('No PIN set. Open Settings → Security to create your PIN.'); return; }
+                        if (!e2ee.envelope) { alert(tx('No PIN set. Open Settings → Security to create your PIN.')); return; }
                         setShowUnlockModal(true);
                       }}
                       className="flex items-center space-x-2 w-full text-left px-4 py-2 text-sm text-foreground hover:bg-muted"
                       role="menuitem"
                     >
-                      <span>{e2ee.umk ? 'Reset Lock' : 'Unlock'}</span>
+                      <span>{e2ee.umk ? tr('toolbar.reset_lock') : tr('toolbar.unlock')}</span>
                     </button>
                     {/* Separator */}
                     <div className="my-1 border-t border-border" role="separator" />
@@ -951,7 +961,7 @@ export function Header({
                       className="flex items-center space-x-2 w-full text-left px-4 py-2 text-sm text-foreground hover:bg-muted"
                       role="menuitem"
                     >
-                      <span>{isDark ? 'Switch to Light' : 'Switch to Dark'}</span>
+                      <span>{isDark ? tr('toolbar.switch_to_light') : tr('toolbar.switch_to_dark')}</span>
                     </button>
                     {/* Separator */}
                     <div className="my-1 border-t border-border" role="separator" />
@@ -960,7 +970,7 @@ export function Header({
                       className="flex items-center space-x-2 w-full text-left px-4 py-2 text-sm text-foreground hover:bg-muted"
                       role="menuitem"
                     >
-                      <span>Bulk Upload…</span>
+                      <span>{tr('toolbar.bulk_upload')}</span>
                     </button>
                     {/* Separator */}
                     <div className="my-1 border-t border-border" role="separator" />
@@ -971,7 +981,7 @@ export function Header({
                       role="menuitem"
                     >
                       <User className="w-4 h-4" />
-                      <span>Manage Faces</span>
+                      <span>{tr('toolbar.manage_faces')}</span>
                     </button>
                     {/* Similar Photos/Videos entry */}
                     <button
@@ -980,7 +990,7 @@ export function Header({
                       role="menuitem"
                     >
                       <ImageIcon className="w-4 h-4" />
-                      <span>Similar Media</span>
+                      <span>{tr('toolbar.similar_media')}</span>
                     </button>
                     {/* Separator */}
                     <div className="my-1 border-t border-border" role="separator" />
@@ -990,7 +1000,7 @@ export function Header({
                       role="menuitem"
                     >
                       <Settings className="w-4 h-4" />
-                      <span>Settings</span>
+                      <span>{tr('toolbar.settings')}</span>
                     </button>
                     <button
                       onClick={handleLogout}
@@ -998,7 +1008,7 @@ export function Header({
                       role="menuitem"
                     >
                       <LogOut className="w-4 h-4" />
-                      <span>Sign out</span>
+                      <span>{tr('toolbar.sign_out')}</span>
                     </button>
                   </div>
                 </div>
@@ -1116,6 +1126,18 @@ export function Header({
     <UploadDashboardModal open={showBulkUpload} onClose={() => setShowBulkUpload(false)} />
     {/* Upload Debug Modal */}
     <UploadDebugModal open={showUploadDebug} onClose={() => setShowUploadDebug(false)} />
+    <ConfirmDialog
+      open={showReindexConfirm}
+      title={tx('Start reindex now?')}
+      description={tx('This may take a while.')}
+      confirmLabel={tx('OK')}
+      cancelLabel={tx('Cancel')}
+      onClose={() => setShowReindexConfirm(false)}
+      onConfirm={() => {
+        setShowReindexConfirm(false);
+        void runReindex();
+      }}
+    />
 
     </>
   );

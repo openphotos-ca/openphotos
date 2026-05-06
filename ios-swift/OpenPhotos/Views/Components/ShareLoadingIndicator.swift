@@ -18,7 +18,7 @@ struct ErrorView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.orange)
 
-            Text("Error")
+            Text(L10n.tr("Error"))
                 .font(.headline)
 
             Text(message)
@@ -27,7 +27,7 @@ struct ErrorView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal)
 
-            Button("Retry") {
+            Button(L10n.tr("Retry")) {
                 retryAction()
             }
             .buttonStyle(.borderedProminent)
@@ -66,10 +66,10 @@ struct ShareEmptyStateView: View {
                 .font(.system(size: 48))
                 .foregroundColor(.secondary)
 
-            Text(title)
+            Text(L10n.tr(title))
                 .font(.headline)
 
-            Text(message)
+            Text(L10n.tr(message))
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -78,7 +78,7 @@ struct ShareEmptyStateView: View {
             if let actionView = actionView {
                 actionView
             } else if let action = action {
-                Button("Get Started") {
+                Button(L10n.tr("Get Started")) {
                     action()
                 }
                 .buttonStyle(.borderedProminent)

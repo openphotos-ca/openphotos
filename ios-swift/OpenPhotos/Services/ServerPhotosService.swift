@@ -27,10 +27,38 @@ struct CloudExistsMatches {
     }
 }
 
+struct CloudExistsMetadataItem: Encodable {
+    let matchId: String
+    let backupIds: [String]
+    let contentId: String?
+    let filename: String?
+    let createdAt: Int64?
+    let width: Int?
+    let height: Int?
+    let isVideo: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case matchId = "match_id"
+        case backupIds = "backup_ids"
+        case contentId = "content_id"
+        case filename
+        case createdAt = "created_at"
+        case width
+        case height
+        case isVideo = "is_video"
+    }
+}
+
 struct DeletedBackupsPage {
     let total: Int
     let backupIds: [String]
     let nextAfter: String?
+}
+
+struct UploadIngestedContentMatches {
+    let contentIds: Set<String>
+
+    static let empty = UploadIngestedContentMatches(contentIds: [])
 }
 
 /// ServerPhotosService wraps the server photo/album APIs used by the server-backed Photos tab.
@@ -38,6 +66,7 @@ struct DeletedBackupsPage {
 final class ServerPhotosService {
     static let shared = ServerPhotosService()
     private init() {}
+    private let cloudCheckRequestTimeout: TimeInterval = 300
 
     // MARK: - Core fetchers
 
@@ -596,11 +625,13 @@ final class ServerPhotosService {
     func existsMatches(
         assetIds: [String] = [],
         backupIds: [String] = [],
+        metadataItems: [CloudExistsMetadataItem] = [],
         includeDeletedMatches: Bool = false
     ) async throws -> CloudExistsMatches {
         struct Req: Encodable {
             let asset_ids: [String]
             let backup_ids: [String]
+            let items: [CloudExistsMetadataItem]
             let include_deleted_matches: Bool
         }
         struct Resp: Decodable {
@@ -610,17 +641,43 @@ final class ServerPhotosService {
             let deleted_backup_ids: [String]?
         }
 
-        guard !assetIds.isEmpty || !backupIds.isEmpty else {
+        guard !assetIds.isEmpty || !backupIds.isEmpty || !metadataItems.isEmpty else {
             return .empty
         }
 
-        let resp: Resp = try await AuthorizedHTTPClient.shared.postJSON(
-            path: "/api/photos/exists",
-            body: Req(
-                asset_ids: assetIds,
-                backup_ids: backupIds,
-                include_deleted_matches: includeDeletedMatches
+        let requestBody = Req(
+            asset_ids: assetIds,
+            backup_ids: backupIds,
+            items: metadataItems,
+            include_deleted_matches: includeDeletedMatches
+        )
+        let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/photos/exists")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = cloudCheckRequestTimeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(requestBody)
+        print(
+            "[CLOUDCHECK] exists request asset_ids=\(assetIds.count) backup_ids=\(backupIds.count) " +
+            "items=\(metadataItems.count) include_deleted=\(includeDeletedMatches ? 1 : 0) " +
+            "body_bytes=\(req.httpBody?.count ?? 0) timeout_s=\(Int(cloudCheckRequestTimeout))"
+        )
+        let startedAt = Date()
+        let (data, http) = try await AuthorizedHTTPClient.shared.request(req)
+        let elapsed = Date().timeIntervalSince(startedAt)
+        guard (200..<300).contains(http.statusCode) else {
+            let bodyStr = String(data: data, encoding: .utf8) ?? ""
+            print(
+                "[CLOUDCHECK] exists response status=\(http.statusCode) elapsed_ms=\(Int((elapsed * 1000).rounded())) " +
+                "asset_ids=\(assetIds.count) backup_ids=\(backupIds.count) items=\(metadataItems.count)"
             )
+            throw NSError(domain: "HTTP", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: bodyStr])
+        }
+        let resp = try JSONDecoder().decode(Resp.self, from: data)
+        print(
+            "[CLOUDCHECK] exists response status=\(http.statusCode) elapsed_ms=\(Int((elapsed * 1000).rounded())) " +
+            "present_asset_ids=\(resp.present_asset_ids?.count ?? 0) present_backup_ids=\(resp.present_backup_ids?.count ?? 0) " +
+            "deleted_asset_ids=\(resp.deleted_asset_ids?.count ?? 0) deleted_backup_ids=\(resp.deleted_backup_ids?.count ?? 0)"
         )
         return CloudExistsMatches(
             presentAssetIds: Set(resp.present_asset_ids ?? []),
@@ -655,10 +712,20 @@ final class ServerPhotosService {
         if let after, !after.isEmpty {
             query["after"] = after
         }
-        let resp: Resp = try await AuthorizedHTTPClient.shared.getJSON(
-            path: "/api/photos/deleted-backups",
-            query: query
+        let queryItems = query.map { URLQueryItem(name: $0.key, value: $0.value) }
+        var req = URLRequest(
+            url: AuthorizedHTTPClient.shared.buildURL(
+                path: "/api/photos/deleted-backups",
+                queryItems: queryItems
+            )
         )
+        req.timeoutInterval = cloudCheckRequestTimeout
+        let (data, http) = try await AuthorizedHTTPClient.shared.request(req)
+        guard (200..<300).contains(http.statusCode) else {
+            let bodyStr = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "HTTP", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: bodyStr])
+        }
+        let resp = try JSONDecoder().decode(Resp.self, from: data)
         return DeletedBackupsPage(
             total: resp.total,
             backupIds: resp.backup_ids,
@@ -670,11 +737,30 @@ final class ServerPhotosService {
         struct Req: Encodable { let backup_ids: [String] }
         struct Resp: Decodable { let deleted_backup_ids: [String] }
         guard !backupIds.isEmpty else { return [] }
-        let resp: Resp = try await AuthorizedHTTPClient.shared.postJSON(
-            path: "/api/photos/deleted-backups/match",
-            body: Req(backup_ids: backupIds)
-        )
+        let url = AuthorizedHTTPClient.shared.buildURL(path: "/api/photos/deleted-backups/match")
+        var req = URLRequest(url: url)
+        req.httpMethod = "POST"
+        req.timeoutInterval = cloudCheckRequestTimeout
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONEncoder().encode(Req(backup_ids: backupIds))
+        let (data, http) = try await AuthorizedHTTPClient.shared.request(req)
+        guard (200..<300).contains(http.statusCode) else {
+            let bodyStr = String(data: data, encoding: .utf8) ?? ""
+            throw NSError(domain: "HTTP", code: http.statusCode, userInfo: [NSLocalizedDescriptionKey: bodyStr])
+        }
+        let resp = try JSONDecoder().decode(Resp.self, from: data)
         return Set(resp.deleted_backup_ids)
+    }
+
+    func ingestedContentIds(_ contentIds: [String]) async throws -> UploadIngestedContentMatches {
+        struct Req: Encodable { let content_ids: [String] }
+        struct Resp: Decodable { let ingested_content_ids: [String] }
+        guard !contentIds.isEmpty else { return .empty }
+        let resp: Resp = try await AuthorizedHTTPClient.shared.postJSON(
+            path: "/api/uploads/ingested",
+            body: Req(content_ids: contentIds)
+        )
+        return UploadIngestedContentMatches(contentIds: Set(resp.ingested_content_ids))
     }
 
     func getPhotosByAssetIds(_ assetIds: [String], includeLocked: Bool = false) async throws -> [ServerPhoto] {

@@ -5,8 +5,10 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { similarApi, SimilarGroup } from '@/lib/api/similar';
 import { photosApi } from '@/lib/api/photos';
 import { logger } from '@/lib/logger';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 export function SimilarVideoGroups({ onOpenAsset }: { onOpenAsset?: (assetId: string, group: string[], index: number) => void }) {
+  const { translateSource: tx, formatSource } = useI18n();
   const [cursor, setCursor] = useState<number>(0);
   const [groups, setGroups] = useState<SimilarGroup[]>([]);
   const [done, setDone] = useState<boolean>(false);
@@ -30,11 +32,11 @@ export function SimilarVideoGroups({ onOpenAsset }: { onOpenAsset?: (assetId: st
   return (
     <div className="p-4">
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-semibold">Similar Video Groups</h2>
-        <div className="text-sm text-muted-foreground">{groups.length} groups loaded</div>
+        <h2 className="text-lg font-semibold">{tx("Similar Video Groups")}</h2>
+        <div className="text-sm text-muted-foreground">{formatSource('%d groups loaded', groups.length)}</div>
       </div>
       {groups.length === 0 && !isLoading && (
-        <div className="text-muted-foreground">No similar video groups found.</div>
+        <div className="text-muted-foreground">{tx("No similar video groups found.")}</div>
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-6">
         {groups.map((g, idx) => (
@@ -43,7 +45,7 @@ export function SimilarVideoGroups({ onOpenAsset }: { onOpenAsset?: (assetId: st
       </div>
       <div className="mt-6 flex justify-center">
         <button className="px-4 py-2 rounded border border-border bg-card hover:bg-muted disabled:opacity-50" disabled={done || isLoading} onClick={loadMore}>
-          {done ? 'All loaded' : (isLoading ? 'Loading…' : 'Load more')}
+          {done ? tx("All loaded") : (isLoading ? tx("Loading…") : tx("Load more"))}
         </button>
       </div>
     </div>
@@ -51,6 +53,7 @@ export function SimilarVideoGroups({ onOpenAsset }: { onOpenAsset?: (assetId: st
 }
 
 function VideoGroupGrid({ group, onOpenAsset }: { group: SimilarGroup; onOpenAsset?: (assetId: string, group: string[], index: number) => void }) {
+  const { translateSource: tx } = useI18n();
   const queryClient = useQueryClient();
   const baseItems = useMemo(() => (
     group.members.includes(group.representative)
@@ -127,16 +130,16 @@ function VideoGroupGrid({ group, onOpenAsset }: { group: SimilarGroup; onOpenAss
     <section className="border border-border rounded-md bg-card overflow-hidden">
       <div className="px-3 py-2 border-b border-border flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-sm text-foreground font-medium">Similar video group</span>
+          <span className="text-sm text-foreground font-medium">{tx("Similar video group")}</span>
           <span className="text-xs px-2 py-0.5 rounded-full border border-primary/30 bg-primary/10 text-primary">{items.length} / {group.count}</span>
         </div>
         <div className="flex items-center gap-2">
-          <button className="flex items-center gap-1 text-sm px-2 py-1 rounded border border-border bg-background hover:bg-muted" onClick={toggleSelectAll} aria-label="Select">Select{selected.size ? ` (${selected.size})` : ''}</button>
-          <button className="flex items-center gap-1 text-sm px-2 py-1 rounded border border-border bg-background hover:bg-muted" onClick={selectInferior} aria-label="Select inferior" title="Select all but largest">Select Inferior</button>
+          <button className="flex items-center gap-1 text-sm px-2 py-1 rounded border border-border bg-background hover:bg-muted" onClick={toggleSelectAll} aria-label={tx("Select")}>{tx("Select")}{selected.size ? ` (${selected.size})` : ''}</button>
+          <button className="flex items-center gap-1 text-sm px-2 py-1 rounded border border-border bg-background hover:bg-muted" onClick={selectInferior} aria-label={tx("Select inferior")} title={tx("Select all but largest")}>{tx("Select Inferior")}</button>
           {selected.size > 0 && (
-            <button className="text-xs text-muted-foreground hover:underline" onClick={() => setSelected(new Set())} aria-label="Select none" title="Select none">None</button>
+            <button className="text-xs text-muted-foreground hover:underline" onClick={() => setSelected(new Set())} aria-label={tx("Select none")} title={tx("Select none")}>{tx("None")}</button>
           )}
-          <button className={`flex items-center gap-1 text-sm px-2 py-1 rounded border ${selected.size ? 'border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20' : 'border-border bg-muted text-muted-foreground cursor-not-allowed'}`} onClick={deleteSelected} disabled={selected.size===0} aria-label="Delete selected">Delete</button>
+          <button className={`flex items-center gap-1 text-sm px-2 py-1 rounded border ${selected.size ? 'border-destructive/40 bg-destructive/10 text-destructive hover:bg-destructive/20' : 'border-border bg-muted text-muted-foreground cursor-not-allowed'}`} onClick={deleteSelected} disabled={selected.size===0} aria-label={tx("Delete selected")}>{tx("Delete")}</button>
         </div>
       </div>
       <div ref={containerRef} className="p-3 grid" style={{ gridTemplateColumns: `repeat(${layout.cols}, ${layout.columnWidth}px)` }}>

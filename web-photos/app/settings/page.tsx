@@ -22,6 +22,7 @@ import { PinInput } from '@/components/security/PinInput';
 import { authApi } from '@/lib/api/auth';
 import { isDemoEmail } from '@/lib/demo';
 import { resolveApiBaseUrl } from '@/lib/api/base';
+import { intlLocaleFor, useI18n, type LocaleMode } from '@/lib/i18n/I18nProvider';
 
 interface FoldersResponse {
   folders: string[];
@@ -83,6 +84,7 @@ function formatBytes(value?: number): string {
 
 export default function SettingsPage() {
   const queryClient = useQueryClient();
+  const { locale, localeMode, setLocaleMode, t: tr, translateSource: tx } = useI18n();
   const [folders, setFolders] = useState<string[]>([]);
   const [newFolder, setNewFolder] = useState('');
   const [isLoading, setIsLoading] = useState(false);
@@ -365,35 +367,35 @@ export default function SettingsPage() {
   }, [token, isEE, isAdmin]);
 
   const connectedServerVersion = capabilitiesLoading
-    ? 'Loading…'
-    : (serverVersion || 'Unavailable');
+    ? tx('Loading…')
+    : (serverVersion || tx('Unavailable'));
   const libraryStatsLoading = !!token && libraryStatsFetching && !libraryStats;
   const libraryStatsUnavailable = !token || libraryStatsError;
   const libraryStatValue = (value?: number, formatter: (value?: number) => string = formatCount) => {
-    if (libraryStatsLoading) return 'Loading…';
-    if (libraryStatsUnavailable) return 'Unavailable';
+    if (libraryStatsLoading) return tx('Loading…');
+    if (libraryStatsUnavailable) return tx('Unavailable');
     return formatter(value);
   };
   const showServerUpdateCard = isAdmin && !serverUpdateHidden;
   const serverUpdateLabel = (() => {
-    if (serverUpdateLoading && !serverUpdate) return 'Checking…';
+    if (serverUpdateLoading && !serverUpdate) return tx('Checking…');
     switch (serverUpdate?.status) {
       case 'disabled':
-        return 'Update checks disabled';
+        return tx('Update checks disabled');
       case 'check_failed':
-        return 'Check failed';
+        return tx('Check failed');
       case 'unsupported_install_mode':
-        return 'Unsupported install mode';
+        return tx('Unsupported install mode');
       case 'ok':
-        return serverUpdate.available ? 'Update available' : 'Up to date';
+        return serverUpdate.available ? tx('Update available') : tx('Up to date');
       default:
-        if (serverUpdateError) return 'Unavailable';
-        return 'Never checked';
+        if (serverUpdateError) return tx('Unavailable');
+        return tx('Never checked');
     }
   })();
   const serverUpdateLastChecked = serverUpdate?.checked_at
-    ? new Date(serverUpdate.checked_at).toLocaleString()
-    : 'Never';
+    ? new Date(serverUpdate.checked_at).toLocaleString(intlLocaleFor(locale))
+    : tx('Never');
   const copyInstallCommand = async () => {
     if (!serverUpdate?.install_command) return;
     try {
@@ -475,7 +477,11 @@ export default function SettingsPage() {
       const res = await photosApi.updateTrashSettings(Math.min(365, Math.round(parsed)));
       setAutoPurgeDays(String(res.auto_purge_days));
       await queryClient.invalidateQueries({ queryKey: ['trash-settings'] });
-      toast({ title: 'Trash settings saved', description: `Auto purge after ${res.auto_purge_days} day${res.auto_purge_days === 1 ? '' : 's'}.`, variant: 'success' });
+      toast({
+        title: tr('settings.trash.saved'),
+        description: tr('settings.trash.saved_description', { days: res.auto_purge_days }),
+        variant: 'success',
+      });
     } catch (e: any) {
       if (isDemoReadOnlyError(e)) {
         showDemoReadOnlyToast();
@@ -709,7 +715,7 @@ export default function SettingsPage() {
     <div className={clsx('container mx-auto px-4', isEmbedded ? 'pt-3 pb-8' : 'py-8')}>
       <div className="max-w-2xl mx-auto">
         <div className={clsx('flex items-center justify-between gap-4 mb-8 min-h-10', isEmbedded && 'pl-14')}>
-          <h1 className="text-3xl font-bold">Settings</h1>
+          <h1 className="text-3xl font-bold">{tx("Settings")}</h1>
         </div>
         {isDemoUser && (
           <div className="mb-6 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
@@ -718,21 +724,21 @@ export default function SettingsPage() {
         )}
         <Card className="mb-8">
           <CardHeader>
-            <CardTitle>Cloud Library</CardTitle>
-            <CardDescription>Active cloud media stored for this account.</CardDescription>
+            <CardTitle>{tx("Cloud Library")}</CardTitle>
+            <CardDescription>{tx("Active cloud media stored for this account.")}</CardDescription>
           </CardHeader>
           <CardContent>
             <div className="grid gap-4 sm:grid-cols-3">
               <div>
-                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Photos</Label>
+                <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Photos")}</Label>
                 <div className="mt-1 text-sm text-foreground">{libraryStatValue(libraryStats?.photos)}</div>
               </div>
               <div>
-                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Videos</Label>
+                <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Videos")}</Label>
                 <div className="mt-1 text-sm text-foreground">{libraryStatValue(libraryStats?.videos)}</div>
               </div>
               <div>
-                <Label className="text-xs uppercase tracking-wide text-muted-foreground">Total Size</Label>
+                <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Total Size")}</Label>
                 <div className="mt-1 text-sm text-foreground">{libraryStatValue(libraryStats?.total_size_bytes, formatBytes)}</div>
               </div>
             </div>
@@ -740,16 +746,16 @@ export default function SettingsPage() {
         </Card>
         <Card className="mb-8">
           <CardHeader>
-            <CardTitle>Connection</CardTitle>
-            <CardDescription>Current backend connection details.</CardDescription>
+            <CardTitle>{tx("Connection")}</CardTitle>
+            <CardDescription>{tx("Current backend connection details.")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div>
-              <Label className="text-xs uppercase tracking-wide text-muted-foreground">Server URL</Label>
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Server URL")}</Label>
               <div className="mt-1 break-all text-sm text-foreground">{connectedServerUrl}</div>
             </div>
             <div>
-              <Label className="text-xs uppercase tracking-wide text-muted-foreground">Server Version</Label>
+              <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Server Version")}</Label>
               <div className="mt-1 text-sm text-foreground">{connectedServerVersion}</div>
             </div>
           </CardContent>
@@ -757,29 +763,29 @@ export default function SettingsPage() {
         {showServerUpdateCard && (
           <Card className="mb-8">
             <CardHeader>
-              <CardTitle>Server Update</CardTitle>
-              <CardDescription>Admin-only server release status and install steps for native or Docker deployments.</CardDescription>
+              <CardTitle>{tx("Server Update")}</CardTitle>
+              <CardDescription>{tx("Admin-only server release status and install steps for native or Docker deployments.")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="grid gap-4 sm:grid-cols-2">
                 <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Status</Label>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Status")}</Label>
                   <div className="mt-1 text-sm text-foreground">{serverUpdateLabel}</div>
                 </div>
                 <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Last Checked</Label>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Last Checked")}</Label>
                   <div className="mt-1 text-sm text-foreground">{serverUpdateLastChecked}</div>
                 </div>
                 <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Current Version</Label>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Current Version")}</Label>
                   <div className="mt-1 text-sm text-foreground">{serverUpdate?.current_version || connectedServerVersion}</div>
                 </div>
                 <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Latest Version</Label>
-                  <div className="mt-1 text-sm text-foreground">{serverUpdate?.latest_version || 'Unavailable'}</div>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Latest Version")}</Label>
+                  <div className="mt-1 text-sm text-foreground">{serverUpdate?.latest_version || tx('Unavailable')}</div>
                 </div>
                 <div>
-                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">Install Mode</Label>
+                  <Label className="text-xs uppercase tracking-wide text-muted-foreground">{tx("Install Mode")}</Label>
                   <div className="mt-1 text-sm text-foreground">{serverUpdate?.install_mode || 'unknown'} / {serverUpdate?.install_arch || '-'}</div>
                 </div>
                 <div>
@@ -840,6 +846,32 @@ export default function SettingsPage() {
             </CardContent>
           </Card>
         )}
+        <Card className="mb-8">
+          <CardHeader>
+            <CardTitle>{tr('settings.language.title')}</CardTitle>
+            <CardDescription>{tr('settings.language.summary')}</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="flex flex-wrap gap-2" role="group" aria-label={tr('settings.language.title')}>
+              {([
+                { mode: 'system', label: tr('settings.language.system') },
+                { mode: 'en', label: tr('settings.language.english') },
+                { mode: 'zh-Hans', label: tr('settings.language.simplified_chinese') },
+                { mode: 'fr', label: tr('settings.language.french') },
+                { mode: 'es', label: tr('settings.language.spanish') },
+              ] as Array<{ mode: LocaleMode; label: string }>).map(({ mode, label }) => (
+                <button
+                  key={mode}
+                  onClick={() => setLocaleMode(mode)}
+                  className={clsx('px-3 py-1.5 rounded-full border text-sm', localeMode === mode ? 'bg-primary/10 text-primary border-primary/30' : 'bg-card text-foreground border-border hover:bg-muted')}
+                  aria-pressed={localeMode === mode}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </CardContent>
+        </Card>
         <fieldset
           disabled={isDemoUser}
           className={clsx('border-0 p-0 m-0 min-w-0', isDemoUser && 'opacity-70')}
@@ -962,12 +994,12 @@ export default function SettingsPage() {
         <Card className="mt-8">
           <CardHeader className="flex items-start justify-between gap-3">
             <div>
-              <CardTitle>Security</CardTitle>
-              <CardDescription>Manage End‑to‑End Encryption and locked metadata.</CardDescription>
+              <CardTitle>{tx("Security")}</CardTitle>
+              <CardDescription>{tx("Manage End-to-End Encryption and locked metadata.")}</CardDescription>
             </div>
             {true && (
               <span className={`inline-flex items-center px-2 py-0.5 text-xs rounded-full border ${useE2EEStore.getState().envelope ? 'border-green-400/30 text-green-300 bg-green-400/10' : 'border-yellow-400/30 text-yellow-300 bg-yellow-400/10'}`}>
-                {useE2EEStore.getState().envelope ? (useE2EEStore.getState().umk ? 'Set (unlocked)' : 'Set') : 'Not set'}
+                {useE2EEStore.getState().envelope ? (useE2EEStore.getState().umk ? tx('Set (unlocked)') : tx('Set')) : tx('Not set')}
               </span>
             )}
           </CardHeader>
@@ -1097,7 +1129,7 @@ export default function SettingsPage() {
                             toast({ title: 'PIN set', description: 'Your PIN has been created.', variant: 'success' });
                           } catch (e:any) { setPinError(e?.message||'Failed to set PIN'); }
                           finally { setPinBusy(false); }
-                        }}> {pinBusy ? 'Saving…' : 'Set PIN'} </Button>
+                        }}> {pinBusy ? tx('Saving…') : tx('Set PIN')} </Button>
                       </div>
                     </div>
                   </>
@@ -1122,7 +1154,7 @@ export default function SettingsPage() {
                       toast({ title: 'Saved', description: `Batch concurrency set to ${n}`, variant: 'success' });
                       e.currentTarget.value = String(n);
                     }} />
-                  <p className="text-xs text-muted-foreground mt-1">How many items to encrypt/decrypt in parallel (1–6).</p>
+                  <p className="text-xs text-muted-foreground mt-1">{tx("How many items to encrypt/decrypt in parallel (1–6).")}</p>
                 </div>
                 <div className="flex items-end justify-end">
                   <Button onClick={() => {
@@ -1139,7 +1171,7 @@ export default function SettingsPage() {
                       };
                       worker.postMessage({ type: 'calibrate-argon2', targetMs: 300 });
                     } catch (e:any) { toast({ title: 'Calibration failed', description: e?.message||String(e), variant: 'destructive' }); }
-                  }}>Re‑calibrate Encryption</Button>
+                  }}>{tx("Re-calibrate Encryption")}</Button>
                 </div>
               </div>
             </div>
@@ -1147,13 +1179,13 @@ export default function SettingsPage() {
             {/* Locked metadata inclusion */}
             <div className="my-6 border-t border-border" />
             <div className="mt-6 space-y-3">
-              <div className="text-sm font-medium">Metadata included in locked media</div>
-              <div className="text-xs text-muted-foreground mb-1">Always included</div>
+              <div className="text-sm font-medium">{tx("Metadata included in locked media")}</div>
+              <div className="text-xs text-muted-foreground mb-1">{tx("Always included")}</div>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {['Capture time','File size','Dimensions','Orientation','Media type'].map((label) => (
                   <label key={label} className="inline-flex items-center gap-2 text-sm opacity-70">
                     <input type="checkbox" checked readOnly disabled />
-                    <span>{label}</span>
+                    <span>{tx(label)}</span>
                   </label>
                 ))}
               </div>
@@ -1234,16 +1266,16 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <Trash2 className="h-5 w-5" />
-              Trash Management
+              {tr('settings.trash.title')}
             </CardTitle>
             <CardDescription>
-              Control how long deleted items stay in the trash before being removed permanently.
+              {tr('settings.trash.description')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="grid gap-3 md:grid-cols-[220px_auto]">
               <div>
-                <Label htmlFor="autoPurgeDays">Auto purge after (days)</Label>
+                <Label htmlFor="autoPurgeDays">{tr('settings.trash.auto_purge_label')}</Label>
                 <Input
                   id="autoPurgeDays"
                   type="number"
@@ -1253,7 +1285,7 @@ export default function SettingsPage() {
                   onChange={(e) => setAutoPurgeDays(e.target.value)}
                   disabled={trashLoading || savingTrash}
                 />
-                <p className="text-xs text-muted-foreground mt-1">Set to 0 to keep items until cleared manually. Maximum 365 days.</p>
+                <p className="text-xs text-muted-foreground mt-1">{tr('settings.trash.auto_purge_hint')}</p>
               </div>
               <div className="flex items-end">
                 <Button onClick={handleSaveTrashSettings} disabled={trashLoading || savingTrash}>
@@ -1263,9 +1295,9 @@ export default function SettingsPage() {
             </div>
             <div className="flex items-center gap-3">
               <Button variant="destructive" onClick={handleClearTrashNow} disabled={trashLoading || purgingTrash}>
-                {purgingTrash ? 'Clearing…' : 'Clear Trash'}
+                {purgingTrash ? tr('settings.trash.clearing') : tr('settings.trash.clear')}
               </Button>
-              <p className="text-sm text-muted-foreground">Permanently deletes all items currently in the trash.</p>
+              <p className="text-sm text-muted-foreground">{tr('settings.trash.clear_description')}</p>
             </div>
           </CardContent>
         </Card>
@@ -1274,17 +1306,17 @@ export default function SettingsPage() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2">
               <FolderOpen className="h-5 w-5" />
-              Indexed Folders
+              {tr('settings.indexed_folders.title')}
             </CardTitle>
             <CardDescription>
-              Specify which folders should be indexed for photo search. Adding or changing folders will automatically start reindexing.
+              {tr('settings.indexed_folders.description')}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {/* Add new folder */}
             <div className="flex gap-2">
               <div className="flex-1">
-                <Label htmlFor="newFolder">Add Folder Path</Label>
+                <Label htmlFor="newFolder">{tr('settings.indexed_folders.add_path_label')}</Label>
                 <Input
                   id="newFolder"
                   placeholder="/path/to/your/photos"
@@ -1304,14 +1336,14 @@ export default function SettingsPage() {
             <div className="space-y-3 pt-2">
               <div className="flex items-end gap-3">
                 <div className="flex-1">
-                  <Label>Add under {selectedAlbumId ? `${selectedAlbumName}` : 'Root'} album</Label>
+                  <Label>{tr('settings.indexed_folders.add_under_album', { album: selectedAlbumId ? selectedAlbumName : tr('settings.indexed_folders.root_album') })}</Label>
                 </div>
                 <Button
                   type="button"
                   variant="ghost"
                   onClick={() => setShowAlbumPicker(true)}
                 >
-                  Album Tree
+                  {tr('settings.indexed_folders.album_tree')}
                 </Button>
               </div>
               <div className="flex items-center gap-3">
@@ -1321,20 +1353,20 @@ export default function SettingsPage() {
                     checked={preserveTreePath}
                     onChange={(e) => setPreserveTreePath(e.target.checked)}
                   />
-                  Preserve tree path
+                  {tr('settings.indexed_folders.preserve_tree_path')}
                 </label>
               </div>
             </div>
 
             {/* Folders list */}
             {isLoading ? (
-              <div className="text-center py-4">Loading folders...</div>
+              <div className="text-center py-4">{tr('settings.indexed_folders.loading')}</div>
             ) : (
               <div className="space-y-2">
-                <Label>Current Folders ({folders.length})</Label>
+                <Label>{tr('settings.indexed_folders.current', { count: folders.length })}</Label>
                 {folders.length === 0 ? (
                   <div className="text-muted-foreground text-center py-8">
-                    No folders configured. Add a folder above to start indexing photos.
+                    {tr('settings.indexed_folders.empty')}
                   </div>
                 ) : (
                   folders.map((folder, index) => (
@@ -1370,8 +1402,8 @@ export default function SettingsPage() {
         {/* Face Quality Settings */}
         <Card className="mt-8">
           <CardHeader>
-            <CardTitle>Face Quality</CardTitle>
-            <CardDescription>Control which faces are kept and shown in the filter.</CardDescription>
+            <CardTitle>{tx("Face Quality")}</CardTitle>
+            <CardDescription>{tx("Control which faces are kept and shown in the filter.")}</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             {!faceSettings ? (
@@ -1379,7 +1411,7 @@ export default function SettingsPage() {
             ) : (
               <>
                 <div>
-                  <Label>Quality Threshold ({faceSettings.min_quality?.toFixed(2)})</Label>
+                  <Label>{tx("Quality Threshold")} ({faceSettings.min_quality?.toFixed(2)})</Label>
                   <input type="range" className="w-full" min={0.3} max={0.9} step={0.01}
                     value={faceSettings.min_quality}
                     onChange={(e)=>setFaceSettings({...faceSettings!, min_quality: parseFloat(e.target.value)})} />
@@ -1403,7 +1435,7 @@ export default function SettingsPage() {
                 </div>
                 <div className="pt-2">
                   <Button onClick={saveFaceSettings} disabled={isSavingFace}>
-                    {isSavingFace ? 'Saving…' : 'Save Face Settings'}
+                    {isSavingFace ? tx('Saving…') : tx('Save Face Settings')}
                   </Button>
                 </div>
               </>
@@ -1415,12 +1447,12 @@ export default function SettingsPage() {
         {isEE && isAdmin && (
           <Card className="mt-8">
             <CardHeader>
-              <CardTitle>Enterprise — Public Links</CardTitle>
-              <CardDescription>Configure the URL prefix used to generate public links.</CardDescription>
+              <CardTitle>{tx("Public Links")}</CardTitle>
+              <CardDescription>{tx("Configure the URL prefix used to generate public links.")}</CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
               <div>
-                <Label>Public link URL prefix</Label>
+                <Label>{tx("Public link URL prefix")}</Label>
                 <Input
                   placeholder="https://photos.example.com"
                   value={eePublicPrefix}

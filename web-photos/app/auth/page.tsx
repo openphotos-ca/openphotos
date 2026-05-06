@@ -7,11 +7,13 @@ import { LoginForm } from '@/components/auth/LoginForm';
 import { RegisterForm } from '@/components/auth/RegisterForm';
 import { useAuthStore } from '@/lib/stores/auth';
 import { logger } from '@/lib/logger';
+import { useI18n } from '@/lib/i18n/I18nProvider';
 
 export default function AuthPage() {
   const [isLogin, setIsLogin] = useState(true);
   const router = useRouter();
   const { isAuthenticated } = useAuthStore();
+  const { t } = useI18n();
 
   // Debug state changes
   logger.debug('AuthPage render - isLogin:', isLogin);
@@ -43,7 +45,7 @@ export default function AuthPage() {
           <div className="text-center">
             <h1 className="text-4xl font-bold text-foreground mb-4">OpenPhotos</h1>
             <p className="text-xl text-muted-foreground mb-8">
-              Organize, search, and discover your photos with AI-powered intelligence
+              {t('auth.marketing.tagline')}
             </p>
             
             <div className="space-y-4 text-left">
@@ -53,7 +55,7 @@ export default function AuthPage() {
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
                 </div>
-                <span className="text-foreground/80">AI-powered semantic search</span>
+                <span className="text-foreground/80">{t('auth.marketing.semantic_search')}</span>
               </div>
               
               <div className="flex items-center space-x-3">
@@ -62,7 +64,7 @@ export default function AuthPage() {
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
                 </div>
-                <span className="text-foreground/80">Automatic face recognition</span>
+                <span className="text-foreground/80">{t('auth.marketing.face_recognition')}</span>
               </div>
               
               <div className="flex items-center space-x-3">
@@ -71,7 +73,7 @@ export default function AuthPage() {
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
                 </div>
-                <span className="text-foreground/80">Smart albums and collections</span>
+                <span className="text-foreground/80">{t('auth.marketing.smart_albums')}</span>
               </div>
               
               <div className="flex items-center space-x-3">
@@ -80,7 +82,7 @@ export default function AuthPage() {
                     <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd" />
                   </svg>
                 </div>
-                <span className="text-foreground/80">Privacy-focused and self-hosted</span>
+                <span className="text-foreground/80">{t('auth.marketing.privacy_self_hosted')}</span>
               </div>
             </div>
           </div>
