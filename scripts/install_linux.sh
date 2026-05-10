@@ -27,6 +27,7 @@ DRY_RUN=0
 UNINSTALL_MODE=""
 
 CURL_FLAGS=(-fL --retry 5 --retry-delay 2 --retry-max-time 120)
+export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
 
 usage() {
   cat <<USAGE
@@ -204,7 +205,7 @@ as_root() {
   if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
     "$@"
   else
-    sudo "$@"
+    sudo env "PATH=$PATH" "$@"
   fi
 }
 
@@ -288,10 +289,10 @@ uninstall_openphotos() {
       /var/log/openphotos \
       /var/tmp/openphotos-installer
 
-    if id -u openphotos >/dev/null 2>&1; then
+    if id -u openphotos >/dev/null 2>&1 && has_command userdel; then
       as_root userdel openphotos >/dev/null 2>&1 || true
     fi
-    if getent group openphotos >/dev/null 2>&1; then
+    if has_command groupdel && { (has_command getent && getent group openphotos >/dev/null 2>&1) || grep -q '^openphotos:' /etc/group 2>/dev/null; }; then
       as_root groupdel openphotos >/dev/null 2>&1 || true
     fi
   else
@@ -349,6 +350,46 @@ stage_local_asset() {
     return 0
   fi
 
+  return 1
+}
+
+primary_model_asset_url() {
+  local asset_name="$1"
+  printf '%s/latest/%s\n' "${PRIMARY_RELEASE_BASE_URL%/}" "$asset_name"
+}
+
+download_primary_model_asset() {
+  local asset_name="$1"
+  local output_path="$2"
+  local url
+
+  require_command curl
+  url="$(primary_model_asset_url "$asset_name")"
+  rm -f "$output_path"
+  note "downloading ${asset_name} from ${url}"
+  if curl "${CURL_FLAGS[@]}" -o "$output_path" "$url"; then
+    return 0
+  fi
+
+  rm -f "$output_path"
+  return 1
+}
+
+stage_model_asset_for_wrapper() {
+  local asset_name="$1"
+  local destination_dir="$2"
+  local output_path="${destination_dir%/}/${asset_name}"
+
+  if stage_local_asset "$asset_name" "$destination_dir"; then
+    return 0
+  fi
+
+  if download_primary_model_asset "$asset_name" "$output_path"; then
+    note "using mirrored ${asset_name} from ${PRIMARY_RELEASE_BASE_URL%/}/latest"
+    return 0
+  fi
+
+  warn "could not download ${asset_name} from the OpenPhotos mirror; the release installer will try GitHub if models are still needed."
   return 1
 }
 
@@ -576,19 +617,32 @@ trap cleanup EXIT
 stage_release_assets_for_direct_archive() {
   local local_standard_models=""
   local local_rk3588_models=""
+  local mirrored_models=""
 
   as_root install -d -m 0755 /var/tmp/openphotos-installer
   if local_standard_models="$(find_local_file "$STANDARD_MODELS_ASSET")"; then
     as_root install -m 0644 "$local_standard_models" "/var/tmp/openphotos-installer/${STANDARD_MODELS_ASSET}"
     note "using local ${STANDARD_MODELS_ASSET} from $(dirname "$local_standard_models")"
+  elif download_primary_model_asset "$STANDARD_MODELS_ASSET" "$TMP_DIR/$STANDARD_MODELS_ASSET"; then
+    mirrored_models="$TMP_DIR/$STANDARD_MODELS_ASSET"
+    as_root install -m 0644 "$mirrored_models" "/var/tmp/openphotos-installer/${STANDARD_MODELS_ASSET}"
+    note "using mirrored ${STANDARD_MODELS_ASSET} from ${PRIMARY_RELEASE_BASE_URL%/}/latest"
   else
+    warn "could not download ${STANDARD_MODELS_ASSET} from the OpenPhotos mirror; the release installer will try GitHub if models are still needed."
     as_root rm -f "/var/tmp/openphotos-installer/${STANDARD_MODELS_ASSET}"
   fi
 
   if [[ "$ARCH" == "arm64" ]] && local_rk3588_models="$(find_local_file "$RK3588_MODELS_ASSET")"; then
     as_root install -m 0644 "$local_rk3588_models" "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}"
     note "using local ${RK3588_MODELS_ASSET} from $(dirname "$local_rk3588_models")"
+  elif [[ "$ARCH" == "arm64" && "${#WRAPPER_ARGS[@]}" -gt 0 ]] && download_primary_model_asset "$RK3588_MODELS_ASSET" "$TMP_DIR/$RK3588_MODELS_ASSET"; then
+    mirrored_models="$TMP_DIR/$RK3588_MODELS_ASSET"
+    as_root install -m 0644 "$mirrored_models" "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}"
+    note "using mirrored ${RK3588_MODELS_ASSET} from ${PRIMARY_RELEASE_BASE_URL%/}/latest"
   else
+    if [[ "$ARCH" == "arm64" && "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
+      warn "could not download ${RK3588_MODELS_ASSET} from the OpenPhotos mirror; the release installer will try GitHub if RK3588 models are still needed."
+    fi
     as_root rm -f "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}"
   fi
 
@@ -641,16 +695,119 @@ download_remote_installer_archive() {
 
 prepare_compat_tools() {
   local compat_dir="$TMP_DIR/compat-bin"
-
-  if has_command perl; then
-    return 0
-  fi
-  if ! has_command python3 && ! has_command awk; then
-    return 0
-  fi
+  local created=0
 
   mkdir -p "$compat_dir"
-  cat > "$compat_dir/perl" <<'EOF'
+
+  if ! has_command groupadd; then
+    cat > "$compat_dir/groupadd" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+
+group_name=""
+for arg in "$@"; do
+  case "$arg" in
+    --system|-r|-f|--force)
+      ;;
+    -*)
+      ;;
+    *)
+      group_name="$arg"
+      ;;
+  esac
+done
+
+[ -n "$group_name" ] || { echo "groupadd compatibility shim: missing group name" >&2; exit 2; }
+if command -v getent >/dev/null 2>&1 && getent group "$group_name" >/dev/null 2>&1; then
+  exit 0
+fi
+if [ -r /etc/group ] && grep -q "^${group_name}:" /etc/group; then
+  exit 0
+fi
+if ! command -v addgroup >/dev/null 2>&1; then
+  echo "groupadd is not available, and addgroup was not found for compatibility fallback." >&2
+  exit 127
+fi
+
+addgroup -S "$group_name" 2>/dev/null || \
+  addgroup --system "$group_name" 2>/dev/null || \
+  addgroup "$group_name"
+EOF
+    chmod 0755 "$compat_dir/groupadd"
+    created=1
+  fi
+
+  if ! has_command useradd; then
+    cat > "$compat_dir/useradd" <<'EOF'
+#!/usr/bin/env sh
+set -eu
+
+user_name=""
+group_name=""
+home_dir="/var/lib/openphotos"
+login_shell="/bin/false"
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --system|-r|--no-create-home|-M)
+      shift
+      ;;
+    --gid|-g)
+      shift
+      group_name="${1:-}"
+      shift || true
+      ;;
+    --home-dir|-d)
+      shift
+      home_dir="${1:-$home_dir}"
+      shift || true
+      ;;
+    --shell|-s)
+      shift
+      login_shell="${1:-$login_shell}"
+      shift || true
+      ;;
+    -*)
+      shift
+      ;;
+    *)
+      user_name="$1"
+      shift
+      ;;
+  esac
+done
+
+[ -n "$user_name" ] || { echo "useradd compatibility shim: missing user name" >&2; exit 2; }
+[ -n "$group_name" ] || group_name="$user_name"
+if id -u "$user_name" >/dev/null 2>&1; then
+  exit 0
+fi
+if ! command -v adduser >/dev/null 2>&1; then
+  echo "useradd is not available, and adduser was not found for compatibility fallback." >&2
+  exit 127
+fi
+
+adduser -S -D -H -h "$home_dir" -s "$login_shell" -G "$group_name" "$user_name" 2>/dev/null || \
+  adduser --system --disabled-password --disabled-login --ingroup "$group_name" --home "$home_dir" --no-create-home --shell "$login_shell" "$user_name" 2>/dev/null || \
+  adduser -D -H -h "$home_dir" -s "$login_shell" -G "$group_name" "$user_name"
+EOF
+    chmod 0755 "$compat_dir/useradd"
+    created=1
+  fi
+
+  if ! has_command usermod; then
+    cat > "$compat_dir/usermod" <<'EOF'
+#!/usr/bin/env sh
+# Optional compatibility shim. Missing supplementary group membership should not
+# block OpenPhotos installation on minimal NAS distributions.
+exit 0
+EOF
+    chmod 0755 "$compat_dir/usermod"
+    created=1
+  fi
+
+  if ! has_command perl && { has_command python3 || has_command awk; }; then
+    cat > "$compat_dir/perl" <<'EOF'
 #!/usr/bin/env sh
 set -eu
 
@@ -748,9 +905,17 @@ case "$mode" in
     ;;
 esac
 EOF
-  chmod 0755 "$compat_dir/perl"
-  export PATH="$compat_dir:$PATH"
-  note "perl not found; using metadata compatibility shim for older online installers"
+    chmod 0755 "$compat_dir/perl"
+    note "perl not found; using metadata compatibility shim for older online installers"
+    created=1
+  fi
+
+  if [[ "$created" == "1" ]]; then
+    export PATH="$compat_dir:$PATH"
+    if [[ -x "$compat_dir/groupadd" || -x "$compat_dir/useradd" ]]; then
+      note "using user/group compatibility shims for minimal NAS Linux installers"
+    fi
+  fi
 }
 
 if [[ -n "$LOCAL_INSTALLER_ARCHIVE" ]]; then
@@ -778,9 +943,11 @@ else
   fi
 fi
 chmod 0755 "$WRAPPER_PATH"
-stage_local_asset "$STANDARD_MODELS_ASSET" "$TMP_DIR" || true
+stage_model_asset_for_wrapper "$STANDARD_MODELS_ASSET" "$TMP_DIR" || true
 if [[ "$ARCH" == "arm64" ]]; then
-  stage_local_asset "$RK3588_MODELS_ASSET" "$TMP_DIR" || true
+  if ! stage_local_asset "$RK3588_MODELS_ASSET" "$TMP_DIR" && [[ "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
+    stage_model_asset_for_wrapper "$RK3588_MODELS_ASSET" "$TMP_DIR" || true
+  fi
 fi
 stage_local_tarball_assets "$TMP_DIR"
 
