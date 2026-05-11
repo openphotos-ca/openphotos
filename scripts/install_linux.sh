@@ -22,12 +22,15 @@ PRIMARY_RELEASE_BASE_URL="${OPENPHOTOS_INSTALL_PRIMARY_RELEASE_BASE_URL:-https:/
 RK3588_MODE="${OPENPHOTOS_RK3588:-auto}"
 STANDARD_MODELS_ASSET="${OPENPHOTOS_MODELS_ASSET:-openphotos_models.zip}"
 RK3588_MODELS_ASSET="${OPENPHOTOS_RK3588_MODELS_ASSET:-rk3588_models.zip}"
+RK3588_LEGACY_MODELS_ASSET="openphotos_models_rk3588.zip"
 LOCAL_ASSET_DIR="${OPENPHOTOS_INSTALL_LOCAL_ASSET_DIR:-}"
+INSTALL_TMP_PARENT="${OPENPHOTOS_INSTALL_TMPDIR:-/var/tmp}"
 DRY_RUN=0
 UNINSTALL_MODE=""
 
 CURL_FLAGS=(-fL --retry 5 --retry-delay 2 --retry-max-time 120)
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin${PATH:+:$PATH}"
+export TMPDIR="$INSTALL_TMP_PARENT"
 
 usage() {
   cat <<USAGE
@@ -55,6 +58,8 @@ Environment:
                                       Override the primary OpenPhotos mirror base URL.
   OPENPHOTOS_INSTALL_LOCAL_ASSET_DIR  Directory to scan for local installers and model ZIPs.
                                       By default the local script directory and current directory are scanned.
+  OPENPHOTOS_INSTALL_TMPDIR           Directory for large temporary installer downloads and extraction
+                                      (default: ${INSTALL_TMP_PARENT}).
   OPENPHOTOS_MODELS_ASSET             Standard model ZIP name (default: ${STANDARD_MODELS_ASSET}).
   OPENPHOTOS_RK3588_MODELS_ASSET      RK3588 model ZIP name (default: ${RK3588_MODELS_ASSET}).
   OPENPHOTOS_RK3588                   auto, 1, true, yes, 0, false, or no.
@@ -81,6 +86,13 @@ has_command() {
 require_command() {
   local cmd="$1"
   has_command "$cmd" || fail "required command not found: ${cmd}"
+}
+
+make_temp_dir() {
+  local parent="${INSTALL_TMP_PARENT%/}"
+  [[ -n "$parent" ]] || fail "temporary directory parent is empty"
+  mkdir -p "$parent" || fail "could not create temporary directory parent: $parent"
+  mktemp -d "$parent/openphotos-install.XXXXXXXXXX"
 }
 
 normalize_version() {
@@ -339,6 +351,22 @@ find_local_file() {
   return 1
 }
 
+find_local_rk3588_models_file() {
+  local source_path=""
+
+  if source_path="$(find_local_file "$RK3588_MODELS_ASSET")"; then
+    printf '%s\n' "$source_path"
+    return 0
+  fi
+
+  if [[ "$RK3588_MODELS_ASSET" != "$RK3588_LEGACY_MODELS_ASSET" ]] && source_path="$(find_local_file "$RK3588_LEGACY_MODELS_ASSET")"; then
+    printf '%s\n' "$source_path"
+    return 0
+  fi
+
+  return 1
+}
+
 stage_local_asset() {
   local asset_name="$1"
   local destination_dir="$2"
@@ -351,6 +379,18 @@ stage_local_asset() {
   fi
 
   return 1
+}
+
+duplicate_file() {
+  local source_path="$1"
+  local target_path="$2"
+  ln -f "$source_path" "$target_path" 2>/dev/null || cp "$source_path" "$target_path"
+}
+
+duplicate_staged_file() {
+  local source_path="$1"
+  local target_path="$2"
+  as_root ln -f "$source_path" "$target_path" 2>/dev/null || as_root install -m 0644 "$source_path" "$target_path"
 }
 
 primary_model_asset_url() {
@@ -391,6 +431,26 @@ stage_model_asset_for_wrapper() {
 
   warn "could not download ${asset_name} from the OpenPhotos mirror; the release installer will try GitHub if models are still needed."
   return 1
+}
+
+stage_rk3588_model_asset_for_wrapper() {
+  local destination_dir="$1"
+  local source_path=""
+  local output_path="${destination_dir%/}/${RK3588_MODELS_ASSET}"
+
+  if source_path="$(find_local_rk3588_models_file)"; then
+    cp "$source_path" "$output_path"
+    note "using local ${RK3588_MODELS_ASSET} from $(dirname "$source_path")"
+  elif download_primary_model_asset "$RK3588_MODELS_ASSET" "$output_path"; then
+    note "using mirrored ${RK3588_MODELS_ASSET} from ${PRIMARY_RELEASE_BASE_URL%/}/latest"
+  else
+    warn "could not download ${RK3588_MODELS_ASSET} from the OpenPhotos mirror; the release installer will try GitHub if RK3588 models are still needed."
+    return 1
+  fi
+
+  if [[ "$RK3588_MODELS_ASSET" != "$RK3588_LEGACY_MODELS_ASSET" ]]; then
+    duplicate_file "$output_path" "${destination_dir%/}/${RK3588_LEGACY_MODELS_ASSET}"
+  fi
 }
 
 find_unique_local_archive() {
@@ -597,14 +657,14 @@ if [[ "$DRY_RUN" == "1" ]]; then
   if local_standard_models="$(find_local_file "$STANDARD_MODELS_ASSET")"; then
     printf 'Would stage local model archive: %s\n' "$local_standard_models"
   fi
-  if [[ "$ARCH" == "arm64" ]] && local_rk3588_models="$(find_local_file "$RK3588_MODELS_ASSET")"; then
+  if [[ "$ARCH" == "arm64" ]] && local_rk3588_models="$(find_local_rk3588_models_file)"; then
     printf 'Would stage local RK3588 model archive: %s\n' "$local_rk3588_models"
   fi
   print_local_tarball_assets
   exit 0
 fi
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/openphotos-install.XXXXXXXXXX")"
+TMP_DIR="$(make_temp_dir)"
 RK3588_MARKER_CREATED=0
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -632,18 +692,27 @@ stage_release_assets_for_direct_archive() {
     as_root rm -f "/var/tmp/openphotos-installer/${STANDARD_MODELS_ASSET}"
   fi
 
-  if [[ "$ARCH" == "arm64" ]] && local_rk3588_models="$(find_local_file "$RK3588_MODELS_ASSET")"; then
+  if [[ "$ARCH" == "arm64" ]] && local_rk3588_models="$(find_local_rk3588_models_file)"; then
     as_root install -m 0644 "$local_rk3588_models" "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}"
+    if [[ "$RK3588_MODELS_ASSET" != "$RK3588_LEGACY_MODELS_ASSET" ]]; then
+      duplicate_staged_file "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}" "/var/tmp/openphotos-installer/${RK3588_LEGACY_MODELS_ASSET}"
+    fi
     note "using local ${RK3588_MODELS_ASSET} from $(dirname "$local_rk3588_models")"
   elif [[ "$ARCH" == "arm64" && "${#WRAPPER_ARGS[@]}" -gt 0 ]] && download_primary_model_asset "$RK3588_MODELS_ASSET" "$TMP_DIR/$RK3588_MODELS_ASSET"; then
     mirrored_models="$TMP_DIR/$RK3588_MODELS_ASSET"
     as_root install -m 0644 "$mirrored_models" "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}"
+    if [[ "$RK3588_MODELS_ASSET" != "$RK3588_LEGACY_MODELS_ASSET" ]]; then
+      duplicate_staged_file "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}" "/var/tmp/openphotos-installer/${RK3588_LEGACY_MODELS_ASSET}"
+    fi
     note "using mirrored ${RK3588_MODELS_ASSET} from ${PRIMARY_RELEASE_BASE_URL%/}/latest"
   else
     if [[ "$ARCH" == "arm64" && "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
       warn "could not download ${RK3588_MODELS_ASSET} from the OpenPhotos mirror; the release installer will try GitHub if RK3588 models are still needed."
     fi
     as_root rm -f "/var/tmp/openphotos-installer/${RK3588_MODELS_ASSET}"
+    if [[ "$RK3588_MODELS_ASSET" != "$RK3588_LEGACY_MODELS_ASSET" ]]; then
+      as_root rm -f "/var/tmp/openphotos-installer/${RK3588_LEGACY_MODELS_ASSET}"
+    fi
   fi
 
   if [[ "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
@@ -945,8 +1014,16 @@ fi
 chmod 0755 "$WRAPPER_PATH"
 stage_model_asset_for_wrapper "$STANDARD_MODELS_ASSET" "$TMP_DIR" || true
 if [[ "$ARCH" == "arm64" ]]; then
-  if ! stage_local_asset "$RK3588_MODELS_ASSET" "$TMP_DIR" && [[ "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
-    stage_model_asset_for_wrapper "$RK3588_MODELS_ASSET" "$TMP_DIR" || true
+  if [[ "${#WRAPPER_ARGS[@]}" -gt 0 ]]; then
+    stage_rk3588_model_asset_for_wrapper "$TMP_DIR" || true
+  else
+    if source_path="$(find_local_rk3588_models_file)"; then
+      cp "$source_path" "$TMP_DIR/$RK3588_MODELS_ASSET"
+      if [[ "$RK3588_MODELS_ASSET" != "$RK3588_LEGACY_MODELS_ASSET" ]]; then
+        duplicate_file "$TMP_DIR/$RK3588_MODELS_ASSET" "$TMP_DIR/$RK3588_LEGACY_MODELS_ASSET"
+      fi
+      note "using local ${RK3588_MODELS_ASSET} from $(dirname "$source_path")"
+    fi
   fi
 fi
 stage_local_tarball_assets "$TMP_DIR"
