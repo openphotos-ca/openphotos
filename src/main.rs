@@ -19,7 +19,7 @@ use duckdb::params;
 use std::net::SocketAddr;
 use std::sync::Arc;
 // TraceLayer removed to quiet per-request HTTP logs
-use tracing::{info, Level};
+use tracing::info;
 use tracing_subscriber::{EnvFilter, FmtSubscriber};
 use uuid::Uuid;
 
@@ -211,7 +211,6 @@ async fn main() -> Result<()> {
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&args.log_level)),
         )
-        .with_max_level(Level::TRACE)
         .finish();
 
     tracing::subscriber::set_global_default(subscriber)?;
