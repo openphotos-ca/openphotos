@@ -71,6 +71,92 @@ async fn compute_backup_id_for_path(path: &Path, user_id: &str) -> Option<String
     .flatten()
 }
 
+fn duckdb_live_motion_paths_for_content_id(
+    conn: &duckdb::Connection,
+    organization_id: i32,
+    user_id: &str,
+    content_id: &str,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT live_video_path
+         FROM photos
+         WHERE organization_id = ?
+           AND user_id = ?
+           AND COALESCE(delete_time, 0) = 0
+           AND COALESCE(locked, FALSE) = FALSE
+           AND COALESCE(is_video, FALSE) = FALSE
+           AND COALESCE(is_live_photo, FALSE) = TRUE
+           AND content_id = ?
+           AND COALESCE(live_video_path, '') <> ''
+         LIMIT 5",
+    ) else {
+        return out;
+    };
+    let Ok(mapped) = stmt.query_map(
+        duckdb::params![organization_id, user_id, content_id],
+        |row| row.get::<_, String>(0),
+    ) else {
+        return out;
+    };
+    for path in mapped.flatten() {
+        out.push(path);
+    }
+    out
+}
+
+async fn first_existing_path(paths: Vec<String>) -> Option<String> {
+    for path in paths {
+        if tokio::fs::metadata(&path).await.is_ok() {
+            return Some(path);
+        }
+    }
+    None
+}
+
+async fn existing_unlocked_live_motion_path_for_content_id(
+    state: &Arc<AppState>,
+    organization_id: i32,
+    user_id: &str,
+    content_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let content_id = content_id.trim();
+    if content_id.is_empty() {
+        return Ok(None);
+    }
+
+    if let Some(pg) = &state.pg_client {
+        let rows = pg
+            .query(
+                "SELECT live_video_path
+                 FROM photos
+                 WHERE organization_id = $1
+                   AND user_id = $2
+                   AND COALESCE(delete_time, 0) = 0
+                   AND COALESCE(locked, FALSE) = FALSE
+                   AND COALESCE(is_video, FALSE) = FALSE
+                   AND COALESCE(is_live_photo, FALSE) = TRUE
+                   AND content_id = $3
+                   AND COALESCE(live_video_path, '') <> ''
+                 LIMIT 5",
+                &[&organization_id, &user_id, &content_id],
+            )
+            .await?;
+        let paths = rows
+            .into_iter()
+            .filter_map(|row| row.try_get::<_, String>(0).ok())
+            .collect();
+        return Ok(first_existing_path(paths).await);
+    }
+
+    let data_db = state.get_user_data_database(user_id)?;
+    let paths = {
+        let conn = data_db.lock();
+        duckdb_live_motion_paths_for_content_id(&conn, organization_id, user_id, content_id)
+    };
+    Ok(first_existing_path(paths).await)
+}
+
 fn upload_metadata_value(
     metadata: Option<&HashMap<String, String>>,
     keys: &[&str],
@@ -1066,6 +1152,46 @@ pub(crate) async fn ingest_finished_upload(
         return Ok(());
     }
 
+    let incoming_ext_for_dedupe = metadata
+        .as_ref()
+        .and_then(|m| m.get("filename"))
+        .and_then(|filename| std::path::Path::new(filename).extension())
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+        .filter(|ext| !ext.is_empty())
+        .unwrap_or_else(|| _ext_from_src.clone());
+    if !replace_requested && is_video_extension(&incoming_ext_for_dedupe) {
+        if let Some(content_id) = meta_get(&metadata, &["content_id", "contentId", "content-id"]) {
+            if let Some(existing_path) = existing_unlocked_live_motion_path_for_content_id(
+                state,
+                org_id,
+                user_id,
+                &content_id,
+            )
+            .await?
+            {
+                tracing::info!(
+                    target: "upload",
+                    "[UPLOAD] skipped duplicate live motion upload user={} upload_id={} asset_id={} content_id={} existing_live_video_path={}",
+                    user_id,
+                    upload_id,
+                    asset_id,
+                    content_id,
+                    existing_path
+                );
+                cleanup_skipped_upload_artifacts(src_path).await;
+                state.record_sync_ingest(
+                    user_id,
+                    source_method.unwrap_or("unknown"),
+                    /*is_photo=*/ false,
+                    /*duplicate=*/ true,
+                    /*success=*/ true,
+                );
+                return Ok(());
+            }
+        }
+    }
+
     // Decide destination path if move_on_ingest is enabled
     let dest_path = if state.move_on_ingest {
         // Determine extension preference: from metadata filename -> from src -> fallback to 'bin'
@@ -1434,6 +1560,20 @@ pub(crate) async fn ingest_finished_upload(
             /*duplicate=*/ true,
             /*success=*/ true,
         );
+        if let Err(e) = crate::server::photo_routes::warm_heic_display_jpeg_cache(
+            state.as_ref(),
+            user_id,
+            &asset_id,
+            &dest_path,
+        ) {
+            tracing::warn!(
+                target: "upload",
+                "[DISPLAY] Failed to warm duplicate HEIC JPEG preview asset_id={} path={}: {}",
+                asset_id,
+                dest_path.display(),
+                e
+            );
+        }
         // Apply favorites if provided
         if let Some(meta) = metadata.as_ref() {
             if let Some(fav_raw) = meta.get("favorite") {
@@ -3348,7 +3488,7 @@ pub async fn uploads_ingested(
                AND COALESCE(delete_time, 0) = 0
                AND COALESCE(content_id, '') <> ''
                AND COALESCE(locked, FALSE) = FALSE
-               AND COALESCE(is_live_photo, FALSE) = FALSE
+               AND COALESCE(is_video, FALSE) = FALSE
                AND content_id IN ({})",
             placeholders.join(",")
         );
@@ -3368,7 +3508,7 @@ pub async fn uploads_ingested(
                AND COALESCE(delete_time, 0) = 0
                AND COALESCE(content_id, '') <> ''
                AND COALESCE(locked, FALSE) = FALSE
-               AND COALESCE(is_live_photo, FALSE) = FALSE
+               AND COALESCE(is_video, FALSE) = FALSE
                AND content_id IN (",
         );
         query.push_str(&vec!["?"; requested.len()].join(","));
@@ -3463,4 +3603,75 @@ pub async fn uploads_stream(
         .map(|_| Ok(Event::default().data("{\"type\":\"heartbeat\"}")));
     let stream = futures::stream::select(msg_stream, heartbeat);
     Ok(Sse::new(stream))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{duckdb_live_motion_paths_for_content_id, first_existing_path};
+    use std::fs;
+
+    fn create_guard_test_photos_table(conn: &duckdb::Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE photos (
+                organization_id INTEGER,
+                user_id TEXT,
+                content_id TEXT,
+                is_video BOOLEAN,
+                is_live_photo BOOLEAN,
+                live_video_path TEXT,
+                locked BOOLEAN,
+                delete_time INTEGER
+            );
+            "#,
+        )
+        .expect("create photos table");
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openphotos-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn live_motion_guard_finds_only_existing_unlocked_motion_path() {
+        let conn = duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        create_guard_test_photos_table(&conn);
+        let dir = unique_test_dir("live-motion-ingest-guard");
+        let existing_mov = dir.join("IMG_2000.MOV");
+        let missing_mov = dir.join("IMG_2001.MOV");
+        fs::write(&existing_mov, b"motion").expect("motion file");
+        let existing_mov_s = existing_mov.to_string_lossy().to_string();
+        let missing_mov_s = missing_mov.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO photos VALUES
+                (1, 'user-a', 'content-1', FALSE, TRUE, ?, FALSE, 0),
+                (1, 'user-a', 'content-1', FALSE, TRUE, ?, FALSE, 0),
+                (1, 'user-a', 'content-1', FALSE, TRUE, ?, TRUE, 0),
+                (1, 'user-a', 'content-2', FALSE, TRUE, ?, FALSE, 0)",
+            duckdb::params![
+                &missing_mov_s,
+                &existing_mov_s,
+                &existing_mov_s,
+                &existing_mov_s,
+            ],
+        )
+        .expect("insert rows");
+
+        let paths = duckdb_live_motion_paths_for_content_id(&conn, 1, "user-a", "content-1");
+        let found = first_existing_path(paths).await;
+
+        assert_eq!(found.as_deref(), Some(existing_mov_s.as_str()));
+        let _ = fs::remove_dir_all(dir);
+    }
 }

@@ -329,6 +329,27 @@ fn display_image_max_side_from_query(query: &str) -> u32 {
         .unwrap_or(DISPLAY_IMAGE_DEFAULT_MAX_SIDE)
 }
 
+fn is_content_type(orig_content_type: &str, expected: &str) -> bool {
+    orig_content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case(expected)
+}
+
+fn is_heic_or_heif_content_type(orig_content_type: &str) -> bool {
+    is_content_type(orig_content_type, "image/heic")
+        || is_content_type(orig_content_type, "image/heif")
+}
+
+fn display_image_max_side_for_content_type(orig_content_type: &str, query: &str) -> u32 {
+    if is_heic_or_heif_content_type(orig_content_type) {
+        return DISPLAY_IMAGE_DEFAULT_MAX_SIDE;
+    }
+    display_image_max_side_from_query(query)
+}
+
 fn should_serve_display_variant(orig_content_type: &str, is_video: bool, query: &str) -> bool {
     if is_video
         || query_has_format_param(query, "original")
@@ -336,13 +357,11 @@ fn should_serve_display_variant(orig_content_type: &str, is_video: bool, query: 
     {
         return false;
     }
-    if !orig_content_type.starts_with("image/") {
+    let content_type_lc = orig_content_type.to_ascii_lowercase();
+    if !content_type_lc.starts_with("image/") {
         return false;
     }
-    if orig_content_type.eq_ignore_ascii_case("image/heic")
-        || orig_content_type.eq_ignore_ascii_case("image/heif")
-        || orig_content_type.eq_ignore_ascii_case("image/dng")
-    {
+    if is_content_type(orig_content_type, "image/dng") {
         return false;
     }
     true
@@ -1518,17 +1537,35 @@ async fn unlocked_live_video_exists_on_disk(
     photo_path: &str,
     live_video_path: &Option<String>,
 ) -> bool {
-    // Prefer any existing cached render
     let live_mov_cache = state.live_video_mov_path_for(user_id, asset_id);
-    if tokio::fs::metadata(&live_mov_cache).await.is_ok() {
-        return true;
-    }
     let live_mp4_cache = state.live_video_path_for(user_id, asset_id);
-    if tokio::fs::metadata(&live_mp4_cache).await.is_ok() {
-        return true;
+    unlocked_live_video_exists_on_disk_paths(
+        Some(live_mov_cache.as_path()),
+        Some(live_mp4_cache.as_path()),
+        photo_path,
+        live_video_path,
+    )
+    .await
+}
+
+async fn unlocked_live_video_exists_on_disk_paths(
+    live_mov_cache: Option<&StdPath>,
+    live_mp4_cache: Option<&StdPath>,
+    photo_path: &str,
+    live_video_path: &Option<String>,
+) -> bool {
+    // Prefer any existing cached render
+    if let Some(path) = live_mov_cache {
+        if tokio::fs::metadata(path).await.is_ok() {
+            return true;
+        }
+    }
+    if let Some(path) = live_mp4_cache {
+        if tokio::fs::metadata(path).await.is_ok() {
+            return true;
+        }
     }
 
-    // Prefer DB live_video_path; else infer .mov beside original
     let mov_candidate = if let Some(p) = live_video_path.clone().filter(|s| !s.is_empty()) {
         std::path::PathBuf::from(p)
     } else {
@@ -1641,6 +1678,88 @@ fn item_already_matched(item: &ExistsItemRequest, active_matches: &HashSet<Strin
             .any(|id| active_matches.contains(id.trim()))
 }
 
+fn cloudcheck_row_from_duckdb(r: &duckdb::Row<'_>) -> duckdb::Result<CloudcheckExistsRow> {
+    Ok(CloudcheckExistsRow {
+        asset_id: r.get(0)?,
+        locked: r.get(1)?,
+        locked_orig_uploaded: r.get(2)?,
+        locked_thumb_uploaded: r.get(3)?,
+        is_live_photo: r.get(4)?,
+        live_video_path: r.get(5).ok(),
+        path: r.get(6)?,
+    })
+}
+
+fn cloudcheck_content_id_rows_duckdb(
+    conn: &Connection,
+    organization_id: i32,
+    user_id: &str,
+    content_id: &str,
+    is_video: bool,
+) -> Result<Vec<CloudcheckExistsRow>, AppError> {
+    let mut rows = Vec::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT asset_id,
+                    COALESCE(locked, FALSE),
+                    COALESCE(locked_orig_uploaded, FALSE),
+                    COALESCE(locked_thumb_uploaded, FALSE),
+                    COALESCE(is_live_photo, FALSE),
+                    live_video_path,
+                    path
+             FROM photos
+             WHERE organization_id = ? AND user_id = ?
+               AND COALESCE(delete_time, 0) = 0
+               AND content_id = ?
+               AND COALESCE(is_video, FALSE) = ?
+             LIMIT 5",
+        )
+        .map_err(|e| AppError(anyhow!(e)))?;
+    let mapped = stmt
+        .query_map(
+            duckdb::params![organization_id, user_id, content_id, is_video],
+            cloudcheck_row_from_duckdb,
+        )
+        .map_err(|e| AppError(anyhow!(e)))?;
+    for row in mapped.flatten() {
+        rows.push(row);
+    }
+    drop(stmt);
+
+    if rows.is_empty() && is_video {
+        let mut stmt = conn
+            .prepare(
+                "SELECT asset_id,
+                        COALESCE(locked, FALSE),
+                        COALESCE(locked_orig_uploaded, FALSE),
+                        COALESCE(locked_thumb_uploaded, FALSE),
+                        COALESCE(is_live_photo, FALSE),
+                        live_video_path,
+                        path
+                 FROM photos
+                 WHERE organization_id = ? AND user_id = ?
+                   AND COALESCE(delete_time, 0) = 0
+                   AND content_id = ?
+                   AND COALESCE(is_video, FALSE) = FALSE
+                   AND COALESCE(is_live_photo, FALSE) = TRUE
+                   AND COALESCE(live_video_path, '') <> ''
+                 LIMIT 5",
+            )
+            .map_err(|e| AppError(anyhow!(e)))?;
+        let mapped = stmt
+            .query_map(
+                duckdb::params![organization_id, user_id, content_id],
+                cloudcheck_row_from_duckdb,
+            )
+            .map_err(|e| AppError(anyhow!(e)))?;
+        for row in mapped.flatten() {
+            rows.push(row);
+        }
+    }
+
+    Ok(rows)
+}
+
 async fn cloudcheck_metadata_present_matches_pg(
     state: &Arc<AppState>,
     pg: &tokio_postgres::Client,
@@ -1697,6 +1816,51 @@ async fn cloudcheck_metadata_present_matches_pg(
                     path: r.get(6),
                 })
                 .collect();
+
+            if rows.is_empty() && is_video {
+                let pg_rows = pg
+                    .query(
+                        "SELECT asset_id,
+                                COALESCE(locked, FALSE),
+                                COALESCE(locked_orig_uploaded, FALSE),
+                                COALESCE(locked_thumb_uploaded, FALSE),
+                                COALESCE(is_live_photo, FALSE),
+                                live_video_path,
+                                path
+                         FROM photos
+                         WHERE organization_id = $1 AND user_id = $2
+                           AND COALESCE(delete_time, 0) = 0
+                           AND content_id = $3
+                           AND COALESCE(is_video, FALSE) = FALSE
+                           AND COALESCE(is_live_photo, FALSE) = TRUE
+                           AND COALESCE(live_video_path, '') <> ''
+                         LIMIT 5",
+                        &[&organization_id, &user_id, &content_id],
+                    )
+                    .await
+                    .map_err(|e| AppError(anyhow::anyhow!(e.to_string())))?;
+                rows = pg_rows
+                    .into_iter()
+                    .map(|r| CloudcheckExistsRow {
+                        asset_id: r.get(0),
+                        locked: r.get(1),
+                        locked_orig_uploaded: r.get(2),
+                        locked_thumb_uploaded: r.get(3),
+                        is_live_photo: r.get(4),
+                        live_video_path: r.get(5),
+                        path: r.get(6),
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    tracing::info!(
+                        target: "cloudcheck",
+                        "[CLOUDCHECK] metadata fallback matched live motion candidate content_id={} filename={:?} matches={}",
+                        content_id,
+                        item.filename,
+                        rows.len()
+                    );
+                }
+            }
         }
 
         if rows.is_empty() {
@@ -1810,41 +1974,21 @@ async fn cloudcheck_metadata_present_matches_duckdb(
             .filter(|s| !s.is_empty())
         {
             let conn = data_db.lock();
-            let mut stmt = conn
-                .prepare(
-                    "SELECT asset_id,
-                            COALESCE(locked, FALSE),
-                            COALESCE(locked_orig_uploaded, FALSE),
-                            COALESCE(locked_thumb_uploaded, FALSE),
-                            COALESCE(is_live_photo, FALSE),
-                            live_video_path,
-                            path
-                     FROM photos
-                     WHERE organization_id = ? AND user_id = ?
-                       AND COALESCE(delete_time, 0) = 0
-                       AND content_id = ?
-                       AND COALESCE(is_video, FALSE) = ?
-                     LIMIT 5",
-                )
-                .map_err(|e| AppError(anyhow!(e)))?;
-            let mapped = stmt
-                .query_map(
-                    duckdb::params![organization_id, user_id, content_id, is_video],
-                    |r| {
-                        Ok(CloudcheckExistsRow {
-                            asset_id: r.get(0)?,
-                            locked: r.get(1)?,
-                            locked_orig_uploaded: r.get(2)?,
-                            locked_thumb_uploaded: r.get(3)?,
-                            is_live_photo: r.get(4)?,
-                            live_video_path: r.get(5).ok(),
-                            path: r.get(6)?,
-                        })
-                    },
-                )
-                .map_err(|e| AppError(anyhow!(e)))?;
-            for row in mapped.flatten() {
-                rows.push(row);
+            rows = cloudcheck_content_id_rows_duckdb(
+                &conn,
+                organization_id,
+                user_id,
+                content_id,
+                is_video,
+            )?;
+            if !rows.is_empty() && is_video && rows.iter().any(|row| row.is_live_photo) {
+                tracing::info!(
+                    target: "cloudcheck",
+                    "[CLOUDCHECK] metadata fallback matched live motion candidate content_id={} filename={:?} matches={}",
+                    content_id,
+                    item.filename,
+                    rows.len()
+                );
             }
         }
 
@@ -5066,7 +5210,7 @@ pub async fn serve_image(
         });
         let wants_display_variant =
             should_serve_display_variant(&orig_content_type, is_video, query);
-        let display_max_side = display_image_max_side_from_query(query);
+        let display_max_side = display_image_max_side_for_content_type(&orig_content_type, query);
         if has_gain_map {
             tracing::info!(
                 target: "upload",
@@ -5095,6 +5239,68 @@ pub async fn serve_image(
         } else {
             orig_content_type.clone()
         };
+
+        if wants_display_variant {
+            let jpeg_path =
+                state.image_display_jpeg_path_for(&user.user_id, &asset_id, display_max_side);
+            let generated = ensure_display_jpeg_cache(&path, &jpeg_path, display_max_side)
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to generate display JPEG for {} (max_side={}): {}",
+                        asset_id,
+                        display_max_side,
+                        e
+                    )
+                })?;
+            if generated {
+                tracing::info!(
+                    target: "upload",
+                    "[DISPLAY] Generated JPEG preview for asset_id={} path={} max_side={}",
+                    asset_id,
+                    path,
+                    display_max_side
+                );
+            }
+
+            let etag = tokio::fs::metadata(&jpeg_path)
+                .await
+                .ok()
+                .and_then(|m| weak_etag_from_metadata(&m));
+            if let Some(et) = etag.as_deref() {
+                if if_none_match_allows_304(request.headers(), et) {
+                    let mut headers_map = HeaderMap::new();
+                    headers_map.insert(
+                        header::CONTENT_TYPE,
+                        axum::http::HeaderValue::from_static("image/jpeg"),
+                    );
+                    add_private_cache_headers(&mut headers_map, Some(et));
+                    if let Some(sc) = &pin_set_cookie {
+                        headers_map.insert(
+                            header::SET_COOKIE,
+                            axum::http::HeaderValue::from_str(sc).unwrap(),
+                        );
+                    }
+                    return Ok((StatusCode::NOT_MODIFIED, headers_map).into_response());
+                }
+            }
+
+            let bytes = tokio::fs::read(&jpeg_path).await.map_err(|e| {
+                anyhow::anyhow!("Failed to read display JPEG {}: {}", jpeg_path.display(), e)
+            })?;
+            let mut headers_map = HeaderMap::new();
+            headers_map.insert(
+                header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("image/jpeg"),
+            );
+            add_private_cache_headers(&mut headers_map, etag.as_deref());
+            if let Some(sc) = &pin_set_cookie {
+                headers_map.insert(
+                    header::SET_COOKIE,
+                    axum::http::HeaderValue::from_str(sc).unwrap(),
+                );
+            }
+            return Ok((headers_map, bytes).into_response());
+        }
 
         // If source is HEIC, decide whether to serve AVIF or original HEIC.
         // Preference order:
@@ -5292,67 +5498,6 @@ pub async fn serve_image(
                 return Ok((headers_map, bytes).into_response());
             }
             RawImageServeMode::OriginalBytes | RawImageServeMode::NotRaw => {}
-        }
-
-        if wants_display_variant {
-            let jpeg_path =
-                state.image_display_jpeg_path_for(&user.user_id, &asset_id, display_max_side);
-            if !jpeg_path.exists() {
-                generate_display_jpeg(&path, &jpeg_path, display_max_side).map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to generate display JPEG for {} (max_side={}): {}",
-                        asset_id,
-                        display_max_side,
-                        e
-                    )
-                })?;
-                tracing::info!(
-                    target: "upload",
-                    "[DISPLAY] Generated JPEG preview for asset_id={} path={} max_side={}",
-                    asset_id,
-                    path,
-                    display_max_side
-                );
-            }
-
-            let etag = tokio::fs::metadata(&jpeg_path)
-                .await
-                .ok()
-                .and_then(|m| weak_etag_from_metadata(&m));
-            if let Some(et) = etag.as_deref() {
-                if if_none_match_allows_304(request.headers(), et) {
-                    let mut headers_map = HeaderMap::new();
-                    headers_map.insert(
-                        header::CONTENT_TYPE,
-                        axum::http::HeaderValue::from_static("image/jpeg"),
-                    );
-                    add_private_cache_headers(&mut headers_map, Some(et));
-                    if let Some(sc) = &pin_set_cookie {
-                        headers_map.insert(
-                            header::SET_COOKIE,
-                            axum::http::HeaderValue::from_str(sc).unwrap(),
-                        );
-                    }
-                    return Ok((StatusCode::NOT_MODIFIED, headers_map).into_response());
-                }
-            }
-
-            let bytes = tokio::fs::read(&jpeg_path).await.map_err(|e| {
-                anyhow::anyhow!("Failed to read display JPEG {}: {}", jpeg_path.display(), e)
-            })?;
-            let mut headers_map = HeaderMap::new();
-            headers_map.insert(
-                header::CONTENT_TYPE,
-                axum::http::HeaderValue::from_static("image/jpeg"),
-            );
-            add_private_cache_headers(&mut headers_map, etag.as_deref());
-            if let Some(sc) = &pin_set_cookie {
-                headers_map.insert(
-                    header::SET_COOKIE,
-                    axum::http::HeaderValue::from_str(sc).unwrap(),
-                );
-            }
-            return Ok((headers_map, bytes).into_response());
         }
 
         // If this is a video, use ServeFile to support Range seeking / progressive playback.
@@ -5877,20 +6022,127 @@ fn generate_thumbnail(
     Ok(())
 }
 
+fn display_jpeg_temp_path(jpeg_path: &std::path::Path) -> std::path::PathBuf {
+    let parent = jpeg_path
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let filename = jpeg_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("display.jpg");
+    let unique = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    parent.join(format!(
+        ".{}.{}.{}.tmp",
+        filename,
+        std::process::id(),
+        unique
+    ))
+}
+
+pub(crate) fn ensure_display_jpeg_cache(
+    original_path: &str,
+    jpeg_path: &std::path::Path,
+    max_side: u32,
+) -> Result<bool, anyhow::Error> {
+    if jpeg_path.exists() {
+        return Ok(false);
+    }
+    generate_display_jpeg(original_path, jpeg_path, max_side)?;
+    Ok(true)
+}
+
+pub(crate) fn ensure_display_jpeg_cache_from_image(
+    img: &image::DynamicImage,
+    jpeg_path: &std::path::Path,
+    max_side: u32,
+) -> Result<bool, anyhow::Error> {
+    if jpeg_path.exists() {
+        return Ok(false);
+    }
+    write_display_jpeg_from_image(img, jpeg_path, max_side)?;
+    Ok(true)
+}
+
+pub(crate) fn warm_heic_display_jpeg_cache(
+    state: &AppState,
+    user_id: &str,
+    asset_id: &str,
+    image_path: &std::path::Path,
+) -> Result<bool, anyhow::Error> {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "heic" && ext != "heif" {
+        return Ok(false);
+    }
+
+    let jpeg_path = state.image_preview_jpeg_path_for(user_id, asset_id);
+    let generated = ensure_display_jpeg_cache(
+        &image_path.to_string_lossy(),
+        &jpeg_path,
+        DISPLAY_IMAGE_DEFAULT_MAX_SIDE,
+    )?;
+    if generated {
+        info!(
+            target: "upload",
+            "[DISPLAY] Warmed HEIC JPEG preview asset_id={} user={} path={} cache={}",
+            asset_id,
+            user_id,
+            image_path.display(),
+            jpeg_path.display()
+        );
+    }
+    Ok(generated)
+}
+
+pub(crate) fn warm_heic_display_jpeg_cache_from_image(
+    state: &AppState,
+    user_id: &str,
+    asset_id: &str,
+    image_path: &std::path::Path,
+    img: &image::DynamicImage,
+) -> Result<bool, anyhow::Error> {
+    let ext = image_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if ext != "heic" && ext != "heif" {
+        return Ok(false);
+    }
+
+    let jpeg_path = state.image_preview_jpeg_path_for(user_id, asset_id);
+    let generated =
+        ensure_display_jpeg_cache_from_image(img, &jpeg_path, DISPLAY_IMAGE_DEFAULT_MAX_SIDE)?;
+    if generated {
+        info!(
+            target: "upload",
+            "[DISPLAY] Warmed HEIC JPEG preview from decoded image asset_id={} user={} path={} cache={}",
+            asset_id,
+            user_id,
+            image_path.display(),
+            jpeg_path.display()
+        );
+    }
+    Ok(generated)
+}
+
 fn generate_display_jpeg(
     original_path: &str,
     jpeg_path: &std::path::Path,
     max_side: u32,
 ) -> Result<(), anyhow::Error> {
-    use std::fs;
-    use std::io::Write;
-
     if let Some(parent) = jpeg_path.parent() {
-        fs::create_dir_all(parent)?;
+        std::fs::create_dir_all(parent)?;
     }
 
     let path = std::path::Path::new(original_path);
-    let mut img = match open_image_any(path) {
+    let img = match open_image_any(path) {
         Ok(img) => img,
         Err(err)
             if crate::photos::is_raw_still_extension(
@@ -5912,8 +6164,23 @@ fn generate_display_jpeg(
         Err(err) => return Err(err),
     };
 
+    write_display_jpeg_from_image(&img, jpeg_path, max_side)
+}
+
+fn write_display_jpeg_from_image(
+    img: &image::DynamicImage,
+    jpeg_path: &std::path::Path,
+    max_side: u32,
+) -> Result<(), anyhow::Error> {
+    use std::fs;
+    use std::io::Write;
+
+    if let Some(parent) = jpeg_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
     let (w, h) = img.dimensions();
-    if w > max_side || h > max_side {
+    let rgb = if w > max_side || h > max_side {
         let (tw, th) = if w >= h {
             let nw = max_side;
             let nh = ((h as f32) * (nw as f32 / w as f32)).round() as u32;
@@ -5923,14 +6190,28 @@ fn generate_display_jpeg(
             let nw = ((w as f32) * (nh as f32 / h as f32)).round() as u32;
             (nw, nh)
         };
-        img = img.resize(tw.max(1), th.max(1), FilterType::Lanczos3);
-    }
+        img.resize(tw.max(1), th.max(1), FilterType::Lanczos3)
+            .to_rgb8()
+    } else {
+        img.to_rgb8()
+    };
 
-    let rgb = img.to_rgb8();
-    let mut f = fs::File::create(jpeg_path)?;
-    let mut encoder = JpegEncoder::new_with_quality(&mut f, 88);
-    encoder.encode(&rgb, rgb.width(), rgb.height(), image::ColorType::Rgb8)?;
-    f.flush()?;
+    let tmp_path = display_jpeg_temp_path(jpeg_path);
+    let write_result = (|| -> Result<(), anyhow::Error> {
+        let mut f = fs::File::create(&tmp_path)?;
+        let mut encoder = JpegEncoder::new_with_quality(&mut f, 88);
+        encoder.encode(&rgb, rgb.width(), rgb.height(), image::ColorType::Rgb8)?;
+        f.flush()?;
+        Ok(())
+    })();
+    if let Err(err) = write_result {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&tmp_path, jpeg_path) {
+        let _ = fs::remove_file(&tmp_path);
+        return Err(err.into());
+    }
     Ok(())
 }
 
@@ -8891,12 +9172,132 @@ pub async fn debug_photo_row(
 mod tests {
     use super::{
         cache_matches_raw_placeholder_jpeg, cache_matches_raw_placeholder_webp,
-        display_image_max_side_from_query, generate_display_jpeg, generate_thumbnail,
+        cloudcheck_content_id_rows_duckdb, display_image_max_side_for_content_type,
+        display_image_max_side_from_query, ensure_display_jpeg_cache,
+        ensure_display_jpeg_cache_from_image, generate_display_jpeg, generate_thumbnail,
         looks_like_declared_image, media_total_size_sql, query_has_format_param,
         raw_image_serve_mode, should_serve_display_variant, sniff_image_content_type,
-        RawImageServeMode,
+        unlocked_live_video_exists_on_disk_paths, RawImageServeMode,
     };
     use std::fs;
+
+    fn create_cloudcheck_test_photos_table(conn: &duckdb::Connection) {
+        conn.execute_batch(
+            r#"
+            CREATE TABLE photos (
+                organization_id INTEGER,
+                user_id TEXT,
+                asset_id TEXT,
+                path TEXT,
+                content_id TEXT,
+                is_video BOOLEAN,
+                is_live_photo BOOLEAN,
+                live_video_path TEXT,
+                locked BOOLEAN,
+                locked_orig_uploaded BOOLEAN,
+                locked_thumb_uploaded BOOLEAN,
+                delete_time INTEGER
+            );
+            "#,
+        )
+        .expect("create photos table");
+    }
+
+    fn unique_test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "openphotos-{}-{}-{}",
+            name,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    #[tokio::test]
+    async fn cloudcheck_video_metadata_matches_existing_live_motion_by_content_id() {
+        let conn = duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        create_cloudcheck_test_photos_table(&conn);
+        let dir = unique_test_dir("live-motion-cloudcheck");
+        let photo_path = dir.join("IMG_1000.HEIC");
+        let mov_path = dir.join("IMG_1000.MOV");
+        fs::write(&photo_path, b"photo").expect("photo file");
+        fs::write(&mov_path, b"motion").expect("motion file");
+        let photo_path_s = photo_path.to_string_lossy().to_string();
+        let mov_path_s = mov_path.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO photos VALUES (?, ?, ?, ?, ?, FALSE, TRUE, ?, FALSE, FALSE, FALSE, 0)",
+            duckdb::params![
+                1,
+                "user-a",
+                "still-asset",
+                &photo_path_s,
+                "content-1",
+                &mov_path_s,
+            ],
+        )
+        .expect("insert live still");
+
+        let rows =
+            cloudcheck_content_id_rows_duckdb(&conn, 1, "user-a", "content-1", true).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].asset_id, "still-asset");
+        assert!(rows[0].is_live_photo);
+        assert!(
+            unlocked_live_video_exists_on_disk_paths(
+                None,
+                None,
+                &rows[0].path,
+                &rows[0].live_video_path
+            )
+            .await
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn cloudcheck_video_metadata_rejects_live_motion_when_file_missing() {
+        let conn = duckdb::Connection::open_in_memory().expect("in-memory duckdb");
+        create_cloudcheck_test_photos_table(&conn);
+        let dir = unique_test_dir("missing-live-motion-cloudcheck");
+        let photo_path = dir.join("IMG_1001.HEIC");
+        let mov_path = dir.join("IMG_1001.MOV");
+        fs::write(&photo_path, b"photo").expect("photo file");
+        let photo_path_s = photo_path.to_string_lossy().to_string();
+        let mov_path_s = mov_path.to_string_lossy().to_string();
+        conn.execute(
+            "INSERT INTO photos VALUES (?, ?, ?, ?, ?, FALSE, TRUE, ?, FALSE, FALSE, FALSE, 0)",
+            duckdb::params![
+                1,
+                "user-a",
+                "still-asset",
+                &photo_path_s,
+                "content-1",
+                &mov_path_s,
+            ],
+        )
+        .expect("insert live still");
+
+        let rows =
+            cloudcheck_content_id_rows_duckdb(&conn, 1, "user-a", "content-1", true).unwrap();
+
+        assert_eq!(rows.len(), 1);
+        assert!(
+            !unlocked_live_video_exists_on_disk_paths(
+                None,
+                None,
+                &rows[0].path,
+                &rows[0].live_video_path
+            )
+            .await
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn media_counts_total_size_includes_active_locked_and_excludes_trash_live_motion() {
@@ -8992,7 +9393,7 @@ mod tests {
     }
 
     #[test]
-    fn display_variant_is_selected_only_for_standard_stills() {
+    fn display_variant_is_selected_for_supported_stills() {
         assert!(should_serve_display_variant(
             "image/jpeg",
             false,
@@ -9013,16 +9414,37 @@ mod tests {
             false,
             "format=original&format=display"
         ));
-        assert!(!should_serve_display_variant(
+        assert!(should_serve_display_variant(
             "image/heic",
             false,
             "format=display"
+        ));
+        assert!(should_serve_display_variant(
+            "image/heif",
+            false,
+            "format=display&max_side=1024"
         ));
         assert!(!should_serve_display_variant(
             "image/dng",
             false,
             "format=display"
         ));
+    }
+
+    #[test]
+    fn heic_display_variant_uses_single_preview_size() {
+        assert_eq!(
+            display_image_max_side_for_content_type("image/heic", "format=display&max_side=512"),
+            2560
+        );
+        assert_eq!(
+            display_image_max_side_for_content_type("image/heif", "format=display&max_side=1440"),
+            2560
+        );
+        assert_eq!(
+            display_image_max_side_for_content_type("image/jpeg", "format=display&max_side=1440"),
+            1440
+        );
     }
 
     #[test]
@@ -9045,6 +9467,98 @@ mod tests {
             display_image_max_side_from_query("format=display&max_side=abc"),
             2560
         );
+    }
+
+    #[test]
+    fn ensure_display_jpeg_cache_creates_and_skips_existing_file() {
+        let base = std::env::temp_dir().join(format!(
+            "openphotos-display-cache-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let source_path = base.join("source.jpg");
+        let jpeg_path = base.join("display.jpg");
+
+        let write_source = |path: &std::path::Path, color: [u8; 3]| {
+            let img = image::RgbImage::from_pixel(32, 24, image::Rgb(color));
+            let mut bytes = Vec::new();
+            let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, 90);
+            encoder
+                .encode(&img, img.width(), img.height(), image::ColorType::Rgb8)
+                .expect("encode source jpeg");
+            fs::write(path, bytes).expect("write source jpeg");
+        };
+        write_source(&source_path, [255, 0, 0]);
+
+        assert!(ensure_display_jpeg_cache(
+            source_path.to_str().expect("utf8 source path"),
+            &jpeg_path,
+            2560
+        )
+        .expect("create display jpeg"));
+        let first_bytes = fs::read(&jpeg_path).expect("read display jpeg");
+        assert!(first_bytes.len() > 4);
+        assert_eq!(first_bytes[0], 0xFF);
+        assert_eq!(first_bytes[1], 0xD8);
+
+        write_source(&source_path, [0, 255, 0]);
+        assert!(!ensure_display_jpeg_cache(
+            source_path.to_str().expect("utf8 source path"),
+            &jpeg_path,
+            2560
+        )
+        .expect("skip existing display jpeg"));
+        let second_bytes = fs::read(&jpeg_path).expect("read display jpeg again");
+        assert_eq!(first_bytes, second_bytes);
+
+        let _ = fs::remove_file(&source_path);
+        let _ = fs::remove_file(&jpeg_path);
+        let _ = fs::remove_dir(&base);
+    }
+
+    #[test]
+    fn ensure_display_jpeg_cache_from_image_creates_and_skips_existing_file() {
+        let base = std::env::temp_dir().join(format!(
+            "openphotos-display-cache-from-image-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("unix time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&base).expect("create temp dir");
+        let jpeg_path = base.join("display.jpg");
+        let first = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            64,
+            32,
+            image::Rgb([255, 0, 0]),
+        ));
+        let second = image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            64,
+            32,
+            image::Rgb([0, 255, 0]),
+        ));
+
+        assert!(ensure_display_jpeg_cache_from_image(&first, &jpeg_path, 32)
+            .expect("create display jpeg"));
+        let first_bytes = fs::read(&jpeg_path).expect("read display jpeg");
+        assert!(first_bytes.len() > 4);
+        assert_eq!(first_bytes[0], 0xFF);
+        assert_eq!(first_bytes[1], 0xD8);
+
+        assert!(
+            !ensure_display_jpeg_cache_from_image(&second, &jpeg_path, 32)
+                .expect("skip existing display jpeg")
+        );
+        let second_bytes = fs::read(&jpeg_path).expect("read display jpeg again");
+        assert_eq!(first_bytes, second_bytes);
+
+        let _ = fs::remove_file(&jpeg_path);
+        let _ = fs::remove_dir(&base);
     }
 
     #[test]

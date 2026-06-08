@@ -2591,6 +2591,8 @@ pub(crate) async fn index_single_photo_for_user(
                 "UPDATE photos SET last_indexed = ?, filename = COALESCE(filename, ?) WHERE asset_id = ?",
                 duckdb::params![now, image_path.file_name().unwrap_or_default().to_string_lossy().to_string(), aid],
             );
+            drop(conn);
+            warm_heic_display_jpeg_for_user(state, user_id, aid, image_path);
             return Ok(());
         }
     }
@@ -2640,6 +2642,9 @@ pub(crate) async fn index_single_photo_for_user(
                 height_i32 = h as i32;
                 tracing::info!("[REINDEX] Decoded image {}x{} at {:?}", w, h, image_path);
 
+                warm_heic_display_jpeg_for_user_from_image(
+                    state, user_id, &asset_id, image_path, &img,
+                );
                 if content_changed {
                     // NOTE: Do NOT persist full image bytes into `smart_search.image_data`.
                     // Thumbnails/previews are served from `/api/thumbnails/:asset_id` and
@@ -2669,6 +2674,9 @@ pub(crate) async fn index_single_photo_for_user(
                                 w,
                                 h,
                                 image_path.display()
+                            );
+                            warm_heic_display_jpeg_for_user_from_image(
+                                state, user_id, &asset_id, image_path, &img,
                             );
                             if content_changed {
                                 upsert_visual_embedding_for_image(
@@ -2715,6 +2723,9 @@ pub(crate) async fn index_single_photo_for_user(
                         w,
                         h,
                         image_path.display()
+                    );
+                    warm_heic_display_jpeg_for_user_from_image(
+                        state, user_id, &asset_id, image_path, &img,
                     );
                     if content_changed {
                         upsert_visual_embedding_for_image(
@@ -3022,6 +3033,7 @@ pub(crate) async fn index_single_photo_for_user(
                 e
             );
         }
+        warm_heic_display_jpeg_for_user(state, user_id, &asset_id, image_path);
         // Face detection (PG only; no DuckDB usage)
         if state.face_service.is_enabled() {
             let settings = load_face_settings(state, user_id);
@@ -3206,6 +3218,7 @@ pub(crate) async fn index_single_photo_for_user(
             e
         );
     }
+    warm_heic_display_jpeg_for_user(state, user_id, &asset_id, image_path);
 
     // Incremental face detection + assignment (best-effort)
     if state.face_service.is_enabled() {
@@ -4524,6 +4537,52 @@ fn ensure_thumbnail_for_user(
     let webp_data = enc.encode(80.0);
     std::fs::write(thumb_path, &*webp_data)?;
     Ok(())
+}
+
+fn warm_heic_display_jpeg_for_user(
+    state: &Arc<AppState>,
+    user_id: &str,
+    asset_id: &str,
+    image_path: &std::path::Path,
+) {
+    if let Err(e) = crate::server::photo_routes::warm_heic_display_jpeg_cache(
+        state.as_ref(),
+        user_id,
+        asset_id,
+        image_path,
+    ) {
+        tracing::warn!(
+            target: "upload",
+            "[DISPLAY] Failed to warm HEIC JPEG preview asset_id={} path={}: {}",
+            asset_id,
+            image_path.display(),
+            e
+        );
+    }
+}
+
+fn warm_heic_display_jpeg_for_user_from_image(
+    state: &Arc<AppState>,
+    user_id: &str,
+    asset_id: &str,
+    image_path: &std::path::Path,
+    img: &image::DynamicImage,
+) {
+    if let Err(e) = crate::server::photo_routes::warm_heic_display_jpeg_cache_from_image(
+        state.as_ref(),
+        user_id,
+        asset_id,
+        image_path,
+        img,
+    ) {
+        tracing::warn!(
+            target: "upload",
+            "[DISPLAY] Failed to warm HEIC JPEG preview from decoded image asset_id={} path={}: {}",
+            asset_id,
+            image_path.display(),
+            e
+        );
+    }
 }
 
 // Helper function to calculate perceptual hash
