@@ -1244,6 +1244,7 @@ impl MultiTenantDatabase {
                 live_video_path TEXT,
                 duration_ms INTEGER DEFAULT 0,
                 delete_time INTEGER NOT NULL DEFAULT 0,
+                delete_origin TEXT,
                 is_screenshot INTEGER DEFAULT 0,
                 camera_make TEXT,
                 camera_model TEXT,
@@ -1296,6 +1297,7 @@ impl MultiTenantDatabase {
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS ocr_text TEXT;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS search_indexed_at INTEGER;
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS delete_time INTEGER DEFAULT 0;
+            ALTER TABLE photos ADD COLUMN IF NOT EXISTS delete_origin TEXT;
             -- Ratings: optional 0..5 (NULL = unrated)
             ALTER TABLE photos ADD COLUMN IF NOT EXISTS rating SMALLINT;
             CREATE TABLE IF NOT EXISTS deleted_upload_tombstones (

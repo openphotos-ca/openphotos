@@ -4,6 +4,7 @@ pub mod crypto_envelope;
 pub mod deleted_upload_tombstones;
 pub mod demo_policy;
 pub mod face_handlers;
+pub mod folder_watcher;
 pub mod handlers;
 pub mod logging;
 pub mod photo_handlers;

@@ -274,6 +274,7 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
             live_video_path TEXT,
             duration_ms BIGINT DEFAULT 0,
             delete_time BIGINT NOT NULL DEFAULT 0,
+            delete_origin TEXT,
             is_screenshot INTEGER DEFAULT 0,
             camera_make TEXT,
             camera_model TEXT,
@@ -313,6 +314,11 @@ pub async fn init_postgres_schema(cfg: &PgConfig) -> Result<()> {
     try_exec(
         &client,
         "ALTER TABLE photos ADD COLUMN IF NOT EXISTS locked_thumb_uploaded BOOLEAN DEFAULT FALSE;",
+    )
+    .await;
+    try_exec(
+        &client,
+        "ALTER TABLE photos ADD COLUMN IF NOT EXISTS delete_origin TEXT;",
     )
     .await;
     exec(&client, r#"CREATE UNIQUE INDEX IF NOT EXISTS idx_photos_org_asset ON photos(organization_id, asset_id);"#).await?; // supports ON CONFLICT for legacy DBs

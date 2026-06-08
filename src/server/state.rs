@@ -45,6 +45,8 @@ pub struct AppState {
         Arc<parking_lot::RwLock<HashMap<String, std::sync::Arc<std::sync::atomic::AtomicBool>>>>,
     // Map user_id -> active job_id (only one active at a time per user)
     pub active_job_for_user: Arc<parking_lot::RwLock<HashMap<String, String>>>,
+    // Broadcast used to ask the indexed-folder watcher to reload user folder settings.
+    pub folder_watch_reload_tx: broadcast::Sender<()>,
     // pHash configuration and per-user similar indexes (banding)
     pub phash_t_max: u8,
     pub similar_indexes: Arc<
@@ -534,6 +536,7 @@ impl AppState {
             reindex_job_owners: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             reindex_cancel_flags: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             active_job_for_user: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            folder_watch_reload_tx: broadcast::channel(16).0,
             phash_t_max,
             similar_indexes: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             video_similarity_mode,
@@ -1213,6 +1216,14 @@ impl AppState {
         job_id: &str,
     ) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
         self.reindex_cancel_flags.read().get(job_id).cloned()
+    }
+
+    pub fn subscribe_folder_watch_reloads(&self) -> broadcast::Receiver<()> {
+        self.folder_watch_reload_tx.subscribe()
+    }
+
+    pub fn request_folder_watch_reload(&self) {
+        let _ = self.folder_watch_reload_tx.send(());
     }
 }
 

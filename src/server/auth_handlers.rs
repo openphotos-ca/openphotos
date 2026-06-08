@@ -1086,6 +1086,7 @@ pub async fn update_user_folders(
             ],
         )?;
     }
+    state.request_folder_watch_reload();
 
     // Trigger indexing for the updated folders (DuckDB mode only; skip in PG mode)
     if state.pg_client.is_some() {
@@ -1578,10 +1579,31 @@ pub async fn update_trash_settings(
 }
 
 // User-specific indexing function
-#[derive(Debug, Clone)]
-struct AlbumIndexOptions {
-    album_parent_id: Option<i32>,
-    preserve_tree_path: bool,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AlbumIndexOptions {
+    pub(crate) album_parent_id: Option<i32>,
+    pub(crate) preserve_tree_path: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FolderIndexMediaKind {
+    Photo,
+    Video,
+}
+
+pub(crate) fn folder_index_media_kind(path: &std::path::Path) -> Option<FolderIndexMediaKind> {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "webp" | "bmp" | "tiff" | "avif" | "heic" | "heif" => {
+            Some(FolderIndexMediaKind::Photo)
+        }
+        "mp4" | "mov" | "m4v" | "webm" | "mkv" | "avi" => Some(FolderIndexMediaKind::Video),
+        _ => None,
+    }
 }
 
 async fn index_user_folders(
@@ -1704,6 +1726,206 @@ async fn index_user_folders(
         avg_video_ms
     );
     Ok(())
+}
+
+pub(crate) async fn index_watched_path_for_user(
+    state: &Arc<AppState>,
+    user_id: &str,
+    root: &std::path::Path,
+    path: &std::path::Path,
+    album_opts: AlbumIndexOptions,
+) -> Result<usize, anyhow::Error> {
+    if should_ignore_ingest_path(path) {
+        return Ok(0);
+    }
+
+    let data_db = if state.pg_client.is_some() {
+        let conn = duckdb::Connection::open_in_memory()
+            .map_err(|e| anyhow::anyhow!(format!("open_in_memory: {}", e)))?;
+        std::sync::Arc::new(parking_lot::Mutex::new(conn))
+    } else {
+        state.get_user_data_database(user_id)?
+    };
+    let embedding_store = state.create_user_embedding_store(user_id)?;
+    let timing = std::sync::Arc::new(IndexTimingStats::default());
+    let processed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let total = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let cancel_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let checkpoint_throttle = std::sync::Arc::new(std::sync::Mutex::new(
+        ReindexCheckpointThrottle::new(std::time::Duration::from_secs(60)),
+    ));
+
+    if path.is_dir() {
+        let total_files = count_image_files(&path.to_string_lossy())?;
+        total.store(total_files, std::sync::atomic::Ordering::Relaxed);
+        let indexed = index_folder_recursively(
+            state.clone(),
+            data_db.clone(),
+            embedding_store,
+            path.to_string_lossy().to_string(),
+            root.to_string_lossy().to_string(),
+            user_id.to_string(),
+            timing,
+            None,
+            processed,
+            total,
+            cancel_flag,
+            album_opts,
+            checkpoint_throttle,
+        )
+        .await?;
+        let conn = data_db.lock();
+        let _ = conn.execute("CHECKPOINT;", []);
+        return Ok(indexed);
+    }
+
+    if !path.is_file() {
+        return Ok(0);
+    }
+
+    let Some(kind) = folder_index_media_kind(path) else {
+        return Ok(0);
+    };
+
+    let t0 = std::time::Instant::now();
+    let result = match kind {
+        FolderIndexMediaKind::Photo => {
+            index_single_photo_for_user(state, &data_db, &embedding_store, path, user_id, None)
+                .await
+        }
+        FolderIndexMediaKind::Video => {
+            index_video_for_user(state, &data_db, &embedding_store, path, user_id, None).await
+        }
+    };
+
+    if let Err(e) = result {
+        if let Some(skip) = e.downcast_ref::<SkipIngestError>() {
+            tracing::info!(
+                "[FOLDER_WATCH] Skipping {}: {}",
+                path.display(),
+                skip.reason
+            );
+            return Ok(0);
+        }
+        return Err(e);
+    }
+
+    let elapsed_us = t0.elapsed().as_micros() as u64;
+    match kind {
+        FolderIndexMediaKind::Photo => {
+            timing.photo_us.fetch_add(elapsed_us, Ordering::Relaxed);
+            timing.photos_count.fetch_add(1, Ordering::Relaxed);
+        }
+        FolderIndexMediaKind::Video => {
+            timing.video_us.fetch_add(elapsed_us, Ordering::Relaxed);
+            timing.videos_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    if let Err(e) = restore_folder_watch_deleted_path(state, &data_db, user_id, path).await {
+        tracing::warn!(
+            "[FOLDER_WATCH] restore failed for {}: {}",
+            path.display(),
+            e
+        );
+    }
+    if let Err(e) = maybe_assign_to_album(
+        state,
+        &data_db,
+        user_id,
+        path,
+        &root.to_string_lossy(),
+        &album_opts,
+    )
+    .await
+    {
+        tracing::warn!(
+            "[FOLDER_WATCH] album assignment failed for {}: {}",
+            path.display(),
+            e
+        );
+    }
+    let conn = data_db.lock();
+    let _ = conn.execute("CHECKPOINT;", []);
+    Ok(1)
+}
+
+async fn restore_folder_watch_deleted_path(
+    state: &Arc<AppState>,
+    data_db: &crate::database::multi_tenant::DbPool,
+    user_id: &str,
+    file_path: &std::path::Path,
+) -> Result<usize, anyhow::Error> {
+    let path = file_path.to_string_lossy().to_string();
+    let org_id = state.org_id_for_user(user_id);
+
+    let asset_ids: Vec<String> = if let Some(pg) = &state.pg_client {
+        let rows = pg
+            .query(
+                "SELECT asset_id FROM photos
+                 WHERE organization_id=$1 AND user_id=$2 AND path=$3
+                   AND COALESCE(delete_time,0)>0
+                   AND COALESCE(delete_origin,'')='folder_watch'",
+                &[&org_id, &user_id, &path],
+            )
+            .await?;
+        let ids: Vec<String> = rows.into_iter().map(|r| r.get::<_, String>(0)).collect();
+        if !ids.is_empty() {
+            pg.execute(
+                "UPDATE photos
+                 SET delete_time=0, delete_origin=NULL, search_indexed_at=NULL
+                 WHERE organization_id=$1 AND user_id=$2 AND path=$3
+                   AND COALESCE(delete_time,0)>0
+                   AND COALESCE(delete_origin,'')='folder_watch'",
+                &[&org_id, &user_id, &path],
+            )
+            .await?;
+        }
+        ids
+    } else {
+        let ids = {
+            let conn = data_db.lock();
+            let mut ids = Vec::new();
+            if let Ok(mut stmt) = conn.prepare(
+                "SELECT asset_id FROM photos
+                 WHERE organization_id = ? AND user_id = ? AND path = ?
+                   AND COALESCE(delete_time,0) > 0
+                   AND COALESCE(delete_origin,'') = 'folder_watch'",
+            ) {
+                if let Ok(rows) = stmt.query_map(duckdb::params![org_id, user_id, &path], |row| {
+                    row.get::<_, String>(0)
+                }) {
+                    for row in rows.flatten() {
+                        ids.push(row);
+                    }
+                }
+            }
+            ids
+        };
+        if !ids.is_empty() {
+            let conn = data_db.lock();
+            conn.execute(
+                "UPDATE photos
+                 SET delete_time = 0, delete_origin = NULL, search_indexed_at = NULL
+                 WHERE organization_id = ? AND user_id = ? AND path = ?
+                   AND COALESCE(delete_time,0) > 0
+                   AND COALESCE(delete_origin,'') = 'folder_watch'",
+                duckdb::params![org_id, user_id, &path],
+            )?;
+        }
+        ids
+    };
+
+    for asset_id in &asset_ids {
+        if let Err(e) = crate::server::text_search::reindex_single_asset(state, user_id, asset_id) {
+            tracing::warn!(
+                "[FOLDER_WATCH] text reindex after restore failed for {}: {}",
+                asset_id,
+                e
+            );
+        }
+    }
+    Ok(asset_ids.len())
 }
 
 /// Coarse checkpoint throttle used during long-running reindex jobs.
@@ -1892,6 +2114,17 @@ fn index_folder_recursively(
                                 if indexed_count % 100 == 0 {
                                     tracing::info!("Indexed {} photos so far...", indexed_count);
                                 }
+                                if let Err(e) = restore_folder_watch_deleted_path(
+                                    &state, &data_db, &user_id, &path,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "[REINDEX] folder-watch restore failed for {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
                                 // Album assignment for still images
                                 if let Err(e) = maybe_assign_to_album(
                                     &state,
@@ -1972,6 +2205,17 @@ fn index_folder_recursively(
                                     let conn_ck = data_db.lock();
                                     let _ = conn_ck.execute("CHECKPOINT;", []);
                                 }
+                                if let Err(e) = restore_folder_watch_deleted_path(
+                                    &state, &data_db, &user_id, &path,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "[REINDEX] folder-watch restore failed for {}: {}",
+                                        path.display(),
+                                        e
+                                    );
+                                }
                                 // Album assignment for HEIC
                                 if let Err(e) = maybe_assign_to_album(
                                     &state,
@@ -2051,6 +2295,17 @@ fn index_folder_recursively(
                                 if do_checkpoint {
                                     let conn_ck = data_db.lock();
                                     let _ = conn_ck.execute("CHECKPOINT;", []);
+                                }
+                                if let Err(e) = restore_folder_watch_deleted_path(
+                                    &state, &data_db, &user_id, &path,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(
+                                        "[REINDEX] folder-watch restore failed for {}: {}",
+                                        path.display(),
+                                        e
+                                    );
                                 }
                                 // Album assignment for videos
                                 if let Err(e) = maybe_assign_to_album(

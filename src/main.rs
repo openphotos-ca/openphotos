@@ -351,6 +351,8 @@ async fn main() -> Result<()> {
         info!("[DEMO] demo mode disabled");
     }
 
+    crate::server::folder_watcher::spawn_folder_watcher(Arc::clone(&state));
+
     // Background text-search incremental sync for all users (lightweight loop)
     {
         let state_sync = Arc::clone(&state);
