@@ -261,7 +261,7 @@ public class LocalPhotosFragment extends Fragment {
 
         vm.error().observe(getViewLifecycleOwner(), err -> {
             if (err == null || err.isEmpty()) return;
-            empty.setText(err);
+            setDynamicText(empty, AndroidI18n.t(err));
             empty.setVisibility(View.VISIBLE);
         });
 
@@ -291,9 +291,9 @@ public class LocalPhotosFragment extends Fragment {
 
         vm.counts().observe(getViewLifecycleOwner(), counts -> {
             if (counts == null) return;
-            chipAll.setText(AndroidI18n.t("All") + " " + counts.all);
-            chipPhotos.setText(AndroidI18n.t("Photos") + " " + counts.photos);
-            chipVideos.setText(AndroidI18n.t("Videos") + " " + counts.videos);
+            setDynamicText(chipAll, AndroidI18n.t("All") + " " + counts.all);
+            setDynamicText(chipPhotos, AndroidI18n.t("Photos") + " " + counts.photos);
+            setDynamicText(chipVideos, AndroidI18n.t("Videos") + " " + counts.videos);
         });
 
         vm.availableFolders().observe(getViewLifecycleOwner(), folders -> {
@@ -313,7 +313,7 @@ public class LocalPhotosFragment extends Fragment {
         vm.selectedCount().observe(getViewLifecycleOwner(), count -> {
             int n = count == null ? 0 : count;
             btnActions.setEnabled(n > 0 || vm.isSelectionModeValue());
-            btnActions.setText(n > 0 ? (AndroidI18n.t("Actions") + " (" + n + ")") : AndroidI18n.t("Actions"));
+            setDynamicText(btnActions, n > 0 ? (AndroidI18n.t("Actions") + " (" + n + ")") : AndroidI18n.t("Actions"));
             refreshSelectionVisuals();
         });
 
@@ -328,13 +328,13 @@ public class LocalPhotosFragment extends Fragment {
             boolean on = Boolean.TRUE.equals(running);
             cloudSmallProgress.setVisibility(on ? View.VISIBLE : View.GONE);
             cloudProgressText.setVisibility(on ? View.VISIBLE : View.GONE);
-            if (!on) cloudProgressText.setText("");
+            if (!on) setDynamicText(cloudProgressText, "");
         });
 
         vm.cloudProgress().observe(getViewLifecycleOwner(), p -> {
             if (p == null) return;
             if (Boolean.TRUE.equals(vm.cloudRunning().getValue())) {
-                cloudProgressText.setText(p.processed + "/" + p.total);
+                setDynamicText(cloudProgressText, p.processed + "/" + p.total);
             }
         });
 
@@ -939,8 +939,13 @@ public class LocalPhotosFragment extends Fragment {
         empty.setVisibility(isEmpty ? View.VISIBLE : View.GONE);
         if (isEmpty) {
             String err = vm.error().getValue();
-            empty.setText((err == null || err.isEmpty()) ? AndroidI18n.t("No photos") : AndroidI18n.t(err));
+            setDynamicText(empty, (err == null || err.isEmpty()) ? AndroidI18n.t("No photos") : AndroidI18n.t(err));
         }
+    }
+
+    private void setDynamicText(@NonNull TextView view, @NonNull String text) {
+        view.setTag(R.id.tag_i18n_text_source, text);
+        view.setText(text);
     }
 
     private boolean hasMediaRead() {
