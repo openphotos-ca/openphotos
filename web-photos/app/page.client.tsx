@@ -272,6 +272,7 @@ export default function HomePage() {
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
   const [isPanning, setIsPanning] = useState(false);
+  const [isPinching, setIsPinching] = useState(false);
   const panStart = useRef<{ x: number; y: number } | null>(null);
   const touchSwipeStart = useRef<{ x: number; time: number } | null>(null);
   const pinchStart = useRef<{ dist: number; center: { x: number; y: number }; zoom: number } | null>(null);
@@ -1423,12 +1424,36 @@ export default function HomePage() {
   // Reset zoom when closing viewer
   useEffect(() => {
     if (viewerIndex === null) {
-      setZoom(1); setOffset({ x: 0, y: 0 });
+      setZoom(1);
+      setOffset({ x: 0, y: 0 });
+      setIsPanning(false);
+      setIsPinching(false);
+      panStart.current = null;
+      pinchStart.current = null;
+      touchSwipeStart.current = null;
     }
   }, [viewerIndex]);
 
   // Helpers
   const clamp = (v: number, min: number, max: number) => Math.max(min, Math.min(max, v));
+
+  const toggleZoomAtPoint = useCallback((clientX: number, clientY: number, rect: DOMRect) => {
+    const targetZoom = zoom > 1 ? 1 : 2;
+    if (targetZoom === 1) {
+      setOffset({ x: 0, y: 0 });
+      setZoom(1);
+      return;
+    }
+
+    const anchorX = clientX - rect.left - rect.width / 2;
+    const anchorY = clientY - rect.top - rect.height / 2;
+    const scale = targetZoom / zoom;
+    setOffset(prev => ({
+      x: (1 - scale) * anchorX + scale * prev.x,
+      y: (1 - scale) * anchorY + scale * prev.y,
+    }));
+    setZoom(targetZoom);
+  }, [zoom]);
 
   // Wheel zoom (desktop/trackpad)
   const onWheelZoom = useCallback((e: React.WheelEvent) => {
@@ -1543,6 +1568,9 @@ export default function HomePage() {
   const onTouchStart = useCallback((e: React.TouchEvent) => {
     if (e.touches.length === 2) {
       pinchStart.current = { dist: getTouchDist(e.touches), center: getTouchCenter(e.touches), zoom };
+      touchSwipeStart.current = null;
+      lastTapRef.current = null;
+      setIsPinching(true);
     } else if (e.touches.length === 1) {
       if (zoom > 1) {
         panStart.current = { x: e.touches[0].clientX - offset.x, y: e.touches[0].clientY - offset.y };
@@ -1553,17 +1581,8 @@ export default function HomePage() {
         const y = e.touches[0].clientY;
         // Double-tap toggle zoom
         if (lastTapRef.current && (now - lastTapRef.current.time) < 300 && Math.hypot(x - lastTapRef.current.x, y - lastTapRef.current.y) < 25) {
-            const targetZoom = zoom > 1 ? 1 : 2;
             const rect = viewerContainerRef.current?.getBoundingClientRect();
-            if (rect) {
-              const px = x - rect.left;
-              const py = y - rect.top;
-              setOffset(prev => {
-                const s = targetZoom / zoom;
-                return { x: (1 - s) * px + s * prev.x, y: (1 - s) * py + s * prev.y };
-              });
-            }
-            setZoom(targetZoom);
+            if (rect) toggleZoomAtPoint(x, y, rect);
             lastTapRef.current = null;
         } else {
             lastTapRef.current = { x, y, time: now };
@@ -1571,13 +1590,14 @@ export default function HomePage() {
         }
       }
     }
-  }, [zoom, offset.x, offset.y]);
+  }, [zoom, offset.x, offset.y, toggleZoomAtPoint]);
 
   const onTouchMove = useCallback((e: React.TouchEvent) => {
-    if (e.touches.length === 2 && pinchStart.current) {
+    const pinch = pinchStart.current;
+    if (e.touches.length === 2 && pinch) {
       // Do not call preventDefault on touchmove; instead rely on CSS touch-action.
-      const ratio = getTouchDist(e.touches) / pinchStart.current.dist;
-      setZoom((z) => clamp(pinchStart.current!.zoom * ratio, 1, 5));
+      const ratio = getTouchDist(e.touches) / pinch.dist;
+      setZoom(clamp(pinch.zoom * ratio, 1, 5));
     } else if (e.touches.length === 1 && isPanning && panStart.current) {
       // Do not call preventDefault on touchmove; instead rely on CSS touch-action.
       setOffset({ x: e.touches[0].clientX - panStart.current.x, y: e.touches[0].clientY - panStart.current.y });
@@ -1587,6 +1607,7 @@ export default function HomePage() {
   const onTouchEnd = useCallback((e: React.TouchEvent) => {
     if (pinchStart.current && e.touches.length < 2) {
       pinchStart.current = null;
+      setIsPinching(false);
     }
     if (isPanning && e.touches.length === 0) {
       setIsPanning(false);
@@ -1607,6 +1628,14 @@ export default function HomePage() {
       }
     }
   }, [zoom, displayPhotos.length]);
+
+  const onTouchCancel = useCallback(() => {
+    pinchStart.current = null;
+    panStart.current = null;
+    touchSwipeStart.current = null;
+    setIsPinching(false);
+    setIsPanning(false);
+  }, []);
 
   const handlePhotoSelect = useCallback((assetId: string, selected: boolean) => {
     setSelectedPhotos(prev => 
@@ -2135,7 +2164,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
         {viewerPhoto && (
           <>
           <div className="fullscreen-viewer" onClick={closeViewer}
-               onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd}>
+               onTouchStart={onTouchStart} onTouchMove={onTouchMove} onTouchEnd={onTouchEnd} onTouchCancel={onTouchCancel}>
             {/* Left arrow */}
             {viewerIndex !== null && viewerIndex > 0 && (
               <button
@@ -2224,14 +2253,7 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
                  onDoubleClick={(e) => {
                    e.stopPropagation();
                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
-                   const px = e.clientX - rect.left;
-                   const py = e.clientY - rect.top;
-                   const targetZoom = zoom > 1 ? 1 : 2;
-                   setOffset(prev => {
-                     const s = targetZoom / zoom;
-                     return { x: (1 - s) * px + s * prev.x, y: (1 - s) * py + s * prev.y };
-                   });
-                   setZoom(targetZoom);
+                   toggleZoomAtPoint(e.clientX, e.clientY, rect);
                  }}
                  style={{
                    cursor: zoom > 1 ? (isPanning ? 'grabbing' : 'grab') : 'default',
@@ -2298,7 +2320,14 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
                     original: viewerDisplayUrl,
                   } : undefined}
                   className="fullscreen-image"
-                  style={{ transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})`, transition: isPanning ? 'none' : 'transform 0.05s linear' }}
+                  style={{
+                    transform: `translate3d(${offset.x}px, ${offset.y}px, 0) scale(${zoom})`,
+                    transformOrigin: 'center center',
+                    transition: (isPanning || isPinching) ? 'none' : 'transform 0.05s linear',
+                    willChange: 'transform',
+                    backfaceVisibility: 'hidden',
+                    WebkitBackfaceVisibility: 'hidden',
+                  }}
                 />
               )}
               {viewerPhoto.is_live_photo && !(forcedIsVideo ?? viewerPhoto.is_video) && (
