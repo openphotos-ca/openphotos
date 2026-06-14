@@ -251,7 +251,7 @@ function StarRatingOverlay({ assetId, initialRating, interactive }: { assetId: s
   const canInteract = !!interactive;
   const visible = canInteract || ((current ?? 0) > 0);
   return (
-    <div className={`absolute bottom-0 left-0 right-0 p-1 ${canInteract ? 'bg-black/40' : 'bg-transparent'} z-50 ${canInteract ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default'}`} title={assetId} onDoubleClick={(e)=>{ if (!canInteract) return; e.stopPropagation(); onDouble(); }}>
+    <div className={`absolute bottom-0 left-0 right-0 p-1 ${canInteract ? 'bg-black/40' : 'bg-transparent'} z-10 ${canInteract ? 'pointer-events-auto cursor-pointer' : 'pointer-events-none cursor-default'}`} title={assetId} onDoubleClick={(e)=>{ if (!canInteract) return; e.stopPropagation(); onDouble(); }}>
       <div className={`flex items-center justify-center gap-1 select-none ${visible ? '' : 'invisible'}`}>
         {[1,2,3,4,5].map(i => <Star key={i} idx={i} />)}
         {canInteract && (current != null && current > 0) ? (

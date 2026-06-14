@@ -10,7 +10,7 @@ import { useFacesThumbVersion } from '@/hooks/useFacesThumbVersion';
 import { useRouter } from 'next/navigation';
 
 export function FiltersDrawer({ open, onClose, inline = false, inlineWidth }: { open: boolean; onClose: () => void; inline?: boolean; inlineWidth?: number }) {
-  const { state, setFaces, setTypes, setLocation, setDateRange, setLocked, setRating } = useQueryState();
+  const { state, setFaces, setTypes, setLocation, setDateRange, setLocked, setRating, clearAllFilters } = useQueryState();
 
   const router = useRouter();
 
@@ -102,11 +102,16 @@ export function FiltersDrawer({ open, onClose, inline = false, inlineWidth }: { 
     return (
       <div className="relative h-full" style={{ width: inlineWidth ?? 320 }}>
       <aside ref={asideRef} className="absolute inset-0 bg-background overflow-y-auto border-r border-border">
-        <div className="p-4 border-b flex items-center justify-between">
+        <div className="sticky top-0 z-20 p-4 border-b bg-background flex items-center justify-between">
           <h3 className="text-lg font-medium">Filters</h3>
-          <button className="w-7 h-7 rounded-full grid place-items-center bg-card border border-border hover:bg-muted" onClick={onClose} aria-label="Close filters">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3">
+            <button className="text-sm text-muted-foreground underline hover:text-foreground" onClick={clearAllFilters}>
+              Clear all
+            </button>
+            <button className="w-7 h-7 rounded-full grid place-items-center bg-card border border-border hover:bg-muted" onClick={onClose} aria-label="Close filters">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
         {/* Duplicate of content below; returned early for inline mode */}
         <div className="p-4 space-y-6">
@@ -231,12 +236,6 @@ export function FiltersDrawer({ open, onClose, inline = false, inlineWidth }: { 
               </div>
             </div>
           </section>
-          <div className="pt-4 border-t flex justify-between">
-            <button className="text-sm text-muted-foreground underline" onClick={() => { setFaces([]); setTypes([]); setDateRange({ start: undefined, end: undefined }); setLocation({ country: undefined, region: undefined, city: undefined }); setRating(undefined); }}>
-              Clear all
-            </button>
-            <button className="px-3 py-1.5 bg-primary text-primary-foreground rounded" onClick={onClose}>Done</button>
-          </div>
         </div>
       </aside>
       <PinDialog
@@ -252,7 +251,7 @@ export function FiltersDrawer({ open, onClose, inline = false, inlineWidth }: { 
   // Overlay drawer (mobile)
   return (
     <div
-      className="fixed inset-0 z-50"
+      className="fixed inset-0 z-[80]"
       onMouseDown={(e) => {
         if (asideRef.current && !asideRef.current.contains(e.target as Node)) {
           onClose();
@@ -260,11 +259,16 @@ export function FiltersDrawer({ open, onClose, inline = false, inlineWidth }: { 
       }}
     >
       <aside ref={asideRef} className="absolute right-0 top-0 h-full w-80 bg-background shadow-xl overflow-y-auto border-l-4 border-border" onMouseDown={(e) => e.stopPropagation()}>
-        <div className="p-4 border-b flex items-center justify-between">
+        <div className="sticky top-0 z-20 p-4 border-b bg-background flex items-center justify-between">
           <h3 className="text-lg font-medium">Filters</h3>
-          <button className="w-7 h-7 rounded-full grid place-items-center bg-card border border-border hover:bg-muted" onClick={onClose} aria-label="Close filters">
-            <X className="w-4 h-4" />
-          </button>
+          <div className="flex items-center gap-3">
+            <button className="text-sm text-muted-foreground underline hover:text-foreground" onClick={clearAllFilters}>
+              Clear all
+            </button>
+            <button className="w-7 h-7 rounded-full grid place-items-center bg-card border border-border hover:bg-muted" onClick={onClose} aria-label="Close filters">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
         </div>
         <div className="p-4 space-y-6">
           {/* Faces */}
@@ -372,15 +376,6 @@ export function FiltersDrawer({ open, onClose, inline = false, inlineWidth }: { 
             </div>
           </section>
 
-          <div className="pt-4 border-t flex justify-between">
-            <button
-              className="text-sm text-muted-foreground underline"
-              onClick={() => { setFaces([]); setTypes([]); setDateRange({ start: undefined, end: undefined }); setLocation({ country: undefined, region: undefined, city: undefined }); }}
-            >
-              Clear all
-            </button>
-            <button className="px-3 py-1.5 bg-primary text-primary-foreground rounded" onClick={onClose}>Done</button>
-          </div>
         </div>
       </aside>
       {/* PIN dialog for verify/set */}
