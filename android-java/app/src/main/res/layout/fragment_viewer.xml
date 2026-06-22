@@ -18,6 +18,15 @@
         android:background="#FF000000"
         android:keepScreenOn="true" />
 
+    <ProgressBar
+        android:id="@+id/video_loading"
+        style="?android:attr/progressBarStyleLarge"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="center"
+        android:visibility="gone"
+        android:elevation="10dp" />
+
     <!-- Place top bar AFTER pager so it sits on top and receives touches -->
     <LinearLayout
         android:id="@+id/top_bar"
@@ -92,7 +101,7 @@
             android:layout_width="40dp"
             android:layout_height="40dp"
             android:background="@android:color/transparent"
-            android:src="@android:drawable/ic_lock_silent_mode"
+            android:src="@android:drawable/ic_lock_silent_mode_off"
             android:contentDescription="Mute"/>
         <SeekBar
             android:id="@+id/seek"

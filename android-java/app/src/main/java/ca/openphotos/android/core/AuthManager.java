@@ -539,9 +539,6 @@ public class AuthManager {
         if (baseUrl == null || baseUrl.trim().isEmpty()) {
             throw new IOException("Server URL not set");
         }
-        if (isLoopbackEndpointUrl(baseUrl)) {
-            throw new IOException("On Android, localhost points to this device. Use the server's LAN IP or public URL.");
-        }
         try {
             android.util.Log.i(
                     "OpenPhotos",
@@ -864,9 +861,6 @@ public class AuthManager {
         if (normalized.isEmpty()) {
             return new ProbeResult(false, "Invalid URL");
         }
-        if (isLoopbackEndpointUrl(normalized)) {
-            return new ProbeResult(false, "On Android, localhost points to this device. Use the server's LAN IP or public URL.");
-        }
         OkHttpClient probeClient = http.newBuilder()
                 .connectTimeout(1500, TimeUnit.MILLISECONDS)
                 .readTimeout(1500, TimeUnit.MILLISECONDS)
@@ -1121,11 +1115,6 @@ public class AuthManager {
         return parsed != null && isLocalHost(parsed.host);
     }
 
-    public static boolean isLoopbackEndpointUrl(@Nullable String baseUrl) {
-        ParsedBaseUrl parsed = parseBaseUrl(baseUrl);
-        return parsed != null && isLoopbackHost(parsed.host);
-    }
-
     public static boolean isLocalHost(@Nullable String rawHost) {
         if (rawHost == null) return false;
         String host = normalizeHost(rawHost).toLowerCase(Locale.US);
@@ -1159,19 +1148,6 @@ public class AuthManager {
         }
 
         return false;
-    }
-
-    public static boolean isLoopbackHost(@Nullable String rawHost) {
-        if (rawHost == null) return false;
-        String host = normalizeHost(rawHost).toLowerCase(Locale.US);
-        if (host.isEmpty()) return false;
-        if ("localhost".equals(host)
-                || "::1".equals(host)
-                || "0:0:0:0:0:0:0:1".equals(host)) {
-            return true;
-        }
-        int[] ipv4 = ipv4Octets(host);
-        return ipv4 != null && ipv4[0] == 127;
     }
 
     @Nullable
@@ -1291,10 +1267,6 @@ public class AuthManager {
         if (parsed == null) return "";
         String built = buildBaseUrl(parsed.scheme, parsed.host, parsed.port);
         return built != null ? built : "";
-    }
-
-    public static boolean shouldRejectLoopbackServer(@Nullable String raw) {
-        return isLoopbackEndpointUrl(raw);
     }
 
     private void saveRecentServers(List<String> urls) {

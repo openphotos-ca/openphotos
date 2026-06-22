@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ca.openphotos.android.ui.SquareMediaCellLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:layout_margin="2dp">
@@ -7,7 +7,7 @@
     <ImageView
         android:id="@+id/image"
         android:layout_width="match_parent"
-        android:layout_height="160dp"
+        android:layout_height="match_parent"
         android:scaleType="centerCrop"
         android:background="@color/app_placeholder"
         android:transitionName="hero_image"/>
@@ -105,4 +105,4 @@
         android:textSize="11sp"
         android:visibility="gone" />
 
-</FrameLayout>
+</ca.openphotos.android.ui.SquareMediaCellLayout>

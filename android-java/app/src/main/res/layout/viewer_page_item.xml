@@ -12,4 +12,13 @@
         android:contentDescription="Viewer page"
         android:transitionName="hero_image" />
 
+    <ProgressBar
+        android:id="@+id/loading"
+        style="?android:attr/progressBarStyleLarge"
+        android:layout_width="56dp"
+        android:layout_height="56dp"
+        android:layout_gravity="center"
+        android:indeterminate="true"
+        android:visibility="gone" />
+
 </FrameLayout>

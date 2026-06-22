@@ -155,14 +155,14 @@ public class LocalPhotosFragment extends Fragment {
         timelineAdapter = new TimelineAdapter();
         timelineAdapter.setRatingOverlayEnabled(false);
 
-        gridLayoutManager = new GridLayoutManager(requireContext(), 4);
-        timelineLayoutManager = new GridLayoutManager(requireContext(), 4);
+        gridLayoutManager = new GridLayoutManager(requireContext(), 3);
+        timelineLayoutManager = new GridLayoutManager(requireContext(), 3);
         timelineLayoutManager.setSpanSizeLookup(new GridLayoutManager.SpanSizeLookup() {
             @Override
             public int getSpanSize(int position) {
-                if (timelineAdapter == null) return 4;
+                if (timelineAdapter == null) return timelineLayoutManager.getSpanCount();
                 int vt = timelineAdapter.getItemViewType(position);
-                return vt == TimelineAdapter.TYPE_PHOTO ? 1 : 4;
+                return vt == TimelineAdapter.TYPE_PHOTO ? 1 : timelineLayoutManager.getSpanCount();
             }
         });
 

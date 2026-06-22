@@ -22,7 +22,7 @@ public final class LockedMetadataBuilder {
 
     public static Result build(Context app, Uri uri, boolean isVideo, long createdAt, String mimeHint, boolean includeLocation) {
         try {
-            int width = 0, height = 0; long sizeKB = 0; double durationS = 0.0;
+            int width = 0, height = 0; long sizeKB = 0; long durationMs = 0L; double durationS = 0.0;
             String[] proj = isVideo ? new String[]{MediaStore.Video.Media.WIDTH, MediaStore.Video.Media.HEIGHT, MediaStore.Video.Media.SIZE, MediaStore.Video.Media.DURATION}
                                     : new String[]{MediaStore.Images.Media.WIDTH, MediaStore.Images.Media.HEIGHT, MediaStore.Images.Media.SIZE};
             Cursor c = app.getContentResolver().query(uri, proj, null, null, null);
@@ -31,9 +31,33 @@ public final class LockedMetadataBuilder {
                     width = c.getInt(0);
                     height = c.getInt(1);
                     sizeKB = Math.max(1, Math.round((c.getLong(2) / 1024.0)));
-                    if (isVideo) durationS = Math.max(0, c.getLong(3) / 1000.0);
+                    if (isVideo) {
+                        durationMs = Math.max(0L, c.getLong(3));
+                        durationS = durationMs / 1000.0;
+                    }
                 }
                 c.close();
+            }
+            if (isVideo && (durationMs <= 0L || width <= 0 || height <= 0)) {
+                MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+                try {
+                    mmr.setDataSource(app, uri);
+                    String w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
+                    String h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
+                    String d = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+                    if (width <= 0 && w != null) width = Integer.parseInt(w);
+                    if (height <= 0 && h != null) height = Integer.parseInt(h);
+                    if (durationMs <= 0L && d != null) {
+                        durationMs = Math.max(0L, Long.parseLong(d));
+                        durationS = durationMs / 1000.0;
+                    }
+                } catch (Exception ignored) {
+                } finally {
+                    try {
+                        mmr.release();
+                    } catch (Exception ignored) {
+                    }
+                }
             }
             String ymd = ymd(createdAt);
             JSONObject tus = new JSONObject();
@@ -43,6 +67,7 @@ public final class LockedMetadataBuilder {
             tus.put("height", String.valueOf(height));
             tus.put("orientation", "1");
             tus.put("is_video", isVideo ? "1" : "0");
+            tus.put("duration_ms", String.valueOf(isVideo ? durationMs : 0));
             tus.put("duration_s", String.valueOf(isVideo ? durationS : 0));
             tus.put("mime_hint", mimeHint);
             tus.put("created_at", String.valueOf(createdAt));
@@ -54,6 +79,7 @@ public final class LockedMetadataBuilder {
             header.put("height", height);
             header.put("orientation", 1);
             header.put("is_video", isVideo ? 1 : 0);
+            header.put("duration_ms", isVideo ? durationMs : 0);
             header.put("duration_s", isVideo ? durationS : 0);
             header.put("mime_hint", mimeHint);
             header.put("kind", "orig");
@@ -79,19 +105,26 @@ public final class LockedMetadataBuilder {
         try {
             int width = 0, height = 0;
             long sizeKB = Math.max(1, Math.round(file.length() / 1024.0));
+            long durationMs = 0L;
             double durationS = 0.0;
             if (isVideo) {
+                MediaMetadataRetriever mmr = new MediaMetadataRetriever();
                 try {
-                    MediaMetadataRetriever mmr = new MediaMetadataRetriever();
                     mmr.setDataSource(file.getAbsolutePath());
                     String w = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH);
                     String h = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT);
                     String d = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
                     width = w != null ? Integer.parseInt(w) : 0;
                     height = h != null ? Integer.parseInt(h) : 0;
-                    durationS = d != null ? Math.max(0.0, Long.parseLong(d) / 1000.0) : 0.0;
-                    mmr.release();
-                } catch (Exception ignored) {}
+                    durationMs = d != null ? Math.max(0L, Long.parseLong(d)) : 0L;
+                    durationS = durationMs / 1000.0;
+                } catch (Exception ignored) {
+                } finally {
+                    try {
+                        mmr.release();
+                    } catch (Exception ignored) {
+                    }
+                }
             } else {
                 try {
                     BitmapFactory.Options o = new BitmapFactory.Options();
@@ -110,6 +143,7 @@ public final class LockedMetadataBuilder {
             tus.put("height", String.valueOf(height));
             tus.put("orientation", "1");
             tus.put("is_video", isVideo ? "1" : "0");
+            tus.put("duration_ms", String.valueOf(isVideo ? durationMs : 0));
             tus.put("duration_s", String.valueOf(isVideo ? durationS : 0));
             tus.put("mime_hint", mimeHint);
             tus.put("created_at", String.valueOf(createdAt));
@@ -121,6 +155,7 @@ public final class LockedMetadataBuilder {
             header.put("height", height);
             header.put("orientation", 1);
             header.put("is_video", isVideo ? 1 : 0);
+            header.put("duration_ms", isVideo ? durationMs : 0);
             header.put("duration_s", isVideo ? durationS : 0);
             header.put("mime_hint", mimeHint);
             header.put("kind", "orig");

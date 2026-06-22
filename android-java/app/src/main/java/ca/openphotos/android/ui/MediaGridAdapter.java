@@ -20,6 +20,13 @@ import ca.openphotos.android.media.DiskImageCache;
  * Can be extended to load thumbnails via Glide and attach click listeners for the viewer.
  */
 public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGridAdapter.VH> {
+    private static final java.util.concurrent.ExecutorService LOCKED_THUMB_EXECUTOR =
+            java.util.concurrent.Executors.newFixedThreadPool(3, r -> {
+                Thread t = new Thread(r, "op-locked-thumb");
+                t.setDaemon(true);
+                return t;
+            });
+
     public static class Cell {
         public final String id;            // stable id
         public final String label;         // caption/filename or placeholder
@@ -47,7 +54,10 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
         }
     }
 
-    public MediaGridAdapter() { super(DIFF); }
+    public MediaGridAdapter() {
+        super(DIFF);
+        setHasStableIds(true);
+    }
 
     private static android.graphics.drawable.ColorDrawable placeholder(@NonNull android.content.Context context) {
         return new android.graphics.drawable.ColorDrawable(
@@ -58,12 +68,25 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
     private boolean selectionMode = false;
     private java.util.Set<String> selectedIds = new java.util.HashSet<>();
     private boolean showLabels = true;
+    private String authToken = "";
+    private String cacheSignature = "";
+
+    public void updateAuthContext(@NonNull android.content.Context context) {
+        ca.openphotos.android.core.AuthManager auth = ca.openphotos.android.core.AuthManager.get(context);
+        String token = auth.getToken();
+        String server = auth.getServerUrl();
+        String user = auth.getUserId();
+        authToken = token != null ? token : "";
+        cacheSignature = (server != null ? server : "") + "|" + (user != null ? user : "");
+    }
+
     public void setSelectionMode(boolean enabled, java.util.Set<String> selected) {
         this.selectionMode = enabled;
         this.selectedIds = selected != null ? selected : new java.util.HashSet<>();
         notifyDataSetChanged();
     }
     public void setShowLabels(boolean show) {
+        if (this.showLabels == show) return;
         this.showLabels = show;
         notifyDataSetChanged();
     }
@@ -101,7 +124,19 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
             badgeCloud = v.findViewById(R.id.badge_cloud);
         }
 
-        void bind(Cell c, boolean selectionMode, boolean isSelected, boolean showLabels) {
+        void bind(
+                Cell c,
+                boolean selectionMode,
+                boolean isSelected,
+                boolean showLabels,
+                @NonNull String authToken,
+                @NonNull String cacheSignature
+        ) {
+            final String tagId = c.id;
+            try { com.bumptech.glide.Glide.with(image.getContext()).clear(image); } catch (Exception ignored) {}
+            image.setTag(R.id.tag_media_grid_bind_key, tagId);
+            image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP);
+            image.setImageDrawable(placeholder(image.getContext()));
             if (showLabels) {
                 label.setText(c.label);
                 label.setVisibility(View.VISIBLE);
@@ -116,6 +151,7 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
             }
             if (badgeSelected != null) { badgeSelected.setVisibility(selectionMode && isSelected ? View.VISIBLE : View.GONE); }
             if (badgeDuration != null) {
+                badgeDuration.setText("");
                 if (c.isVideo) {
                     badgeDuration.setVisibility(View.VISIBLE);
                     badgeDuration.setText(formatDuration(c.durationMs));
@@ -135,21 +171,19 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
                         try { android.util.Log.i("OpenPhotos","[LOCKED] UMK missing; showing placeholder asset="+c.assetId); } catch (Exception ignored) {}
                         image.setImageDrawable(placeholder(image.getContext()));
                     } else {
-                        final String tagId = c.id;
-                        image.setTag(tagId);
                         image.setImageDrawable(placeholder(image.getContext()));
                         // Cache-first: check decrypted thumb already stored
                         try {
                             if (c.assetId != null && !c.assetId.isEmpty()) {
                                 java.io.File cf = DiskImageCache.get(image.getContext()).readFile(DiskImageCache.Bucket.THUMBS, c.assetId);
                                 if (cf != null && cf.exists()) {
-                                    android.graphics.Bitmap bmp = decodeBitmapRobust(cf);
-                                    if (bmp != null) { image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP); image.setImageBitmap(bmp); return; }
+                                    loadImageWithGlide(image, cf, cacheSignature);
+                                    return;
                                 }
                             }
                         } catch (Exception ignored) {}
                         try { android.util.Log.i("OpenPhotos","[LOCKED] Start fetch+decrypt asset="+c.assetId+" url="+c.uri); } catch (Exception ignored) {}
-                        new Thread(() -> {
+                        LOCKED_THUMB_EXECUTOR.execute(() -> {
                             try {
                                 okhttp3.OkHttpClient client = ca.openphotos.android.core.AuthorizedHttpClient.get(image.getContext()).raw();
                                 java.io.File dec = new java.io.File(image.getContext().getCacheDir(), c.assetId + "_t.dec");
@@ -174,13 +208,17 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
                                 // Bind back to the same view only if not recycled
                                 android.os.Handler h = new android.os.Handler(image.getContext().getMainLooper());
                                 h.post(() -> {
-                                    if (!tagId.equals(image.getTag())) return;
+                                    if (!tagId.equals(image.getTag(R.id.tag_media_grid_bind_key))) return;
                                     // Persist decrypted bytes in disk cache for quick relaunches.
                                     try {
                                         if (c.assetId != null && !c.assetId.isEmpty()) {
                                             java.io.FileInputStream fis = new java.io.FileInputStream(dec);
-                                            DiskImageCache.get(image.getContext()).write(DiskImageCache.Bucket.THUMBS, c.assetId, fis, dec.length(), "webp");
+                                            java.io.File cached = DiskImageCache.get(image.getContext()).write(DiskImageCache.Bucket.THUMBS, c.assetId, fis, dec.length(), "webp");
                                             try { fis.close(); } catch (Exception ignored) {}
+                                            if (cached != null && cached.exists()) {
+                                                loadImageWithGlide(image, cached, cacheSignature);
+                                                return;
+                                            }
                                         }
                                     } catch (Exception ignored) {}
 
@@ -205,53 +243,22 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
                                 // Fallback placeholder on any failure and log for diagnostics
                                 try { android.util.Log.w("OpenPhotos", "[LOCKED] Decrypt/display failed asset=" + c.assetId + " err=" + ex.getMessage()); } catch (Exception ignored) {}
                                 android.os.Handler h = new android.os.Handler(image.getContext().getMainLooper());
-                                h.post(() -> image.setImageDrawable(placeholder(image.getContext())));
+                                h.post(() -> {
+                                    if (tagId.equals(image.getTag(R.id.tag_media_grid_bind_key))) {
+                                        image.setImageDrawable(placeholder(image.getContext()));
+                                    }
+                                });
                             }
-                        }).start();
+                        });
                     }
                 } else {
                     String u = c.uri != null ? c.uri : "";
                     if (u.startsWith("http://") || u.startsWith("https://")) {
-                        // Cache-first: thumbs bucket by assetId
-                        if (c.assetId != null && !c.assetId.isEmpty()) {
-                            try {
-                                java.io.File cf = DiskImageCache.get(image.getContext()).readFile(DiskImageCache.Bucket.THUMBS, c.assetId);
-                                if (cf != null && cf.exists()) {
-                                    android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeFile(cf.getAbsolutePath());
-                                    if (bmp != null) { image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP); image.setImageBitmap(bmp); return; }
-                                }
-                            } catch (Exception ignored) {}
-                        }
-                        // Fetch → write cache → display
-                        final String tagId2 = c.id; image.setTag(tagId2);
-                        image.setImageDrawable(placeholder(image.getContext()));
-                        new Thread(() -> {
-                            try {
-                                okhttp3.OkHttpClient client = ca.openphotos.android.core.AuthorizedHttpClient.get(image.getContext()).raw();
-                                okhttp3.Request req = new okhttp3.Request.Builder().url(u).get().build();
-                                try (okhttp3.Response r = client.newCall(req).execute()) {
-                                    if (!r.isSuccessful() || r.body()==null) throw new java.io.IOException("HTTP " + r.code());
-                                    String ct = r.header("Content-Type", "").toLowerCase();
-                                    String ext = ct.contains("image/webp") ? "webp" : (ct.contains("jpeg")?"jpg": (ct.contains("png")?"png": "webp"));
-                                    java.io.File out = null;
-                                    if (c.assetId != null && !c.assetId.isEmpty()) {
-                                        java.io.InputStream is = r.body().byteStream();
-                                        out = DiskImageCache.get(image.getContext()).write(DiskImageCache.Bucket.THUMBS, c.assetId, is, r.body().contentLength(), ext);
-                                    }
-                                    if (out != null && out.exists()) {
-                                        android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeFile(out.getAbsolutePath());
-                                        if (bmp != null) {
-                                            android.os.Handler h = new android.os.Handler(image.getContext().getMainLooper());
-                                            h.post(() -> { if (tagId2.equals(image.getTag())) { image.setScaleType(android.widget.ImageView.ScaleType.CENTER_CROP); image.setImageBitmap(bmp); } });
-                                        }
-                                    }
-                                }
-                            } catch (Exception ignored) {}
-                        }).start();
+                        loadImageWithGlide(image, authorizedModel(u, authToken), cacheSignature);
                     } else {
                         // Local URI fallback
                         Object model = android.net.Uri.parse(u);
-                        com.bumptech.glide.Glide.with(image.getContext()).load(model).thumbnail(0.25f).centerCrop().into(image);
+                        loadImageWithGlide(image, model, cacheSignature);
                     }
                 }
             } catch (Exception ignored) {}
@@ -266,11 +273,50 @@ public class MediaGridAdapter extends ListAdapter<MediaGridAdapter.Cell, MediaGr
     @Override public void onBindViewHolder(@NonNull VH holder, int position) {
         Cell c = getItem(position);
         boolean isSelected = selectedIds.contains(selectionKey(c));
-        holder.bind(c, selectionMode, isSelected, showLabels);
+        holder.bind(c, selectionMode, isSelected, showLabels, authToken, cacheSignature);
+    }
+
+    @Override public void onViewRecycled(@NonNull VH holder) {
+        super.onViewRecycled(holder);
+        try { com.bumptech.glide.Glide.with(holder.image.getContext()).clear(holder.image); } catch (Exception ignored) {}
+        holder.image.setTag(R.id.tag_media_grid_bind_key, null);
+        holder.image.setImageDrawable(placeholder(holder.image.getContext()));
+    }
+
+    @Override public long getItemId(int position) {
+        if (position < 0 || position >= getItemCount()) return RecyclerView.NO_ID;
+        return stableId(getItem(position).id);
     }
 
     private String selectionKey(@NonNull Cell c) {
         return (c.assetId != null && !c.assetId.isEmpty()) ? c.assetId : c.id;
+    }
+
+    private static long stableId(@Nullable String key) {
+        if (key == null) return RecyclerView.NO_ID;
+        long h = 1125899906842597L;
+        for (int i = 0; i < key.length(); i++) h = 31L * h + key.charAt(i);
+        return h;
+    }
+
+    private static Object authorizedModel(@NonNull String url, @Nullable String token) {
+        if (token == null || token.isEmpty()) return url;
+        return new com.bumptech.glide.load.model.GlideUrl(url,
+                new com.bumptech.glide.load.model.LazyHeaders.Builder()
+                        .addHeader("Authorization", "Bearer " + token)
+                        .build());
+    }
+
+    private static void loadImageWithGlide(@NonNull ImageView image, @NonNull Object model, @NonNull String signature) {
+        com.bumptech.glide.Glide.with(image.getContext())
+                .load(model)
+                .placeholder(placeholder(image.getContext()))
+                .error(placeholder(image.getContext()))
+                .signature(new com.bumptech.glide.signature.ObjectKey(signature))
+                .override(320, 320)
+                .centerCrop()
+                .dontAnimate()
+                .into(image);
     }
 
     @NonNull

@@ -3,4 +3,5 @@
     <item name="tag_i18n_text_source" type="id" />
     <item name="tag_i18n_hint_source" type="id" />
     <item name="tag_i18n_content_description_source" type="id" />
+    <item name="tag_media_grid_bind_key" type="id" />
 </resources>

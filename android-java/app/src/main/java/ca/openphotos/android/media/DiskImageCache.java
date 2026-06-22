@@ -75,8 +75,8 @@ public final class DiskImageCache {
      * for large media to avoid high memory usage.
      */
     public byte[] readBytes(Bucket bucket, String key) {
-        File f = fileFor(bucket, key, null);
-        if (!f.exists()) { return null; }
+        File f = resolveExistingFile(bucket, key);
+        if (f == null || !f.exists()) { return null; }
         // Touch LRU by updating mtime
         //noinspection ResultOfMethodCallIgnored
         f.setLastModified(System.currentTimeMillis());
@@ -92,8 +92,8 @@ public final class DiskImageCache {
 
     /** Return cached file URL for a key/bucket, touching LRU on hit. */
     public File readFile(Bucket bucket, String key) {
-        File f = fileFor(bucket, key, null);
-        if (!f.exists()) return null;
+        File f = resolveExistingFile(bucket, key);
+        if (f == null || !f.exists()) return null;
         //noinspection ResultOfMethodCallIgnored
         f.setLastModified(System.currentTimeMillis());
         return f;
@@ -104,8 +104,8 @@ public final class DiskImageCache {
      * Caller is responsible for closing the returned stream.
      */
     public java.io.InputStream readStream(Bucket bucket, String key) {
-        File f = fileFor(bucket, key, null);
-        if (!f.exists()) return null;
+        File f = resolveExistingFile(bucket, key);
+        if (f == null || !f.exists()) return null;
         //noinspection ResultOfMethodCallIgnored
         f.setLastModified(System.currentTimeMillis());
         try {
@@ -122,6 +122,7 @@ public final class DiskImageCache {
             if (dir != null && !dir.exists()) {
                 if (!dir.mkdirs() && !dir.exists()) throw new IOException("mkdirs failed: " + dir.getAbsolutePath());
             }
+            deleteSiblingVariants(f);
             // Write atomically via temp + rename
             File tmp = File.createTempFile("ab_cache_", ".tmp", dir != null ? dir : app.getCacheDir());
             try (BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(tmp))) {
@@ -158,6 +159,7 @@ public final class DiskImageCache {
             if (dir != null && !dir.exists()) {
                 if (!dir.mkdirs() && !dir.exists()) throw new IOException("mkdirs failed: " + dir.getAbsolutePath());
             }
+            deleteSiblingVariants(f);
             File tmp = File.createTempFile("ab_cache_", ".tmp", dir != null ? dir : app.getCacheDir());
             try (BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(tmp))) {
                 byte[] buf = new byte[8192]; int r; while ((r = in.read(buf)) > 0) bos.write(buf, 0, r);
@@ -211,6 +213,11 @@ public final class DiskImageCache {
         deleteRecursively(root);
     }
 
+    /** Directory reserved for ExoPlayer's incremental cloud-video playback cache. */
+    public File videoPlaybackCacheDir() {
+        return new File(bucketDir(Bucket.VIDEOS), "playback");
+    }
+
     // ---- Internals ----
 
     private File baseRoot() {
@@ -239,6 +246,42 @@ public final class DiskImageCache {
         String b = hex.substring(2, 4);
         String name = hex + (ext != null && !ext.isEmpty() ? ("." + ext) : "");
         return new File(new File(new File(bucketDir(bucket), a), b), name);
+    }
+
+    private File resolveExistingFile(Bucket bucket, String key) {
+        File exact = fileFor(bucket, key, null);
+        if (exact.exists()) return exact;
+        File dir = exact.getParentFile();
+        if (dir == null || !dir.exists()) return null;
+        String prefix = exact.getName() + ".";
+        File[] files = dir.listFiles();
+        if (files == null) return null;
+        File newest = null;
+        for (File f : files) {
+            if (!f.isFile()) continue;
+            String name = f.getName();
+            if (!name.startsWith(prefix)) continue;
+            if (newest == null || f.lastModified() > newest.lastModified()) newest = f;
+        }
+        return newest;
+    }
+
+    private void deleteSiblingVariants(File target) {
+        File dir = target.getParentFile();
+        if (dir == null || !dir.exists()) return;
+        String name = target.getName();
+        String prefix = name.contains(".") ? name.substring(0, name.indexOf('.') + 1) : name + ".";
+        String bare = name.contains(".") ? name.substring(0, name.indexOf('.')) : name;
+        File[] files = dir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            if (!f.isFile() || f.equals(target)) continue;
+            String other = f.getName();
+            if (other.equals(bare) || other.startsWith(prefix)) {
+                //noinspection ResultOfMethodCallIgnored
+                f.delete();
+            }
+        }
     }
 
     private void pruneIfNeeded(Bucket bucket) {

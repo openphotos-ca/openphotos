@@ -404,10 +404,6 @@ public class ServerLoginFragment extends Fragment {
         int effectivePort = isDemoHost ? 443 : (portInt != null ? portInt : AuthManager.DEFAULT_SERVER_PORT);
         String builtBaseUrl = AuthManager.buildBaseUrl(effectiveScheme, hostTrim, effectivePort);
 
-        if (message == null && AuthManager.shouldRejectLoopbackServer(builtBaseUrl)) {
-            message = "On Android, localhost points to this device. Use the server's LAN IP or public URL.";
-        }
-
         if (message == null) {
             if (isDemoHost) {
                 suppressFieldCallbacks = true;

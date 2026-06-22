@@ -29,6 +29,7 @@ import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.core.CapabilitiesService;
 import ca.openphotos.android.core.ServerUpdateService;
 import ca.openphotos.android.media.DiskImageCache;
+import ca.openphotos.android.media.VideoPlaybackCache;
 import ca.openphotos.android.prefs.AppearancePreferences;
 import ca.openphotos.android.prefs.LanguagePreferences;
 import ca.openphotos.android.server.ServerPhotosService;
@@ -692,6 +693,7 @@ public class SettingsFragment extends Fragment {
     }
 
     private void clearCacheNow() {
+        VideoPlaybackCache.release();
         cache.clearAll();
         try {
             Glide.get(requireContext()).clearMemory();

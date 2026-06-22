@@ -792,6 +792,15 @@ public final class ServerPhotosService {
         } catch (Exception e) { return AuthManager.get(app).getServerUrl() + "/api/images/" + assetId; }
     }
 
+    /** Build absolute stream-compatible video URL for a given asset ID. */
+    public String videoStreamUrl(String assetId) {
+        try {
+            String base = AuthManager.get(app).getServerUrl();
+            String enc = java.net.URLEncoder.encode(assetId, java.nio.charset.StandardCharsets.UTF_8.name());
+            return base + "/api/images/" + enc + "?format=stream";
+        } catch (Exception e) { return AuthManager.get(app).getServerUrl() + "/api/images/" + assetId + "?format=stream"; }
+    }
+
     /** Build absolute thumbnail URL for a given asset ID. */
     public String thumbnailUrl(String assetId) {
         try {

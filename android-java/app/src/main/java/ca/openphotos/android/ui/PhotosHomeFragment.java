@@ -45,7 +45,7 @@ import java.util.Set;
 public class PhotosHomeFragment extends Fragment {
     private static final String PREFS = "photos.ui";
     private static final String KEY_VIEW_MODE = "view.mode"; // grid|timeline
-    private static final int CLOUD_COLUMN_COUNT = 4;
+    private static final int CLOUD_COLUMN_COUNT = 3;
 
     private MediaGridAdapter adapter; // grid adapter
     private TimelineAdapter timelineAdapter; // timeline adapter
@@ -72,7 +72,11 @@ public class PhotosHomeFragment extends Fragment {
     private final ArrayList<MediaGridAdapter.Cell> all = new ArrayList<>(); // grid photos
     private final java.util.ArrayList<org.json.JSONObject> allPhotosJson = new java.util.ArrayList<>(); // timeline photos
     private final java.util.ArrayList<TimelineAdapter.Cell> timelineCells = new java.util.ArrayList<>();
-    private int page = 1; private final int limit = 60; private boolean hasMore = true; private boolean loading = false;
+    private final java.util.concurrent.atomic.AtomicInteger loadGeneration = new java.util.concurrent.atomic.AtomicInteger();
+    private int page = 1; private final int limit = 60; private boolean hasMore = true; private volatile boolean loading = false;
+    private boolean hasLoadedOnce = false;
+    private android.os.Parcelable recyclerLayoutState;
+    private boolean recyclerLayoutStateTimelineMode = false;
 
     // Selection
     private boolean selectionMode = false;
@@ -87,6 +91,7 @@ public class PhotosHomeFragment extends Fragment {
     // Header container (overlay) + collapse state
     private View headerContainer; private int headerHeight = 0; private boolean headersShown = true;
     private boolean trackingScroll = false; private int lastScrollOffset = 0; private float dirAccum = 0f; private int lastDir = 0; // 1 down, -1 up
+    private int currentRecyclerTopPadding = -1;
 
     // View mode
     private boolean timelineMode = false;
@@ -288,6 +293,7 @@ public class PhotosHomeFragment extends Fragment {
 
         // Recycler
         grid = root.findViewById(R.id.grid);
+        currentRecyclerTopPadding = -1;
         gridBaseBottomPadding = grid.getPaddingBottom();
         configureRecyclerForMode();
         selectionBottomBar.post(() -> {
@@ -315,13 +321,12 @@ public class PhotosHomeFragment extends Fragment {
                 int approxTotal = timelineMode ? timelineCells.size() : all.size();
                 if (hasMore && !loading && last >= Math.max(0, approxTotal - 6)) { loadNext(); }
 
-                // Enable pull-to-refresh only at top
-                int off = recyclerView.computeVerticalScrollOffset();
-                swipe.setEnabled(off <= 0);
+                boolean atTop = !recyclerView.canScrollVertically(-1);
+                swipe.setEnabled(atTop);
 
                 // Header collapse (disabled in selection mode)
                 if (selectionMode) { if (!headersShown) applyHeaderVisibility(true, true); trackingScroll = false; return; }
-                handleScrollForHeader(off);
+                handleScrollForHeader(dy, atTop);
             }
         });
 
@@ -386,13 +391,90 @@ public class PhotosHomeFragment extends Fragment {
             if (chips != null) populateAlbumChips(chips);
         });
 
-        ensureAuthenticatedThenLoad(() -> {
-            refreshEnterpriseCapabilitiesAsync();
-            requestCountsAsync(chipAll, chipPhotos, chipVideos);
-            updateActiveFilterRow();
-            refresh(true);
-        });
+        refreshEnterpriseCapabilitiesAsync();
+        requestCountsAsync(chipAll, chipPhotos, chipVideos);
+        updateActiveFilterRow();
+        if (hasLoadedOnce) {
+            restoreLoadedDataset();
+        } else {
+            ensureAuthenticatedThenLoad(() -> refresh(true));
+        }
         return root;
+    }
+
+    @Override public void onPause() {
+        saveRecyclerLayoutState();
+        super.onPause();
+    }
+
+    @Override public void onResume() {
+        super.onResume();
+        reapplyHeaderInsetAfterReturn();
+        restoreRecyclerLayoutStateWhenReady();
+    }
+
+    @Override public void onDestroyView() {
+        saveRecyclerLayoutState();
+        currentRecyclerTopPadding = -1;
+        super.onDestroyView();
+    }
+
+    private void saveRecyclerLayoutState() {
+        if (grid == null) return;
+        RecyclerView.LayoutManager lm = grid.getLayoutManager();
+        if (lm == null) return;
+        recyclerLayoutState = lm.onSaveInstanceState();
+        recyclerLayoutStateTimelineMode = timelineMode;
+    }
+
+    private void restoreLoadedDataset() {
+        if (swipe != null) swipe.setRefreshing(false);
+        if (timelineMode) {
+            if (timelineAdapter != null) {
+                timelineAdapter.submitList(new java.util.ArrayList<>(timelineCells));
+            }
+            if (empty != null) empty.setVisibility(timelineCells.isEmpty() ? View.VISIBLE : View.GONE);
+        } else {
+            if (adapter != null && !adapterAlreadyHasGridDataset()) {
+                adapter.submitList(new ArrayList<>(all));
+            }
+            if (empty != null) empty.setVisibility(all.isEmpty() ? View.VISIBLE : View.GONE);
+        }
+        restoreRecyclerLayoutStateWhenReady();
+    }
+
+    private boolean adapterAlreadyHasGridDataset() {
+        if (adapter == null) return false;
+        List<MediaGridAdapter.Cell> current = adapter.getCurrentList();
+        if (current.size() != all.size()) return false;
+        if (all.isEmpty()) return true;
+        MediaGridAdapter.Cell first = all.get(0);
+        MediaGridAdapter.Cell last = all.get(all.size() - 1);
+        MediaGridAdapter.Cell currentFirst = current.get(0);
+        MediaGridAdapter.Cell currentLast = current.get(current.size() - 1);
+        return first.id.equals(currentFirst.id) && last.id.equals(currentLast.id);
+    }
+
+    private void restoreRecyclerLayoutStateWhenReady() {
+        if (grid == null || recyclerLayoutState == null || recyclerLayoutStateTimelineMode != timelineMode) return;
+        final android.os.Parcelable state = recyclerLayoutState;
+        grid.post(() -> {
+            if (grid == null || recyclerLayoutStateTimelineMode != timelineMode) return;
+            RecyclerView.LayoutManager lm = grid.getLayoutManager();
+            if (lm != null) lm.onRestoreInstanceState(state);
+        });
+    }
+
+    private void reapplyHeaderInsetAfterReturn() {
+        if (grid == null || headerContainer == null) return;
+        grid.post(() -> {
+            if (grid == null || headerContainer == null) return;
+            int measuredHeaderHeight = headerContainer.getHeight();
+            if (measuredHeaderHeight > 0) headerHeight = measuredHeaderHeight;
+            headerContainer.animate().cancel();
+            headerContainer.setTranslationY(headersShown ? 0f : -headerHeight);
+            setRecyclerTopPadding(headerHeight);
+        });
     }
 
     private void toggleSearchMode(boolean enable) {
@@ -446,11 +528,13 @@ public class PhotosHomeFragment extends Fragment {
         if (!searchMode) return; String q = searchField.getText()!=null? searchField.getText().toString():"";
         if (q.length() < 2) { android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Enter at least 2 characters"), android.widget.Toast.LENGTH_SHORT).show(); return; }
         // Reset paging and lists; show results in grid
-        timelineMode = false; page = 1; hasMore = true; loading = false; all.clear(); adapter.submitList(new ArrayList<>(all));
+        timelineMode = false; page = 1; hasMore = true; loading = false; hasLoadedOnce = false; all.clear(); adapter.submitList(new ArrayList<>(all));
         performSearch(q, page, false);
     }
 
     private void performSearch(String query, int page, boolean append) {
+        if (loading && append) return;
+        loading = true;
         new Thread(() -> {
             try {
                 ServerPhotosService svc = new ServerPhotosService(requireContext().getApplicationContext());
@@ -477,18 +561,20 @@ public class PhotosHomeFragment extends Fragment {
                         org.json.JSONObject p = photos.getJSONObject(i);
                         if (trashOnly && p.optLong("delete_time", 0L) <= 0L) continue;
                         String assetId = p.optString("asset_id"); boolean isVideo = p.optBoolean("is_video", false); boolean locked = p.optBoolean("locked", false); int rating = p.optInt("rating", 0); String imgUrl = svc.thumbnailUrl(assetId);
-                        list.add(new MediaGridAdapter.Cell("search-"+assetId, p.optString("filename", assetId), locked, imgUrl, isVideo, assetId, rating));
+                        long durationMs = mediaDurationMs(p);
+                        list.add(new MediaGridAdapter.Cell("search-"+assetId, p.optString("filename", assetId), locked, imgUrl, isVideo, assetId, rating, durationMs, false));
                     }
                 }
                 requireActivity().runOnUiThread(() -> {
                     if (!append) all.clear();
                     all.addAll(list);
                     adapter.submitList(new ArrayList<>(all));
+                    hasLoadedOnce = true;
                     hasMore = more; loading = false; swipe.setRefreshing(false);
                     empty.setVisibility(all.isEmpty()? View.VISIBLE : View.GONE);
                 });
             } catch (Exception e) {
-                requireActivity().runOnUiThread(() -> { swipe.setRefreshing(false); empty.setText("Search failed"); empty.setVisibility(View.VISIBLE); });
+                requireActivity().runOnUiThread(() -> { loading = false; swipe.setRefreshing(false); empty.setText("Search failed"); empty.setVisibility(View.VISIBLE); });
             }
         }).start();
     }
@@ -706,26 +792,34 @@ public class PhotosHomeFragment extends Fragment {
     }
 
     private void refresh(boolean reset) {
+        if (loading && !reset) return;
+        final int requestGeneration = reset ? loadGeneration.incrementAndGet() : loadGeneration.get();
+        final String requestMediaFilter = mediaFilter;
+        final boolean requestIncludeLocked = Boolean.TRUE.equals(lockedFilter);
         if (reset) {
             page = 1; hasMore = true; loading = false; empty.setVisibility(View.GONE);
+            hasLoadedOnce = false;
             all.clear(); allPhotosJson.clear(); timelineCells.clear();
             if (timelineMode) timelineAdapter.submitList(new java.util.ArrayList<>(timelineCells)); else adapter.submitList(new ArrayList<>(all));
         }
+        final int requestPage = page;
+        loading = true;
         new Thread(() -> {
             try {
-                loading = true;
                 ServerPhotosService svc = new ServerPhotosService(requireContext().getApplicationContext());
-                String media = mediaFilter.equals("photos") ? "photos"
-                        : (mediaFilter.equals("videos") ? "videos"
-                        : (mediaFilter.equals("trash") ? "trash" : null));
+                String media = requestMediaFilter.equals("photos") ? "photos"
+                        : (requestMediaFilter.equals("videos") ? "videos"
+                        : (requestMediaFilter.equals("trash") ? "trash" : null));
                 java.util.List<Integer> albumIds = new java.util.ArrayList<>(selectedAlbumIds);
-                 org.json.JSONObject resp = svc.listPhotos(null, albumIds, media, lockedFilter, favoriteOnly, page, limit, filters, includeAlbumSubtree);
-                 try { android.util.Log.i("OpenPhotos","[PHOTOS/UI] resp has_more="+resp.optBoolean("has_more")+" page="+page+" size="+ (resp.has("photos")?resp.getJSONArray("photos").length():0)); } catch (Exception ignored) {}
+                 org.json.JSONObject resp = svc.listPhotos(null, albumIds, media, lockedFilter, favoriteOnly, requestPage, limit, filters, includeAlbumSubtree);
+                 try { android.util.Log.i("OpenPhotos","[PHOTOS/UI] resp has_more="+resp.optBoolean("has_more")+" page="+requestPage+" size="+ (resp.has("photos")?resp.getJSONArray("photos").length():0)); } catch (Exception ignored) {}
                 JSONArray photos = resp.has("photos") ? resp.getJSONArray("photos") : new JSONArray();
-                hasMore = resp.optBoolean("has_more", false);
                 // Optional client-side sort when requested
                 java.util.List<org.json.JSONObject> tmp = new java.util.ArrayList<>();
                 for (int i=0;i<photos.length();i++) tmp.add(photos.getJSONObject(i));
+                hydrateVideoDurations(svc, tmp, requestIncludeLocked);
+                if (!isActiveLoad(requestGeneration, requestMediaFilter)) return;
+                hasMore = resp.optBoolean("has_more", false);
                 tmp.sort((a,b)->{
                     long ca = a.optLong("created_at", 0L); long cb = b.optLong("created_at", 0L);
                     int cmp = Long.compare(cb, ca); // newest first
@@ -737,8 +831,10 @@ public class PhotosHomeFragment extends Fragment {
                     java.util.List<TimelineAdapter.Cell> built = buildTimelineCells(allPhotosJson, !sortAscending);
                     timelineCells.clear(); timelineCells.addAll(built);
                     requireActivity().runOnUiThread(() -> {
+                        if (!isActiveLoad(requestGeneration, requestMediaFilter)) return;
                         timelineAdapter.submitList(new java.util.ArrayList<>(timelineCells));
                         swipe.setRefreshing(false);
+                        hasLoadedOnce = true;
                         empty.setVisibility(timelineCells.isEmpty() ? View.VISIBLE : View.GONE);
                     });
                 } else {
@@ -749,12 +845,15 @@ public class PhotosHomeFragment extends Fragment {
                         boolean locked = p.optBoolean("locked", false);
                         int rating = p.optInt("rating", 0);
                         String imgUrl = svc.thumbnailUrl(assetId);
-                        list.add(new MediaGridAdapter.Cell("server-"+assetId, p.optString("filename", assetId), locked, imgUrl, isVideo, assetId, rating));
+                        long durationMs = mediaDurationMs(p);
+                        list.add(new MediaGridAdapter.Cell("server-"+assetId, p.optString("filename", assetId), locked, imgUrl, isVideo, assetId, rating, durationMs, false));
                     }
                     all.addAll(list);
                     requireActivity().runOnUiThread(() -> {
+                        if (!isActiveLoad(requestGeneration, requestMediaFilter)) return;
                         adapter.submitList(new ArrayList<>(all));
                         swipe.setRefreshing(false);
+                        hasLoadedOnce = true;
                         empty.setVisibility(all.isEmpty() ? View.VISIBLE : View.GONE);
                     });
                 }
@@ -763,6 +862,7 @@ public class PhotosHomeFragment extends Fragment {
                 boolean unauthorized = msg != null && msg.contains("HTTP 401");
                 try { android.util.Log.w("OpenPhotos","[PHOTOS/UI] load error "+msg, e); } catch (Exception ignored) {}
                 requireActivity().runOnUiThread(() -> {
+                    if (!isActiveLoad(requestGeneration, requestMediaFilter)) return;
                     swipe.setRefreshing(false);
                     if (unauthorized && !AuthManager.get(requireContext()).isAuthenticated()) {
                         try {
@@ -776,7 +876,7 @@ public class PhotosHomeFragment extends Fragment {
                     empty.setText(msg!=null&&msg.contains("HTTP")? (AndroidI18n.t("Server error") + ": "+msg) : AndroidI18n.t("Load failed — Pull to retry"));
                     empty.setVisibility(View.VISIBLE);
                 });
-            } finally { loading = false; }
+            } finally { if (isActiveLoad(requestGeneration, requestMediaFilter)) loading = false; }
         }).start();
     }
 
@@ -1212,10 +1312,14 @@ public class PhotosHomeFragment extends Fragment {
         // Clear any previous adapter to force layout recalculation cleanly
         if (grid != null) grid.setAdapter(null);
         if (grid == null) return;
+        grid.setHasFixedSize(true);
+        grid.setItemViewCacheSize(CLOUD_COLUMN_COUNT * 6);
+        if (grid.getItemAnimator() != null) grid.setItemAnimator(null);
         if (!timelineMode) {
             layoutManager = new GridLayoutManager(requireContext(), CLOUD_COLUMN_COUNT);
             grid.setLayoutManager(layoutManager);
             if (adapter == null) adapter = new MediaGridAdapter();
+            adapter.updateAuthContext(requireContext());
             adapter.setShowLabels(false);
             grid.setAdapter(adapter);
             // Legacy item click behavior for grid
@@ -1230,9 +1334,16 @@ public class PhotosHomeFragment extends Fragment {
                         android.os.Bundle args = new android.os.Bundle();
                         java.util.ArrayList<String> uris = new java.util.ArrayList<>();
                         java.util.ArrayList<String> assetIds = new java.util.ArrayList<>();
-                        for (MediaGridAdapter.Cell it : all) { uris.add(it.uri); assetIds.add(it.assetId); }
+                        boolean[] videoFlags = new boolean[all.size()];
+                        for (int i = 0; i < all.size(); i++) {
+                            MediaGridAdapter.Cell it = all.get(i);
+                            uris.add(it.uri);
+                            assetIds.add(it.assetId);
+                            videoFlags[i] = it.isVideo;
+                        }
                         args.putStringArrayList("uris", uris);
                         args.putStringArrayList("assetIds", assetIds);
+                        args.putBooleanArray("isVideos", videoFlags);
                         args.putInt("index", position);
                         args.putBoolean("isServer", true);
                         // Continuous paging parameters (pass current filters/state)
@@ -1294,9 +1405,19 @@ public class PhotosHomeFragment extends Fragment {
                 android.os.Bundle args = new android.os.Bundle();
                 java.util.ArrayList<String> uris = new java.util.ArrayList<>();
                 java.util.ArrayList<String> assetIds = new java.util.ArrayList<>();
-                for (org.json.JSONObject p : allPhotosJson) { String id = p.optString("asset_id"); uris.add(new ca.openphotos.android.server.ServerPhotosService(requireContext()).imageUrl(id)); assetIds.add(id); }
+                boolean[] videoFlags = new boolean[allPhotosJson.size()];
+                ca.openphotos.android.server.ServerPhotosService viewerSvc = new ca.openphotos.android.server.ServerPhotosService(requireContext());
+                for (int i = 0; i < allPhotosJson.size(); i++) {
+                    org.json.JSONObject p = allPhotosJson.get(i);
+                    String id = p.optString("asset_id");
+                    boolean isVideo = p.optBoolean("is_video", false);
+                    uris.add(isVideo ? viewerSvc.thumbnailUrl(id) : viewerSvc.imageUrl(id));
+                    assetIds.add(id);
+                    videoFlags[i] = isVideo;
+                }
                 args.putStringArrayList("uris", uris);
                 args.putStringArrayList("assetIds", assetIds);
+                args.putBooleanArray("isVideos", videoFlags);
                 // Compute index of clicked assetId in allPhotosJson
                 int idx = 0; for (int i=0;i<allPhotosJson.size();i++) { if (allPhotosJson.get(i).optString("asset_id").equals(c.assetId)) { idx = i; break; } }
                 args.putInt("index", idx);
@@ -1375,7 +1496,7 @@ public class PhotosHomeFragment extends Fragment {
                     for (org.json.JSONObject p : items) {
                         String assetId = p.optString("asset_id"); boolean isVideo = p.optBoolean("is_video", false); boolean locked = p.optBoolean("locked", false); int rating = p.optInt("rating", 0);
                         String imgUrl = new ca.openphotos.android.server.ServerPhotosService(requireContext().getApplicationContext()).thumbnailUrl(assetId);
-                        out.add(TimelineAdapter.Cell.photo(assetId, isVideo, locked, rating, imgUrl, p.optLong("created_at", 0L)));
+                        out.add(TimelineAdapter.Cell.photo(assetId, isVideo, locked, rating, imgUrl, p.optLong("created_at", 0L), mediaDurationMs(p), false));
                     }
                 }
             }
@@ -1383,10 +1504,91 @@ public class PhotosHomeFragment extends Fragment {
         return out;
     }
 
-    private void handleScrollForHeader(int scrollOffset) {
-        if (!trackingScroll) { trackingScroll = true; lastScrollOffset = scrollOffset; dirAccum = 0f; lastDir = 0; return; }
-        int delta = scrollOffset - lastScrollOffset; lastScrollOffset = scrollOffset;
-        if (scrollOffset < 10) { if (!headersShown) applyHeaderVisibility(true, true); dirAccum = 0f; lastDir = 0; return; }
+    private boolean isActiveLoad(int requestGeneration, @NonNull String requestMediaFilter) {
+        return loadGeneration.get() == requestGeneration && requestMediaFilter.equals(mediaFilter);
+    }
+
+    private void hydrateVideoDurations(
+            @NonNull ServerPhotosService svc,
+            @NonNull java.util.List<org.json.JSONObject> items,
+            boolean includeLocked
+    ) {
+        java.util.ArrayList<String> ids = new java.util.ArrayList<>();
+        java.util.HashSet<String> seen = new java.util.HashSet<>();
+        for (org.json.JSONObject item : items) {
+            if (!item.optBoolean("is_video", false)) continue;
+            String assetId = item.optString("asset_id", "");
+            if (assetId == null || assetId.isEmpty() || seen.contains(assetId)) continue;
+            ids.add(assetId);
+            seen.add(assetId);
+        }
+        if (ids.isEmpty()) return;
+
+        try {
+            org.json.JSONArray hydrated = svc.getPhotosByAssetIds(ids, includeLocked);
+            java.util.HashMap<String, Long> durationByAsset = new java.util.HashMap<>();
+            for (int i = 0; i < hydrated.length(); i++) {
+                org.json.JSONObject photo = hydrated.getJSONObject(i);
+                String assetId = photo.optString("asset_id", "");
+                long durationMs = mediaDurationMs(photo);
+                if (assetId != null && !assetId.isEmpty()) {
+                    durationByAsset.put(assetId, durationMs);
+                }
+            }
+            if (durationByAsset.isEmpty()) return;
+
+            for (org.json.JSONObject item : items) {
+                String assetId = item.optString("asset_id", "");
+                Long durationMs = durationByAsset.get(assetId);
+                if (durationMs == null) continue;
+                item.put("duration_ms", Math.max(0L, durationMs.longValue()));
+            }
+        } catch (Exception e) {
+            try { android.util.Log.w("OpenPhotos", "[PHOTOS/UI] video duration hydrate failed: " + e.getMessage()); } catch (Exception ignored) {}
+        }
+    }
+
+    private static long mediaDurationMs(@NonNull org.json.JSONObject item) {
+        long durationMs = firstPositiveLong(item,
+                "duration_ms",
+                "durationMs",
+                "video_duration_ms",
+                "videoDurationMs");
+        if (durationMs > 0L) return durationMs;
+
+        double durationSeconds = firstPositiveDouble(item,
+                "duration_s",
+                "durationS",
+                "duration_sec",
+                "durationSeconds",
+                "video_duration_s",
+                "videoDurationSeconds");
+        if (durationSeconds <= 0.0) return 0L;
+        return Math.max(0L, Math.round(durationSeconds * 1000.0));
+    }
+
+    private static long firstPositiveLong(@NonNull org.json.JSONObject item, @NonNull String... keys) {
+        for (String key : keys) {
+            if (!item.has(key) || item.isNull(key)) continue;
+            long value = item.optLong(key, 0L);
+            if (value > 0L) return value;
+        }
+        return 0L;
+    }
+
+    private static double firstPositiveDouble(@NonNull org.json.JSONObject item, @NonNull String... keys) {
+        for (String key : keys) {
+            if (!item.has(key) || item.isNull(key)) continue;
+            double value = item.optDouble(key, 0.0);
+            if (value > 0.0) return value;
+        }
+        return 0.0;
+    }
+
+    private void handleScrollForHeader(int dy, boolean atTop) {
+        if (!trackingScroll) { trackingScroll = true; dirAccum = 0f; lastDir = 0; return; }
+        if (atTop) { if (!headersShown) applyHeaderVisibility(true, true); dirAccum = 0f; lastDir = 0; return; }
+        int delta = dy;
         if (Math.abs(delta) < 1) return; // jitter guard
         int dir = delta > 0 ? 1 : -1; if (dir != lastDir) { dirAccum = 0f; lastDir = dir; }
         dirAccum += Math.abs(delta);
@@ -1397,23 +1599,23 @@ public class PhotosHomeFragment extends Fragment {
 
     private void applyHeaderVisibility(boolean show, boolean animated) {
         if (headerContainer == null) return; headersShown = show;
-        int targetPad = show ? headerHeight : 0;
+        int targetPad = headerHeight;
         float targetTrans = show ? 0f : -headerHeight;
+        setRecyclerTopPadding(targetPad);
         if (!animated) {
             headerContainer.setTranslationY(targetTrans);
-            setRecyclerTopPadding(targetPad);
             return;
         }
-        // Animate both translationY and paddingTop
+        headerContainer.animate().cancel();
         headerContainer.animate().translationY(targetTrans).setDuration(180).start();
-        final int startPad = grid.getPaddingTop();
-        android.animation.ValueAnimator va = android.animation.ValueAnimator.ofInt(startPad, targetPad);
-        va.setDuration(180);
-        va.addUpdateListener(a -> setRecyclerTopPadding((Integer) a.getAnimatedValue()));
-        va.start();
     }
 
-    private void setRecyclerTopPadding(int pad) { grid.setPadding(grid.getPaddingLeft(), pad, grid.getPaddingRight(), grid.getPaddingBottom()); }
+    private void setRecyclerTopPadding(int pad) {
+        if (grid == null) return;
+        if (currentRecyclerTopPadding == pad && grid.getPaddingTop() == pad) return;
+        currentRecyclerTopPadding = pad;
+        grid.setPadding(grid.getPaddingLeft(), pad, grid.getPaddingRight(), grid.getPaddingBottom());
+    }
 
     private void requestYearBucketsAsync() {
         new Thread(() -> {

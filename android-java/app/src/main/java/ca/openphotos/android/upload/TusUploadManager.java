@@ -1,6 +1,7 @@
 package ca.openphotos.android.upload;
 
 import android.content.Context;
+import android.media.MediaMetadataRetriever;
 import android.net.ConnectivityManager;
 import android.net.NetworkCapabilities;
 import android.util.Log;
@@ -188,6 +189,13 @@ public class TusUploadManager {
         if (assetId != null) meta.put("asset_id", assetId);
         if (!backupIdCandidates.isEmpty()) meta.put("backup_id", backupIdCandidates.get(0));
         if (albumPathsJson != null && !albumPathsJson.isEmpty()) meta.put("albums", albumPathsJson);
+        if (photo.mediaType == 1) {
+            long durationMs = extractVideoDurationMs(file);
+            if (durationMs > 0) {
+                meta.put("duration_ms", String.valueOf(durationMs));
+                meta.put("duration_s", String.format(Locale.US, "%.3f", durationMs / 1000.0));
+            }
+        }
         meta.put("source", "android");
 
         TusUpload upload = new TusUpload(file);
@@ -280,6 +288,23 @@ public class TusUploadManager {
             if (!trimmed.isEmpty()) return trimmed;
         }
         return null;
+    }
+
+    private long extractVideoDurationMs(@NonNull File file) {
+        MediaMetadataRetriever mmr = new MediaMetadataRetriever();
+        try {
+            mmr.setDataSource(file.getAbsolutePath());
+            String duration = mmr.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
+            if (duration == null || duration.trim().isEmpty()) return 0L;
+            return Math.max(0L, Long.parseLong(duration.trim()));
+        } catch (Exception ignored) {
+            return 0L;
+        } finally {
+            try {
+                mmr.release();
+            } catch (Exception ignored) {
+            }
+        }
     }
 
     private String ensureFilenameExtension(String filename, String mimeType, String fallbackSemantic) {

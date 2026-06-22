@@ -17,15 +17,18 @@ import ca.openphotos.android.core.AuthorizedHttpClient;
 import ca.openphotos.android.core.AuthManager;
 import ca.openphotos.android.e2ee.E2EEManager;
 import ca.openphotos.android.e2ee.PAE3;
+import ca.openphotos.android.i18n.AndroidI18n;
 import ca.openphotos.android.media.MediaSaveHelper;
 import ca.openphotos.android.media.MotionPhotoParser;
 import ca.openphotos.android.media.MotionPhotoSupport;
+import ca.openphotos.android.media.VideoPlaybackCache;
 import ca.openphotos.android.server.ServerPhotosService;
 import com.google.android.exoplayer2.DefaultLoadControl;
 import com.google.android.exoplayer2.ExoPlayer;
 import com.google.android.exoplayer2.MediaItem;
 import com.google.android.exoplayer2.Player;
 import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
+import com.google.android.exoplayer2.upstream.DataSource;
 import com.google.android.exoplayer2.upstream.DefaultHttpDataSource;
 import com.google.android.exoplayer2.ui.PlayerView;
 
@@ -42,12 +45,14 @@ public class ViewerFragment extends Fragment {
     private TextView info; private TextView title; private View btnMore;
     private View videoControls; private android.widget.ImageButton btnPlayPause, btnMute; private android.widget.SeekBar seek;
     private PlayerView playerView;
+    private android.widget.ProgressBar videoLoading;
 
-    private java.util.ArrayList<String> uris; private java.util.ArrayList<String> assetIds; private int index; private boolean isServer; private boolean eeEnabled;
+    private java.util.ArrayList<String> uris; private java.util.ArrayList<String> assetIds; private boolean[] videoFlags; private int index; private boolean isServer; private boolean eeEnabled;
     private final java.util.Map<String, org.json.JSONObject> metaByAsset = new java.util.HashMap<>();
     private final java.util.Map<String, LocalMotionMeta> localMetaByUri = new java.util.HashMap<>();
     private final java.util.List<java.io.File> tempMotionFiles = new java.util.ArrayList<>();
     private ExoPlayer player; private boolean playerMuted; private boolean draggingSeek; private boolean suppressSeek;
+    private boolean videoPlaybackEnded;
     private boolean livePlaybackMode = false;
     private String livePlaybackKey = null;
     private boolean liveAutoPlayPending = true;
@@ -63,20 +68,23 @@ public class ViewerFragment extends Fragment {
         pager = root.findViewById(R.id.pager); info = root.findViewById(R.id.info); title = root.findViewById(R.id.title); btnMore = root.findViewById(R.id.btn_more);
         videoControls = root.findViewById(R.id.video_controls); btnPlayPause = root.findViewById(R.id.btn_play_pause); btnMute = root.findViewById(R.id.btn_mute); seek = root.findViewById(R.id.seek);
         playerView = root.findViewById(R.id.player_view);
+        videoLoading = root.findViewById(R.id.video_loading);
 
         String uri = getArguments() != null ? getArguments().getString("uri", "") : "";
         isServer = getArguments() != null && getArguments().getBoolean("isServer", false);
         String assetId = getArguments() != null ? getArguments().getString("assetId", "") : "";
         uris = getArguments() != null ? getArguments().getStringArrayList("uris") : null;
         assetIds = getArguments() != null ? getArguments().getStringArrayList("assetIds") : null;
+        videoFlags = getArguments() != null ? getArguments().getBooleanArray("isVideos") : null;
         index = getArguments() != null ? getArguments().getInt("index", 0) : 0;
         java.util.ArrayList<String> useUris = uris; java.util.ArrayList<String> useAssetIds = assetIds;
-        if (useUris == null || useUris.isEmpty()) { useUris = new java.util.ArrayList<>(); if (uri != null && !uri.isEmpty()) useUris.add(uri); useAssetIds = new java.util.ArrayList<>(); useAssetIds.add(assetId); index = 0; }
+        boolean[] useVideoFlags = videoFlags;
+        if (useUris == null || useUris.isEmpty()) { useUris = new java.util.ArrayList<>(); if (uri != null && !uri.isEmpty()) useUris.add(uri); useAssetIds = new java.util.ArrayList<>(); useAssetIds.add(assetId); useVideoFlags = new boolean[]{false}; videoFlags = useVideoFlags; index = 0; }
         title.setText(isServer ? (useAssetIds != null && index < useAssetIds.size() ? useAssetIds.get(index) : assetId) : "");
         info.setVisibility(View.GONE);
         if (btnMore != null) btnMore.setVisibility(isServer ? View.VISIBLE : View.GONE);
 
-        ViewerPagerAdapter pad = new ViewerPagerAdapter(useUris, useAssetIds, isServer);
+        ViewerPagerAdapter pad = new ViewerPagerAdapter(useUris, useAssetIds, isServer, useVideoFlags);
         pager.setAdapter(pad); pager.setUserInputEnabled(true);
         pad.setOnScaleChangeListener(scale -> pager.setUserInputEnabled(scale <= 1.05f));
         if (index >= 0 && index < useUris.size()) pager.setCurrentItem(index, false);
@@ -114,6 +122,7 @@ public class ViewerFragment extends Fragment {
                 liveAutoPlayPending = true;
                 ensureMetadataForCurrent(false);
                 videoControls.setVisibility(chrome[0] && isCurrentVideo() ? View.VISIBLE : View.GONE);
+                if (isCurrentVideo()) preparePlayer();
                 maybeLoadNextPage();
                 updateLiveBadgeVisibility();
             }
@@ -139,6 +148,10 @@ public class ViewerFragment extends Fragment {
 
         new Thread(() -> { eeEnabled = CapabilitiesService.get(requireContext().getApplicationContext()).ee; }).start();
         ensureMetadataForCurrent(false);
+        if (isCurrentVideo()) {
+            videoControls.setVisibility(View.VISIBLE);
+            preparePlayer();
+        }
         updateLiveBadgeVisibility();
         return root;
     }
@@ -169,20 +182,38 @@ public class ViewerFragment extends Fragment {
                 if (photos.length() == 0) return;
                 java.util.ArrayList<String> newUris = new java.util.ArrayList<>();
                 java.util.ArrayList<String> newAssetIds = new java.util.ArrayList<>();
+                boolean[] newVideoFlags = new boolean[photos.length()];
                 for (int i=0;i<photos.length();i++) {
                     org.json.JSONObject p = photos.getJSONObject(i);
-                    String id = p.optString("asset_id"); newAssetIds.add(id); newUris.add(svc.imageUrl(id));
+                    String id = p.optString("asset_id");
+                    boolean isVideo = p.optBoolean("is_video", false);
+                    newAssetIds.add(id);
+                    newUris.add(isVideo ? svc.thumbnailUrl(id) : svc.imageUrl(id));
+                    newVideoFlags[i] = isVideo;
                 }
                 requireActivity().runOnUiThread(() -> {
                     // Append to current lists backing the adapter
                     java.util.ArrayList<String> mergedUris = new java.util.ArrayList<>(uris); mergedUris.addAll(newUris); uris = mergedUris;
                     java.util.ArrayList<String> mergedIds = new java.util.ArrayList<>(assetIds); mergedIds.addAll(newAssetIds); assetIds = mergedIds;
-                    ViewerPagerAdapter adapter = new ViewerPagerAdapter(uris, assetIds, true); pager.setAdapter(adapter); pager.setCurrentItem(index, false);
+                    videoFlags = appendVideoFlags(videoFlags, newVideoFlags);
+                    ViewerPagerAdapter adapter = new ViewerPagerAdapter(uris, assetIds, true, videoFlags); pager.setAdapter(adapter); pager.setCurrentItem(index, false);
                     // Increment next page for subsequent loads
                     getArguments().putInt("paging_next_page", nextPage + 1);
                 });
             } catch (Exception ignored) {}
         }).start();
+    }
+
+    private boolean[] appendVideoFlags(@Nullable boolean[] existing, @NonNull boolean[] appended) {
+        int oldLen = existing != null ? existing.length : 0;
+        boolean[] merged = new boolean[oldLen + appended.length];
+        if (existing != null) System.arraycopy(existing, 0, merged, 0, oldLen);
+        System.arraycopy(appended, 0, merged, oldLen, appended.length);
+        return merged;
+    }
+
+    private boolean isCurrentAsset(@Nullable String aid) {
+        return aid != null && assetIds != null && index >= 0 && index < assetIds.size() && aid.equals(assetIds.get(index));
     }
 
     private void showActionsMenu(String aid, View anchor) {
@@ -257,6 +288,7 @@ public class ViewerFragment extends Fragment {
                 if (!isAdded()) return;
                 requireActivity().runOnUiThread(() -> {
                     videoControls.setVisibility(isCurrentVideo() ? View.VISIBLE : View.GONE);
+                    if (isCurrentAsset(aid) && isCurrentVideo()) preparePlayer();
                     updateLiveBadgeVisibility();
                 });
             } catch (Exception ignored) {
@@ -385,6 +417,7 @@ public class ViewerFragment extends Fragment {
 
     private boolean isCurrentVideo() {
         if (!isServer || assetIds == null || index >= assetIds.size()) return false;
+        if (videoFlags != null && index >= 0 && index < videoFlags.length && videoFlags[index]) return true;
         org.json.JSONObject p = metaByAsset.get(assetIds.get(index));
         return p != null && p.optBoolean("is_video", false);
     }
@@ -752,6 +785,24 @@ public class ViewerFragment extends Fragment {
                 .build();
     }
 
+    @NonNull
+    private DefaultLoadControl newCloudVideoLoadControl() {
+        boolean localServer = AuthManager.isLocalEndpointUrl(AuthManager.get(requireContext()).getServerUrl());
+        int minBufferMs = localServer ? 15_000 : 45_000;
+        int maxBufferMs = localServer ? 60_000 : 180_000;
+        int bufferForPlaybackMs = localServer ? 1_500 : 8_000;
+        int bufferForPlaybackAfterRebufferMs = localServer ? 3_000 : 20_000;
+        return new DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                        minBufferMs,
+                        maxBufferMs,
+                        bufferForPlaybackMs,
+                        bufferForPlaybackAfterRebufferMs
+                )
+                .setPrioritizeTimeOverSizeThresholds(true)
+                .build();
+    }
+
     private void stopInlineLivePlayback(@Nullable String expectedKey) {
         if (!isAdded()) return;
         requireActivity().runOnUiThread(() -> {
@@ -789,14 +840,139 @@ public class ViewerFragment extends Fragment {
 
     private void saveCurrent(String aid){ new Thread(() -> { try { if (isCurrentLive()) MediaSaveHelper.saveLive(requireContext().getApplicationContext(), aid, null); else if (isCurrentVideo()) MediaSaveHelper.saveVideo(requireContext().getApplicationContext(), aid, null); else MediaSaveHelper.saveImage(requireContext().getApplicationContext(), aid, null); requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Saved to Photos", android.widget.Toast.LENGTH_SHORT).show()); } catch (Exception e) { requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Save failed: "+e.getMessage(), android.widget.Toast.LENGTH_LONG).show()); } }).start(); }
 
-    private void shareCurrent(String aid){ org.json.JSONObject p = metaByAsset.get(aid); if (p != null && p.optBoolean("locked",false)) { android.widget.Toast.makeText(requireContext(), "Share unavailable for locked items", android.widget.Toast.LENGTH_LONG).show(); return; } try { java.io.File f = ca.openphotos.android.media.DiskImageCache.get(requireContext()).readFile(ca.openphotos.android.media.DiskImageCache.Bucket.IMAGES, aid); if (f==null||!f.exists()) { android.widget.Toast.makeText(requireContext(), "Original not cached yet", android.widget.Toast.LENGTH_SHORT).show(); return; } android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(requireContext(), requireContext().getPackageName()+".provider", f); android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND); i.setType("image/*"); i.putExtra(android.content.Intent.EXTRA_STREAM, uri); i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION); startActivity(android.content.Intent.createChooser(i, "Share")); } catch (Exception e) { android.widget.Toast.makeText(requireContext(), "Share failed", android.widget.Toast.LENGTH_LONG).show(); } }
+    private void shareCurrent(String aid){ org.json.JSONObject p = metaByAsset.get(aid); if (p != null && p.optBoolean("locked",false)) { android.widget.Toast.makeText(requireContext(), "Share unavailable for locked items", android.widget.Toast.LENGTH_LONG).show(); return; } try { java.io.File f = ca.openphotos.android.media.DiskImageCache.get(requireContext()).readFile(ca.openphotos.android.media.DiskImageCache.Bucket.IMAGES, ViewerPagerAdapter.serverImageCacheKey(aid)); if (f==null||!f.exists()) { android.widget.Toast.makeText(requireContext(), "Original not cached yet", android.widget.Toast.LENGTH_SHORT).show(); return; } android.net.Uri uri = androidx.core.content.FileProvider.getUriForFile(requireContext(), requireContext().getPackageName()+".provider", f); android.content.Intent i = new android.content.Intent(android.content.Intent.ACTION_SEND); i.setType("image/*"); i.putExtra(android.content.Intent.EXTRA_STREAM, uri); i.addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION); startActivity(android.content.Intent.createChooser(i, "Share")); } catch (Exception e) { android.widget.Toast.makeText(requireContext(), "Share failed", android.widget.Toast.LENGTH_LONG).show(); } }
 
     private void openAlbumTree(String aid){ AlbumTreeDialogFragment f = AlbumTreeDialogFragment.newInstance(true); getParentFragmentManager().setFragmentResultListener(AlbumTreeDialogFragment.KEY_SELECT_RESULT, this, (key,b)->{ int albumId = b.getInt("album_id",0); new Thread(() -> { try { ServerPhotosService svc = new ServerPhotosService(requireContext().getApplicationContext()); org.json.JSONArray arr = svc.getPhotosByAssetIds(java.util.Collections.singletonList(aid), false); int nid = (arr.length()>0)? arr.getJSONObject(0).optInt("id",0):0; if (nid>0) svc.addPhotosToAlbum(albumId, java.util.Collections.singletonList(nid)); requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Added to album", android.widget.Toast.LENGTH_SHORT).show()); } catch (Exception e) { requireActivity().runOnUiThread(() -> android.widget.Toast.makeText(requireContext(), "Add failed", android.widget.Toast.LENGTH_LONG).show()); } }).start(); }); f.show(getParentFragmentManager(), "albumTree"); }
 
-    private void preparePlayer(){ if(!isCurrentVideo()){ releasePlayer(); return; } if(player!=null) return; player = new ExoPlayer.Builder(requireContext()).build(); if (playerView != null) { playerView.setPlayer(player); playerView.setUseController(false); playerView.setVisibility(View.VISIBLE); } String aid = assetIds.get(index); String url = new ServerPhotosService(requireContext().getApplicationContext()).imageUrl(aid); MediaItem item = MediaItem.fromUri(url); player.setMediaItem(item); player.prepare(); player.play(); btnPlayPause.setImageResource(android.R.drawable.ic_media_pause); player.addListener(new com.google.android.exoplayer2.Player.Listener(){ @Override public void onIsPlayingChanged(boolean p){ btnPlayPause.setImageResource(p? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play);} @Override public void onPlaybackStateChanged(int state){ int dur = (int)Math.max(0, player.getDuration()); suppressSeek=true; seek.setMax(dur); suppressSeek=false; }}); pager.postDelayed(new Runnable(){ @Override public void run(){ if(player!=null && !draggingSeek){ suppressSeek=true; seek.setProgress((int)player.getCurrentPosition()); suppressSeek=false; } if(player!=null) pager.postDelayed(this,300); }},300); }
-    private void togglePlayPause(){ if(player==null){ preparePlayer(); return; } if(player.isPlaying()) player.pause(); else player.play(); }
-    private void toggleMute(){ if(player==null) return; playerMuted=!playerMuted; player.setVolume(playerMuted?0f:1f); btnMute.setImageResource(playerMuted? android.R.drawable.ic_lock_silent_mode : android.R.drawable.ic_lock_silent_mode_off); }
-    private void releasePlayer(){ try{ if(player!=null){ player.release(); player=null; } } catch(Exception ignored){} if (playerView != null) { try { playerView.setPlayer(null); playerView.setVisibility(View.GONE); } catch (Exception ignored) {} } livePlaybackMode = false; livePlaybackKey = null; }
+    private void preparePlayer(){
+        if(!isCurrentVideo()){ releasePlayer(); return; }
+        if(player!=null) return;
+        if (assetIds == null || index < 0 || index >= assetIds.size()) return;
+        String aid = assetIds.get(index);
+        String url = new ServerPhotosService(requireContext().getApplicationContext()).videoStreamUrl(aid);
+        videoPlaybackEnded = false;
+        setVideoLoadingVisible(true);
+
+        DefaultHttpDataSource.Factory httpFactory = new DefaultHttpDataSource.Factory()
+                .setConnectTimeoutMs(15_000)
+                .setReadTimeoutMs(120_000)
+                .setAllowCrossProtocolRedirects(true);
+        String token = AuthManager.get(requireContext()).getToken();
+        java.util.Map<String, String> headers = new java.util.HashMap<>();
+        if (token != null && !token.trim().isEmpty()) {
+            headers.put("Authorization", "Bearer " + token.trim());
+        }
+        httpFactory.setDefaultRequestProperties(headers);
+        DataSource.Factory cachedFactory = VideoPlaybackCache.dataSourceFactory(
+                requireContext().getApplicationContext(),
+                httpFactory
+        );
+        DefaultMediaSourceFactory mediaSourceFactory = new DefaultMediaSourceFactory(cachedFactory);
+
+        player = new ExoPlayer.Builder(requireContext())
+                .setMediaSourceFactory(mediaSourceFactory)
+                .setLoadControl(newCloudVideoLoadControl())
+                .build();
+        if (playerView != null) {
+            playerView.setPlayer(player);
+            playerView.setUseController(false);
+            playerView.setVisibility(View.VISIBLE);
+        }
+        MediaItem item = new MediaItem.Builder()
+                .setUri(url)
+                .setCustomCacheKey(VideoPlaybackCache.cacheKeyForAsset(aid))
+                .build();
+        player.setMediaItem(item);
+        applyPlayerMuteState();
+        player.prepare();
+        player.play();
+        updatePlayPauseButton();
+        player.addListener(new com.google.android.exoplayer2.Player.Listener(){
+            @Override public void onIsPlayingChanged(boolean p){ if (p) videoPlaybackEnded = false; updatePlayPauseButton(); }
+            @Override public void onPlaybackStateChanged(int state){
+                setVideoLoadingVisible(state == Player.STATE_BUFFERING || state == Player.STATE_IDLE);
+                if (state == Player.STATE_ENDED) {
+                    videoPlaybackEnded = true;
+                    setVideoLoadingVisible(false);
+                } else if (state == Player.STATE_READY && player != null && player.isPlaying()) {
+                    videoPlaybackEnded = false;
+                }
+                updatePlayPauseButton();
+                int dur = (int)Math.max(0, player.getDuration());
+                suppressSeek=true; seek.setMax(dur); suppressSeek=false;
+            }
+            @Override public void onPlayerError(com.google.android.exoplayer2.PlaybackException error) {
+                try { android.util.Log.w("OpenPhotos", "[VIEWER] video playback failed aid=" + aid + " err=" + error.getMessage(), error); } catch (Exception ignored) {}
+                setVideoLoadingVisible(false);
+                android.widget.Toast.makeText(requireContext(), AndroidI18n.t("Unable to play video"), android.widget.Toast.LENGTH_LONG).show();
+            }
+        });
+        pager.postDelayed(new Runnable(){ @Override public void run(){ if(player!=null && !draggingSeek){ suppressSeek=true; seek.setProgress((int)player.getCurrentPosition()); suppressSeek=false; } if(player!=null) pager.postDelayed(this,300); }},300);
+    }
+    private void togglePlayPause(){
+        if(player==null){ preparePlayer(); return; }
+        if(videoPlaybackEnded || player.getPlaybackState() == Player.STATE_ENDED) {
+            restartVideoPlayback();
+            return;
+        }
+        if(player.isPlaying()) player.pause(); else player.play();
+        updatePlayPauseButton();
+    }
+    private void toggleMute(){
+        playerMuted = !playerMuted;
+        applyPlayerMuteState();
+    }
+
+    private void applyPlayerMuteState() {
+        if (player != null) {
+            player.setVolume(playerMuted ? 0f : 1f);
+        }
+        updateMuteButton();
+    }
+
+    private void updateMuteButton() {
+        if (btnMute == null) return;
+        btnMute.setImageResource(playerMuted
+                ? android.R.drawable.ic_lock_silent_mode
+                : android.R.drawable.ic_lock_silent_mode_off);
+    }
+    private void releasePlayer(){ try{ if(player!=null){ player.release(); player=null; } } catch(Exception ignored){} videoPlaybackEnded = false; if (playerView != null) { try { playerView.setPlayer(null); playerView.setVisibility(View.GONE); } catch (Exception ignored) {} } setVideoLoadingVisible(false); livePlaybackMode = false; livePlaybackKey = null; }
+
+    private void restartVideoPlayback() {
+        String expectedKey = currentItemKey();
+        videoPlaybackEnded = false;
+        setVideoLoadingVisible(true);
+        try {
+            suppressSeek = true;
+            seek.setProgress(0);
+        } catch (Exception ignored) {
+        } finally {
+            suppressSeek = false;
+        }
+        releasePlayer();
+        if (expectedKey == null || expectedKey.equals(currentItemKey())) {
+            preparePlayer();
+        }
+    }
+
+    private void updatePlayPauseButton() {
+        if (btnPlayPause == null) return;
+        if (videoPlaybackEnded) {
+            btnPlayPause.setImageResource(R.drawable.ic_replay_24);
+        } else if (player != null && player.isPlaying()) {
+            btnPlayPause.setImageResource(android.R.drawable.ic_media_pause);
+        } else {
+            btnPlayPause.setImageResource(android.R.drawable.ic_media_play);
+        }
+    }
+
+    private void setVideoLoadingVisible(boolean visible) {
+        if (videoLoading == null) return;
+        try {
+            videoLoading.setVisibility(visible ? View.VISIBLE : View.GONE);
+            if (visible) videoLoading.bringToFront();
+        } catch (Exception ignored) {}
+    }
 
     @Nullable
     private String currentItemKey() {
