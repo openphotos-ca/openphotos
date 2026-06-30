@@ -177,6 +177,9 @@
   display: flex;
   align-items: center;
   justify-content: center;
+  user-select: none;
+  -moz-user-select: none;
+  -webkit-user-select: none;
 }
 
 .fullscreen-image {
@@ -184,6 +187,18 @@
   max-height: 100vh;
   object-fit: contain;
   display: block;
+  user-select: none;
+  -moz-user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
+}
+
+.fullscreen-viewer img,
+.fullscreen-viewer video {
+  user-select: none;
+  -moz-user-select: none;
+  -webkit-user-select: none;
+  -webkit-user-drag: none;
 }
 
 /* Custom scrollbar */

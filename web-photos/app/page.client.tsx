@@ -268,6 +268,7 @@ export default function HomePage() {
   const effectiveContainerWidth = Math.max(320, containerDimensions.width || 0);
   const effectiveContainerHeight = Math.max(320, containerDimensions.height || 0);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
+  const viewerOpenedAtRef = useRef<number>(0);
   // Zoom/Pan state for viewer
   const [zoom, setZoom] = useState(1);
   const [offset, setOffset] = useState({ x: 0, y: 0 });
@@ -842,6 +843,14 @@ export default function HomePage() {
   const handlePhotoClick = useCallback((photo: Photo) => {
     setViewerOverride(null); // ensure normal grid context
     setViewerFromSimilar(false);
+    viewerOpenedAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+    setIsPanning(false);
+    setIsPinching(false);
+    panStart.current = null;
+    pinchStart.current = null;
+    touchSwipeStart.current = null;
     const idx = displayPhotos.findIndex(p => p.asset_id === photo.asset_id);
     setViewerIndex(idx >= 0 ? idx : 0);
     // Ensure panels are hidden on entry
@@ -889,6 +898,14 @@ export default function HomePage() {
         is_screenshot: 0,
       } as any;
     });
+    viewerOpenedAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now();
+    setZoom(1);
+    setOffset({ x: 0, y: 0 });
+    setIsPanning(false);
+    setIsPinching(false);
+    panStart.current = null;
+    pinchStart.current = null;
+    touchSwipeStart.current = null;
     setViewerOverride(seq);
     setViewerIndex(index >= 0 && index < seq.length ? index : 0);
     setViewerFromSimilar(true);
@@ -1465,8 +1482,11 @@ export default function HomePage() {
 
   // Mouse pan (when zoom > 1)
   const onMouseDown = useCallback((e: React.MouseEvent) => {
-    if (zoom <= 1) return;
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement | null;
+    if (target?.closest('button,input,select,textarea,a')) return;
     e.preventDefault();
+    if (zoom <= 1) return;
     setIsPanning(true);
     panStart.current = { x: e.clientX - offset.x, y: e.clientY - offset.y };
   }, [zoom, offset.x, offset.y]);
@@ -2252,6 +2272,9 @@ function AlbumTreeNodes({ nodes, photoId, refreshAlbums, toast }: { nodes: TreeN
                  onMouseLeave={onMouseUp}
                  onDoubleClick={(e) => {
                    e.stopPropagation();
+                   e.preventDefault();
+                   const now = typeof performance !== 'undefined' ? performance.now() : Date.now();
+                   if (now - viewerOpenedAtRef.current < 400) return;
                    const rect = (e.currentTarget as HTMLDivElement).getBoundingClientRect();
                    toggleZoomAtPoint(e.clientX, e.clientY, rect);
                  }}
