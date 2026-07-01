@@ -3067,6 +3067,92 @@ pub async fn debug_locked_sample(
     }))
 }
 
+fn backfill_missing_video_durations_for_page(
+    conn: &Connection,
+    organization_id: i32,
+    user_id: &str,
+    photos: &mut [PhotoDTO],
+) {
+    const MAX_PROBES_PER_PAGE: usize = 24;
+
+    let mut probes = 0usize;
+    let mut backfilled = 0usize;
+    for photo in photos.iter_mut() {
+        if probes >= MAX_PROBES_PER_PAGE {
+            break;
+        }
+        if !photo.is_video || photo.locked || photo.duration_ms.unwrap_or(0) > 0 {
+            continue;
+        }
+        probes += 1;
+
+        let asset_id = photo.asset_id.clone();
+        let path = conn
+            .prepare(
+                "SELECT path
+                 FROM photos
+                 WHERE organization_id = ?
+                   AND user_id = ?
+                   AND asset_id = ?
+                   AND COALESCE(locked, FALSE) = FALSE
+                 LIMIT 1",
+            )
+            .ok()
+            .and_then(|mut stmt| {
+                stmt.query_row(
+                    duckdb::params![organization_id, user_id, &asset_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .filter(|path| !path.trim().is_empty());
+        let Some(path) = path else {
+            continue;
+        };
+        let media_path = StdPath::new(&path);
+        if !media_path.is_file() {
+            continue;
+        }
+
+        let Some(duration_ms) = video::probe_metadata(media_path)
+            .ok()
+            .and_then(|metadata| metadata.duration_ms)
+            .filter(|duration_ms| *duration_ms > 0)
+        else {
+            continue;
+        };
+
+        photo.duration_ms = Some(duration_ms);
+        if let Err(err) = conn.execute(
+            "UPDATE photos
+             SET duration_ms = ?
+             WHERE organization_id = ?
+               AND user_id = ?
+               AND asset_id = ?
+               AND COALESCE(duration_ms, 0) <= 0",
+            duckdb::params![duration_ms, organization_id, user_id, &asset_id],
+        ) {
+            tracing::warn!(
+                "[LIST_PHOTOS] duration backfill update failed asset_id={} path={}: {}",
+                asset_id,
+                path,
+                err
+            );
+        } else {
+            backfilled += 1;
+        }
+    }
+
+    if backfilled > 0 {
+        tracing::info!(
+            target = "grid",
+            "[LIST_PHOTOS] backfilled missing video durations count={} probes={}",
+            backfilled,
+            probes
+        );
+    }
+}
+
 #[instrument(skip(state, headers))]
 pub async fn list_photos(
     State(state): State<Arc<AppState>>,
@@ -3592,10 +3678,16 @@ pub async fn list_photos(
         );
     }
 
-    let mut has_more = photos.len() > limit as usize;
+    let has_more = photos.len() > limit as usize;
     if has_more {
         photos.truncate(limit as usize);
     }
+    backfill_missing_video_durations_for_page(
+        &conn,
+        user.organization_id,
+        &user.user_id,
+        &mut photos,
+    );
     // If we skipped COUNT on non-first pages, we can still return an exact total once we hit the end.
     if total < 0 && !has_more {
         total = offset as i64 + photos.len() as i64;
@@ -5176,6 +5268,8 @@ pub async fn serve_image(
         let wants_avif_param = query_has_format_param(query, "avif");
         let wants_heic_param = query_has_format_param(query, "heic");
         let wants_original_param = query_has_format_param(query, "original");
+        let wants_stream_param =
+            query_has_format_param(query, "stream") || request_has_live_compat(Some(query));
         let ua = request
             .headers()
             .get(header::USER_AGENT)
@@ -5504,12 +5598,13 @@ pub async fn serve_image(
         // We treat `is_video` as authoritative even if the stored `mime_type` is missing or generic.
         if is_video || orig_content_type.starts_with("video/") {
             let is_apple = is_apple_core_media_user_agent(ua);
+            let force_stream_proxy = wants_stream_param;
 
             // Heuristic: very high bitrate videos (or huge files when duration is unknown) commonly
-            // stall on mobile networks. For AppleCoreMedia clients we generate a lower‑bitrate MP4
-            // proxy for smoother playback.
+            // stall on mobile networks. AppleCoreMedia clients and explicit stream requests use a
+            // lower-bitrate MP4 proxy for smoother playback.
             let mut size_bytes = size_opt;
-            if is_apple && size_bytes.is_none() {
+            if (is_apple || force_stream_proxy) && size_bytes.is_none() {
                 if let Ok(meta) = tokio::fs::metadata(&path).await {
                     size_bytes = Some(meta.len() as i64);
                 }
@@ -5521,10 +5616,11 @@ pub async fn serve_image(
                 }
                 _ => None,
             };
-            let needs_stream_proxy = is_apple
-                && avg_mbps
-                    .map(|mbps| mbps > 20.0)
-                    .unwrap_or_else(|| size_bytes.unwrap_or(0) > 400 * 1024 * 1024);
+            let needs_stream_proxy = force_stream_proxy
+                || (is_apple
+                    && avg_mbps
+                        .map(|mbps| mbps > 20.0)
+                        .unwrap_or_else(|| size_bytes.unwrap_or(0) > 400 * 1024 * 1024));
 
             if needs_stream_proxy {
                 match ensure_ios_stream_mp4_proxy(
@@ -5537,7 +5633,7 @@ pub async fn serve_image(
                 {
                     Ok(proxy_path) => {
                         info!(
-                            "Serving iOS streaming MP4 proxy for user {}. asset_id: {}, source: {}, proxy: {}, avg_mbps={:?}",
+                            "Serving streaming MP4 proxy for user {}. asset_id: {}, source: {}, proxy: {}, avg_mbps={:?}",
                             user.user_id,
                             asset_id,
                             path,
@@ -5564,7 +5660,7 @@ pub async fn serve_image(
                     }
                     Err(e) => {
                         tracing::warn!(
-                            "Failed to generate iOS streaming MP4 proxy for asset_id={} path={} err={}",
+                            "Failed to generate streaming MP4 proxy for asset_id={} path={} err={}",
                             asset_id,
                             path,
                             e
@@ -5573,11 +5669,12 @@ pub async fn serve_image(
                 }
             }
 
-            // iOS AVPlayer has limited container support. When the source is an unsupported container
+            // Some platform players have limited container support. When the source is unsupported
             // (commonly AVI/MKV/WebM), playback can stall on the first frame even though Range
-            // requests succeed. For AppleCoreMedia clients we generate a cached MP4 proxy and serve
-            // that instead.
-            if is_apple && !is_ios_supported_container_ext(ext_lc.as_str()) {
+            // requests succeed. AppleCoreMedia clients and explicit stream requests get a cached MP4
+            // proxy instead.
+            if (is_apple || force_stream_proxy) && !is_ios_supported_container_ext(ext_lc.as_str())
+            {
                 match ensure_ios_mp4_proxy(
                     state.as_ref(),
                     &user.user_id,

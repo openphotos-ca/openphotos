@@ -171,6 +171,30 @@ fn upload_metadata_value(
     })
 }
 
+fn parse_positive_i64_metadata(value: Option<&String>) -> Option<i64> {
+    value
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+}
+
+fn parse_duration_seconds_to_ms(value: Option<&String>) -> Option<i64> {
+    let seconds = value
+        .map(|v| v.trim())
+        .filter(|v| !v.is_empty())
+        .and_then(|v| v.parse::<f64>().ok())?;
+    if !seconds.is_finite() || seconds <= 0.0 {
+        return None;
+    }
+    Some((seconds * 1000.0).round() as i64)
+}
+
+fn parse_duration_ms_metadata(metadata: &HashMap<String, String>) -> Option<i64> {
+    parse_positive_i64_metadata(metadata.get("duration_ms"))
+        .or_else(|| parse_duration_seconds_to_ms(metadata.get("duration_s")))
+}
+
 fn emit_upload_ingested_event(
     state: &Arc<AppState>,
     user_id: &str,
@@ -1610,6 +1634,29 @@ pub(crate) async fn ingest_finished_upload(
                     }
                 }
             }
+            if is_video_extension(&ext) {
+                if let Some(duration_ms) = parse_duration_ms_metadata(meta) {
+                    let conn = data_db.lock();
+                    log_db_error!(
+                        conn.execute(
+                            "UPDATE photos
+                             SET duration_ms = CASE
+                                 WHEN COALESCE(duration_ms, 0) <= 0 THEN ?
+                                 ELSE duration_ms
+                             END
+                             WHERE organization_id = ? AND user_id = ? AND asset_id = ?",
+                            duckdb::params![duration_ms, org_id, user_id, &asset_id],
+                        ),
+                        format!("Update duration_ms for existing video asset {}", asset_id)
+                    );
+                    tracing::info!(
+                        target: "upload",
+                        "[UPLOAD] set duration_ms={} for existing video asset {} via metadata",
+                        duration_ms,
+                        asset_id
+                    );
+                }
+            }
             // Apply caption if provided
             if let Some(caption) = meta_get(&metadata, &["caption", "notes", "note"]) {
                 let conn = data_db.lock();
@@ -2186,12 +2233,9 @@ async fn ingest_locked_upload(
     let orientation: Option<i64> = metadata
         .get("orientation")
         .and_then(|s| s.parse::<i64>().ok());
-    let duration_ms: Option<i64> = metadata
-        .get("duration_s")
-        .and_then(|s| s.parse::<i64>().ok())
-        .map(|s| s * 1000);
+    let duration_ms: Option<i64> = parse_duration_ms_metadata(metadata);
     // created_at: prefer explicit epoch seconds when provided; else capture_ymd midnight UTC; else now
-    let mut created_at = if let Some(ca_raw) = metadata.get("created_at") {
+    let created_at = if let Some(ca_raw) = metadata.get("created_at") {
         ca_raw.trim().parse::<i64>().ok().filter(|v| *v > 0)
     } else {
         None

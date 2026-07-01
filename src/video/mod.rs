@@ -29,6 +29,20 @@ struct FfprobeTags {
 #[derive(Debug, Deserialize)]
 struct FfprobeOutput {
     streams: Option<Vec<FfprobeStream>>,
+    format: Option<FfprobeFormat>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FfprobeFormat {
+    duration: Option<String>,
+}
+
+fn parse_duration_ms(raw: Option<&str>) -> Option<i64> {
+    let secs = raw?.parse::<f64>().ok()?;
+    if !secs.is_finite() || secs <= 0.0 {
+        return None;
+    }
+    Some((secs * 1000.0).round() as i64)
 }
 
 pub fn is_video_extension(ext: &str) -> bool {
@@ -46,7 +60,7 @@ pub fn probe_metadata(path: &Path) -> Result<VideoMetadata> {
             "-select_streams",
             "v:0",
             "-show_entries",
-            "stream=width,height,duration:stream_tags=rotate",
+            "stream=width,height,duration:stream_tags=rotate:format=duration",
             "-of",
             "json",
             &path.to_string_lossy(),
@@ -55,9 +69,11 @@ pub fn probe_metadata(path: &Path) -> Result<VideoMetadata> {
     if !output.status.success() {
         return Ok(VideoMetadata::default());
     }
-    let parsed: FfprobeOutput =
-        serde_json::from_slice(&output.stdout).unwrap_or(FfprobeOutput { streams: None });
-    if let Some(streams) = parsed.streams {
+    let parsed: FfprobeOutput = serde_json::from_slice(&output.stdout).unwrap_or(FfprobeOutput {
+        streams: None,
+        format: None,
+    });
+    if let Some(streams) = parsed.streams.as_ref() {
         if let Some(s) = streams.first() {
             let width = s.width;
             let height = s.height;
@@ -66,11 +82,12 @@ pub fn probe_metadata(path: &Path) -> Result<VideoMetadata> {
                 .as_ref()
                 .and_then(|t| t.rotate.as_ref())
                 .and_then(|r| r.parse::<i32>().ok());
-            let duration_ms = s
-                .duration
-                .as_ref()
-                .and_then(|d| d.parse::<f64>().ok())
-                .map(|secs| (secs * 1000.0) as i64);
+            let duration_ms = parse_duration_ms(s.duration.as_deref()).or_else(|| {
+                parsed
+                    .format
+                    .as_ref()
+                    .and_then(|f| parse_duration_ms(f.duration.as_deref()))
+            });
             return Ok(VideoMetadata {
                 width,
                 height,
