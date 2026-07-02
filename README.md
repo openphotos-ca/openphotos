@@ -140,8 +140,7 @@ The source tree includes:
 - Android app source: `android-java`
 - Android release helper: `scripts/build_android_installer.sh`
 - Docker / NAS deployment files: `Dockerfile`, `compose.yaml`, `docker/`, `docs/docker.md`
-- Docker build helper for local OSS / EE images: `scripts/build_docker_image.sh`
-- GitHub Actions workflow for OSS-only multi-arch GHCR publishing: `.github/workflows/docker-release.yml`
+- Docker build helper for local images: `scripts/build_docker_image.sh`
 
 ### Build Server (No Installer)
 
@@ -204,28 +203,20 @@ Build output:
 
 #### Docker / NAS Deployment
 
-Use the public OSS container image:
+Use the public container image:
 
 ```bash
 cp docker/openphotos.env.example .env
 docker compose up -d
 ```
 
-Build the OSS image locally from source:
+Build the image locally from source:
 
 ```bash
-scripts/prepare_linux_ffmpeg_bundle.sh --arch amd64,arm64 --output-dir dist/linux-ffmpeg
 scripts/build_docker_image.sh --oss --platform linux/amd64
 OPENPHOTOS_IMAGE=openphotos:local docker compose up -d
 ```
 
-Build the enterprise image locally from the private source tree:
-
-```bash
-scripts/prepare_linux_ffmpeg_bundle.sh --arch amd64,arm64 --output-dir dist/linux-ffmpeg
-scripts/build_docker_image.sh --ee --platform linux/amd64
-OPENPHOTOS_IMAGE=openphotos-ee:local docker compose up -d
-```
 
 For ARM NAS devices, switch the build platform to `linux/arm64`.
 
@@ -241,41 +232,26 @@ If you keep those bundles somewhere else, pass:
 scripts/build_docker_image.sh --oss --platform linux/amd64 --ffmpeg-bundle-dir /path/to/linux-ffmpeg
 ```
 
-The public GitHub export intentionally omits the real `ee/` source tree. Enterprise Docker images cannot be built from the public repo and are never published to GitHub Packages.
+Build and push the architecture-specific images with the release helper scripts:
+
+```bash
+scripts/build_docker_amd64.sh
+scripts/build_docker_arm64.sh
+```
+
+The amd64 script builds `openphotos:amd64`, tags it as
+`ghcr.io/openphotos-ca/openphotos-amd64:oss`, and pushes it to GHCR. The arm64 script builds
+`openphotos:arm64`, tags it as `ghcr.io/openphotos-ca/openphotos-arm64:oss`, and pushes it to GHCR.
+Run these commands from the repository root on a machine with Docker Buildx configured and an
+authenticated `docker login ghcr.io` account that can push to `openphotos-ca`. Extra build options
+accepted by `scripts/build_docker_image.sh`, such as `--fresh`, `--pull`, `--no-cache`, and
+`--ffmpeg-bundle-dir /path/to/linux-ffmpeg`, can be passed through to either script.
 
 The Compose deployment stores all persistent app data under `/data` in the container. Change `OPENPHOTOS_DATA_MOUNT` in `.env` to use a NAS bind mount instead of the default named volume.
 
 Additional Docker / NAS notes are in:
 
 - `docs/docker.md`
-
-#### Publish OSS Docker Image To GHCR
-
-The exported repo includes a GitHub Actions workflow that publishes the OSS multi-arch image to `ghcr.io/openphotos-ca/openphotos` when you push a `v*.*.*` tag.
-
-Example:
-
-```bash
-git tag v0.4.0
-git push origin v0.4.0
-```
-
-After the first successful push, set the GHCR package visibility to public if you want users to run `docker compose pull` without logging in.
-
-That workflow prepares `dist/linux-ffmpeg` before `docker buildx`, so the published Docker image uses the same bundled Linux `ffmpeg` / `ffprobe` model as local Docker and Linux installer builds.
-
-Enterprise Docker images are local-build only. Use the private source tree with:
-
-```bash
-scripts/build_docker_image.sh --ee --platform linux/amd64
-```
-
-If you build the EE image on another machine, transfer it with:
-
-```bash
-docker save openphotos-ee:local | gzip > openphotos-ee-local.tar.gz
-gunzip -c openphotos-ee-local.tar.gz | docker load
-```
 
 #### Build Android App
 
