@@ -990,6 +990,47 @@ fn looks_like_windows_drive_path(path: &str) -> bool {
         && matches!(bytes[2], b'/' | b'\\')
 }
 
+fn validate_index_folder_path(folder: &str) -> Result<std::path::PathBuf, AppError> {
+    let path = std::path::Path::new(folder);
+    let metadata = std::fs::metadata(path).map_err(|err| {
+        AppError(anyhow::anyhow!(
+            "{}",
+            folder_access_error_message(folder, &err)
+        ))
+    })?;
+    if !metadata.is_dir() {
+        return Err(AppError(anyhow::anyhow!(
+            "Indexed folder path is not a directory: {}",
+            folder
+        )));
+    }
+    Ok(path.to_path_buf())
+}
+
+fn folder_access_error_message(folder: &str, err: &std::io::Error) -> String {
+    let mut message = format!(
+        "Folder does not exist or is not accessible to the OpenPhotos server: {} ({})",
+        folder, err
+    );
+
+    if cfg!(windows) {
+        message.push_str(
+            " Windows installer services run as NT AUTHORITY\\LocalService, so user-profile folders and mapped network drives may be unreadable. Grant that account read access, choose a service-readable folder, or run the OpenPhotos service as an account that can read this path.",
+        );
+        if folder.starts_with("\\\\") || folder.starts_with("//") {
+            message.push_str(
+                " UNC shares also need permissions for the service account; interactive Explorer credentials are not enough.",
+            );
+        }
+    } else if looks_like_windows_drive_path(folder) || folder.starts_with("\\\\") {
+        message.push_str(
+            " This OpenPhotos server is not running as a native Windows process; mount or bind the Windows folder first and enter the Linux/container path.",
+        );
+    }
+
+    message
+}
+
 #[instrument(skip(state))]
 pub async fn get_user_folders(
     State(state): State<Arc<AppState>>,
@@ -1068,19 +1109,13 @@ pub async fn update_user_folders(
 
     // Validate folder paths exist and are accessible
     for folder in &folders {
-        let path = std::path::Path::new(folder);
-        if !path.exists() || !path.is_dir() {
-            return Err(AppError(anyhow::anyhow!(
-                "Folder does not exist or is not accessible: {}",
-                folder
-            )));
-        }
+        let path = validate_index_folder_path(folder)?;
         // Disallow indexing the server's own library_root to avoid double work
         let lib_root = state
             .library_root
             .canonicalize()
             .unwrap_or(state.library_root.clone());
-        let cand = path.canonicalize().unwrap_or(path.to_path_buf());
+        let cand = path.canonicalize().unwrap_or(path);
         if cand.starts_with(&lib_root) {
             return Err(AppError(anyhow::anyhow!(
                 "Cannot index internal library folder: {}",
@@ -5264,10 +5299,11 @@ pub struct RefreshRequest {
 #[cfg(test)]
 mod tests {
     use super::{
-        count_image_files, looks_like_windows_drive_path, normalize_folder_input,
-        normalize_windows_path_separators,
+        count_image_files, folder_access_error_message, looks_like_windows_drive_path,
+        normalize_folder_input, normalize_windows_path_separators, validate_index_folder_path,
     };
     use std::fs;
+    use std::io;
     use std::path::PathBuf;
 
     fn make_temp_dir() -> PathBuf {
@@ -5330,5 +5366,32 @@ mod tests {
                 "//192.168.0.245/DriveG/BA/phototest"
             );
         }
+    }
+
+    #[test]
+    fn folder_access_error_explains_windows_paths_on_non_windows_servers() {
+        if cfg!(windows) {
+            return;
+        }
+        let err = io::Error::new(io::ErrorKind::NotFound, "not found");
+        let message = folder_access_error_message("C:\\Users\\ybzhe\\Pictures\\Screenshots", &err);
+
+        assert!(message.contains("OpenPhotos server"));
+        assert!(message.contains("not running as a native Windows process"));
+        assert!(message.contains("Linux/container path"));
+    }
+
+    #[test]
+    fn folder_validation_rejects_files() {
+        let dir = make_temp_dir();
+        let path = dir.join("photo.jpg");
+        fs::write(&path, b"not-a-real-image").expect("write file");
+
+        let err = validate_index_folder_path(path.to_str().expect("path utf8"))
+            .expect_err("file should not validate as folder")
+            .to_string();
+        assert!(err.contains("not a directory"));
+
+        let _ = fs::remove_dir_all(dir);
     }
 }
