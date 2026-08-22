@@ -965,6 +965,31 @@ pub struct UpdateFoldersRequest {
     pub preserve_tree_path: Option<bool>,
 }
 
+fn normalize_folder_input(folder: &str) -> String {
+    let trimmed = folder.trim();
+    if cfg!(windows) {
+        normalize_windows_path_separators(trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn normalize_windows_path_separators(path: &str) -> String {
+    if path.starts_with("//") || path.starts_with("\\\\") || looks_like_windows_drive_path(path) {
+        path.replace('/', "\\")
+    } else {
+        path.to_string()
+    }
+}
+
+fn looks_like_windows_drive_path(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.len() >= 3
+        && bytes[1] == b':'
+        && bytes[0].is_ascii_alphabetic()
+        && matches!(bytes[2], b'/' | b'\\')
+}
+
 #[instrument(skip(state))]
 pub async fn get_user_folders(
     State(state): State<Arc<AppState>>,
@@ -1035,9 +1060,14 @@ pub async fn update_user_folders(
 ) -> Result<impl IntoResponse, AppError> {
     let user_id = extract_user_id(&state, &headers).await?;
     ensure_not_demo_mutation(&state, &user_id, "PUT /api/settings/folders").await?;
+    let folders: Vec<String> = request
+        .folders
+        .iter()
+        .map(|folder| normalize_folder_input(folder))
+        .collect();
 
     // Validate folder paths exist and are accessible
-    for folder in &request.folders {
+    for folder in &folders {
         let path = std::path::Path::new(folder);
         if !path.exists() || !path.is_dir() {
             return Err(AppError(anyhow::anyhow!(
@@ -1060,7 +1090,7 @@ pub async fn update_user_folders(
     }
 
     // Update user's folders in database
-    let folders_str = request.folders.join(",");
+    let folders_str = folders.join(",");
     if let Some(pg) = &state.pg_client {
         let _ = pg
             .execute(
@@ -1093,7 +1123,7 @@ pub async fn update_user_folders(
         return Ok(Json(json!({"message":"Folders updated"})));
     }
     // DuckDB mode: SSE reindex
-    let folders_clone = request.folders.clone();
+    let folders_clone = folders.clone();
     let album_opts = AlbumIndexOptions {
         album_parent_id: request.album_parent_id,
         preserve_tree_path: request.preserve_tree_path.unwrap_or(false),
@@ -1110,7 +1140,7 @@ pub async fn update_user_folders(
         .to_string(),
     );
 
-    if !request.folders.is_empty() {
+    if !folders.is_empty() {
         let state_clone = state.clone();
         let user_id_clone = user_id.clone();
         let job_id_for_task = job_id.clone();
@@ -1168,7 +1198,7 @@ pub async fn update_user_folders(
 
     Ok(Json(json!({
         "message": "Folders updated successfully, indexing started",
-        "folders": request.folders,
+        "folders": folders,
         "indexed": true,
         "job_id": job_id
     })))
@@ -5233,7 +5263,10 @@ pub struct RefreshRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::count_image_files;
+    use super::{
+        count_image_files, looks_like_windows_drive_path, normalize_folder_input,
+        normalize_windows_path_separators,
+    };
     use std::fs;
     use std::path::PathBuf;
 
@@ -5266,5 +5299,36 @@ mod tests {
         assert_eq!(total, 0);
 
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn windows_path_separator_normalization_handles_unc_and_drive_paths() {
+        assert_eq!(
+            normalize_windows_path_separators("//192.168.0.245/DriveG/BA/phototest"),
+            "\\\\192.168.0.245\\DriveG\\BA\\phototest"
+        );
+        assert_eq!(
+            normalize_windows_path_separators("G:/BA/phototest"),
+            "G:\\BA\\phototest"
+        );
+    }
+
+    #[test]
+    fn windows_drive_path_detection_requires_root_separator() {
+        assert!(looks_like_windows_drive_path("G:\\BA\\phototest"));
+        assert!(looks_like_windows_drive_path("G:/BA/phototest"));
+        assert!(!looks_like_windows_drive_path("not:a:path"));
+        assert!(!looks_like_windows_drive_path("/mnt/driveg"));
+    }
+
+    #[test]
+    fn folder_input_trims_without_rewriting_unix_paths_on_unix_builds() {
+        assert_eq!(normalize_folder_input("  /mnt/photos  "), "/mnt/photos");
+        if !cfg!(windows) {
+            assert_eq!(
+                normalize_folder_input("  //192.168.0.245/DriveG/BA/phototest  "),
+                "//192.168.0.245/DriveG/BA/phototest"
+            );
+        }
     }
 }

@@ -1319,11 +1319,14 @@ export default function SettingsPage() {
                 <Label htmlFor="newFolder">{tr('settings.indexed_folders.add_path_label')}</Label>
                 <Input
                   id="newFolder"
-                  placeholder="/path/to/your/photos"
+                  placeholder={tr('settings.indexed_folders.path_placeholder')}
                   value={newFolder}
                   onChange={(e) => setNewFolder(e.target.value)}
                   onKeyPress={(e) => e.key === 'Enter' && addFolder()}
                 />
+                <p className="text-xs text-muted-foreground mt-1">
+                  {tr('settings.indexed_folders.path_hint')}
+                </p>
               </div>
               <div className="flex items-end">
                 <Button onClick={addFolder} disabled={!newFolder.trim()}>
@@ -1393,7 +1396,7 @@ export default function SettingsPage() {
                 disabled={isSaving || folders.length === 0}
                 className="w-full"
               >
-                {isSaving ? 'Saving...' : 'Save & Start Indexing'}
+                {isSaving ? tr('settings.indexed_folders.saving') : tr('settings.indexed_folders.save_start_indexing')}
               </Button>
             </div>
           </CardContent>
